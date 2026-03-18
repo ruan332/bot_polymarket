@@ -7,7 +7,7 @@ from core.app_context import AppContext
 from core.exceptions import InvalidModelResponseError, RiskBlockedError
 from core.market_connector import MarketConnector
 from core.risk_engine import RiskEngine
-from core.schemas import SignalPayload
+from core.schemas import MarketSnapshotPayload, SignalPayload
 from core.utils import parse_json_object, sanitize_text
 
 
@@ -27,6 +27,22 @@ class ClaudeAgent(BaseAgent):
     async def tick(self) -> None:
         agent_cfg = self.context.agents_config.agents[self.name]
         markets = await self.connector.get_active_markets(limit=agent_cfg.scan_limit or 20)
+        await self.context.repository.record_market_snapshots(
+            [
+                MarketSnapshotPayload(
+                    market_id=str(market["id"]),
+                    question=str(market["question"]),
+                    token_id_yes=str(market["token_id_yes"]),
+                    token_id_no=str(market["token_id_no"]),
+                    price_yes=float(market["price_yes"]),
+                    price_no=float(market["price_no"]),
+                    volume_24h=float(market["volume_24h"]),
+                    metadata={"source": "gamma", "clob_token_ids": market.get("clob_token_ids", [])},
+                )
+                for market in markets
+            ]
+        )
+        await self.context.repository.record_equity_snapshot(source="scan_cycle")
         for market in markets:
             signal = await self.calc_edge(market)
             if signal is None:

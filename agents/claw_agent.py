@@ -90,6 +90,7 @@ Signal:
             signal_id=signal.signal_id,
             market_id=signal.market_id,
             token_id=signal.token_id,
+            market_question=signal.market_question,
             direction=signal.direction,
             size=size,
             price_limit=price_limit,

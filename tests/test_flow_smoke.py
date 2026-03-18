@@ -83,6 +83,8 @@ class FakeRepository:
         self.llm_calls: list[dict] = []
         self.heartbeats: dict[str, dict] = {}
         self.positions: dict[str, dict] = {}
+        self.market_snapshots: list[dict] = []
+        self.equity_history: list[dict] = []
 
     async def record_signal(self, signal_id: str, event_type: str, payload: dict) -> None:
         self.signals.append(payload)
@@ -95,6 +97,8 @@ class FakeRepository:
         if status == "simulated":
             self.positions[market_id] = {
                 "market_id": market_id,
+                "token_id": payload["token_id"],
+                "market_question": payload.get("market_question", ""),
                 "direction": payload["direction"],
                 "size": payload["size"],
                 "average_price": payload["price_limit"],
@@ -110,17 +114,25 @@ class FakeRepository:
     async def upsert_heartbeat(self, heartbeat) -> None:
         self.heartbeats[heartbeat.agent] = heartbeat.model_dump()
 
-    async def record_equity_snapshot(self) -> None:
-        return None
+    async def record_equity_snapshot(self, source: str = "system") -> None:
+        portfolio = await self.get_portfolio_summary()
+        self.equity_history.append({**portfolio.model_dump(), "source": source, "created_at": "2026-03-18T12:00:00Z"})
+
+    async def record_market_snapshots(self, snapshots) -> None:
+        self.market_snapshots.extend(snapshot.model_dump(mode="json") for snapshot in snapshots)
 
     async def get_portfolio_summary(self) -> PortfolioSummary:
         total_exposure = sum(position["exposure_usd"] for position in self.positions.values())
+        current_market_value = total_exposure
         return PortfolioSummary(
             available_balance=max(self.bankroll - total_exposure, 0.0),
             total_exposure=total_exposure,
+            current_market_value=current_market_value,
+            total_equity=max(self.bankroll - total_exposure, 0.0) + current_market_value,
+            total_pnl=current_market_value - total_exposure,
             open_positions=len(self.positions),
             realized_pnl=0.0,
-            unrealized_pnl=0.0,
+            unrealized_pnl=current_market_value - total_exposure,
         )
 
     async def get_recent_signals(self, limit: int = 20):
@@ -134,6 +146,12 @@ class FakeRepository:
 
     async def get_recent_decisions(self, limit: int = 20):
         return list(reversed(self.decisions[-limit:]))
+
+    async def get_equity_history(self, limit: int = 100):
+        return list(self.equity_history[-limit:])
+
+    async def get_open_positions(self):
+        return list(self.positions.values())
 
     async def get_agent_status(self):
         return list(self.heartbeats.values())
@@ -238,6 +256,7 @@ async def test_signal_review_execute_flow_smoke(monkeypatch) -> None:
 
     await claude.tick()
     assert len(context.repository.signals) == 1
+    assert len(context.repository.market_snapshots) == 1
     assert len(context.bus.streams["signals:created"]) == 1
 
     await codex.tick()
@@ -248,6 +267,7 @@ async def test_signal_review_execute_flow_smoke(monkeypatch) -> None:
     assert len(context.repository.orders) == 1
     assert context.repository.orders[0]["status"] == "simulated"
     assert context.repository.orders[0]["token_id"] == "token-yes-1"
+    assert context.repository.orders[0]["market_question"] == "Will BTC be above 100k?"
     portfolio = await context.repository.get_portfolio_summary()
     assert portfolio.open_positions == 1
     assert portfolio.total_exposure > 0
@@ -304,6 +324,8 @@ def test_api_smoke(monkeypatch) -> None:
         assert client.get("/signals/recent").json()[0]["signal_id"] == "sig-1"
         assert client.get("/orders/recent").json()[0]["order_id"] == "ord-1"
         assert client.get("/risk-events/recent").status_code == 200
+        assert client.get("/portfolio/equity-history").status_code == 200
+        assert client.get("/portfolio/positions").status_code == 200
         assert client.get("/metrics/overview").json()["signals"] == 1
         response = client.post("/agents/swap-model", json={"agent": "claude", "model": "claude-haiku-4-5"})
         assert response.status_code == 200

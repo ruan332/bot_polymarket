@@ -93,6 +93,16 @@ async def portfolio_summary() -> dict[str, object]:
     return (await get_context().repository.get_portfolio_summary()).model_dump()
 
 
+@app.get("/portfolio/positions")
+async def portfolio_positions() -> list[dict[str, object]]:
+    return await get_context().repository.get_open_positions()
+
+
+@app.get("/portfolio/equity-history")
+async def portfolio_equity_history(limit: int = 100) -> list[dict[str, object]]:
+    return await get_context().repository.get_equity_history(limit=limit)
+
+
 @app.get("/metrics/overview")
 async def metrics_overview() -> dict[str, object]:
     return await get_context().repository.metrics_overview()

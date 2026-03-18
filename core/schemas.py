@@ -53,6 +53,7 @@ class PaperOrderPayload(BaseModel):
     signal_id: str
     market_id: str
     token_id: str
+    market_question: str = ""
     direction: Literal["YES", "NO"]
     size: int
     price_limit: float
@@ -81,11 +82,38 @@ class AgentHeartbeat(BaseModel):
 
 
 class PortfolioSummary(BaseModel):
+    available_balance: float = 0.0
+    total_exposure: float = 0.0
+    current_market_value: float = 0.0
+    total_equity: float = 0.0
+    total_pnl: float = 0.0
+    open_positions: int = 0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+
+
+class MarketSnapshotPayload(BaseModel):
+    market_id: str
+    question: str
+    token_id_yes: str
+    token_id_no: str
+    price_yes: float
+    price_no: float
+    volume_24h: float = 0.0
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EquitySnapshotPoint(BaseModel):
+    created_at: datetime
     available_balance: float
     total_exposure: float
-    open_positions: int
+    current_market_value: float
+    total_equity: float
+    total_pnl: float
     realized_pnl: float
     unrealized_pnl: float
+    source: str = "system"
 
 
 class ModelSwapRequest(BaseModel):

@@ -31,6 +31,7 @@ type Order = {
   order_id: string;
   signal_id: string;
   market_id: string;
+  market_question?: string;
   direction: "YES" | "NO";
   size: number;
   price_limit: number;
@@ -47,8 +48,28 @@ type RiskEvent = {
 type PortfolioSummary = {
   available_balance: number;
   total_exposure: number;
+  current_market_value: number;
+  total_equity: number;
+  total_pnl: number;
   open_positions: number;
   realized_pnl: number;
+  unrealized_pnl: number;
+};
+
+type EquityPoint = {
+  created_at: string;
+  total_equity: number;
+  total_pnl: number;
+};
+
+type Position = {
+  market_id: string;
+  market_question: string;
+  direction: "YES" | "NO";
+  size: number;
+  average_price: number;
+  current_price: number;
+  current_value_usd: number;
   unrealized_pnl: number;
 };
 
@@ -68,6 +89,8 @@ type DashboardState = {
   riskEvents: RiskEvent[];
   metrics: MetricsOverview | null;
   portfolio: PortfolioSummary | null;
+  equity: EquityPoint[];
+  positions: Position[];
 };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
@@ -93,6 +116,8 @@ export function DashboardClient() {
     riskEvents: [],
     metrics: null,
     portfolio: null,
+    equity: [],
+    positions: [],
   });
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string>("waiting");
@@ -102,7 +127,7 @@ export function DashboardClient() {
 
     async function load() {
       try {
-        const [statuses, costs, signals, orders, riskEvents, metrics, portfolio] = await Promise.all([
+        const [statuses, costs, signals, orders, riskEvents, metrics, portfolio, equity, positions] = await Promise.all([
           getJson<Record<string, AgentStatus>>("/agents/status"),
           getJson<CostSummary[]>("/costs/daily"),
           getJson<Signal[]>("/signals/recent"),
@@ -110,11 +135,13 @@ export function DashboardClient() {
           getJson<RiskEvent[]>("/risk-events/recent"),
           getJson<MetricsOverview>("/metrics/overview"),
           getJson<PortfolioSummary>("/portfolio/summary"),
+          getJson<EquityPoint[]>("/portfolio/equity-history?limit=120"),
+          getJson<Position[]>("/portfolio/positions"),
         ]);
         if (!active) {
           return;
         }
-        setState({ statuses, costs, signals, orders, riskEvents, metrics, portfolio });
+        setState({ statuses, costs, signals, orders, riskEvents, metrics, portfolio, equity, positions });
         setError(null);
         setLastUpdated(new Date().toLocaleTimeString());
       } catch (loadError) {
@@ -183,10 +210,26 @@ export function DashboardClient() {
           </div>
         </article>
         <article className="panel span-3">
-          <h2>Pipeline Events</h2>
+          <h2>Total Equity</h2>
           <div className="metric">
-            <strong>{state.metrics?.signals ?? 0}</strong>
-            <span>signals emitted so far</span>
+            <strong>${state.portfolio?.total_equity.toFixed(2) ?? "0.00"}</strong>
+            <span>cash plus marked positions</span>
+          </div>
+        </article>
+
+        <article className="panel span-3">
+          <h2>Total PnL</h2>
+          <div className="metric">
+            <strong>${state.portfolio?.total_pnl.toFixed(2) ?? "0.00"}</strong>
+            <span>mark-to-market performance</span>
+          </div>
+        </article>
+
+        <article className="panel span-3">
+          <h2>Unrealized PnL</h2>
+          <div className="metric">
+            <strong>${state.portfolio?.unrealized_pnl.toFixed(2) ?? "0.00"}</strong>
+            <span>open position drift</span>
           </div>
         </article>
 
@@ -208,7 +251,7 @@ export function DashboardClient() {
           </div>
         </article>
 
-        <OperationsCharts costs={state.costs} throughput={throughput} />
+        <OperationsCharts costs={state.costs} throughput={throughput} equity={state.equity} />
 
         <article className="panel span-6">
           <h3>Recent Signals</h3>
@@ -240,7 +283,7 @@ export function DashboardClient() {
                 <span className="mono">
                   {order.size} @ {order.price_limit.toFixed(3)}
                 </span>
-                <span className="mono muted">{order.market_id}</span>
+                <span className="mono muted">{order.market_question || order.market_id}</span>
               </div>
             ))}
           </div>
@@ -257,6 +300,28 @@ export function DashboardClient() {
                 </div>
                 <span>{event.reason}</span>
                 <span className="mono muted">{new Date(event.created_at).toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </article>
+
+        <article className="panel span-12">
+          <h3>Open Positions</h3>
+          <div className="event-list">
+            {state.positions.slice(0, 8).map((position) => (
+              <div key={`${position.market_id}-${position.direction}`} className="event-row">
+                <div className="event-top">
+                  <strong>
+                    {position.direction} {position.market_question || position.market_id}
+                  </strong>
+                  <span className={position.unrealized_pnl >= 0 ? "approved mono" : "blocked mono"}>
+                    ${position.unrealized_pnl.toFixed(2)}
+                  </span>
+                </div>
+                <span className="mono">
+                  {position.size} @ {position.average_price.toFixed(3)} {"->"} {position.current_price.toFixed(3)}
+                </span>
+                <span className="mono muted">${position.current_value_usd.toFixed(2)} marked value</span>
               </div>
             ))}
           </div>

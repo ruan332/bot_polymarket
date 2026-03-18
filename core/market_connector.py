@@ -41,10 +41,14 @@ class MarketConnector:
         markets = data if isinstance(data, list) else data.get("data", [])
         normalized: list[dict[str, Any]] = []
         for market in markets:
-            prices = market.get("outcomePrices") or [market.get("price", 0.5), 1 - float(market.get("price", 0.5))]
-            if isinstance(prices[0], str):
-                prices = [float(price) for price in prices]
-            clob_token_ids = market.get("clobTokenIds") or []
+            prices = self._coerce_sequence(market.get("outcomePrices"))
+            if not prices:
+                last_price = self._coerce_float(market.get("price"), 0.5)
+                prices = [last_price, round(1 - last_price, 4)]
+            prices = [self._coerce_float(price, 0.0) for price in prices]
+            if len(prices) == 1:
+                prices.append(round(1 - prices[0], 4))
+            clob_token_ids = [str(token_id) for token_id in self._coerce_sequence(market.get("clobTokenIds"))]
             market_id = str(market.get("id") or market.get("conditionId") or (clob_token_ids[0] if clob_token_ids else ""))
             normalized.append(
                 {
@@ -53,7 +57,7 @@ class MarketConnector:
                     "description": market.get("description", ""),
                     "price_yes": float(prices[0]),
                     "price_no": float(prices[1]) if len(prices) > 1 else round(1 - float(prices[0]), 4),
-                    "volume_24h": float(market.get("volume24hr") or market.get("volume24hrClob") or 0.0),
+                    "volume_24h": self._coerce_float(market.get("volume24hr") or market.get("volume24hrClob"), 0.0),
                     "clob_token_ids": clob_token_ids,
                     "token_id_yes": str(clob_token_ids[0]) if len(clob_token_ids) > 0 else str(market_id),
                     "token_id_no": str(clob_token_ids[1]) if len(clob_token_ids) > 1 else str(market_id),
@@ -148,3 +152,45 @@ class MarketConnector:
                 api_passphrase=settings.polymarket_api_passphrase,
             )
         return base_client.create_or_derive_api_creds()
+
+    @staticmethod
+    def _coerce_sequence(value: Any) -> list[Any]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, tuple):
+            return list(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+            return [item.strip() for item in stripped.split(",") if item.strip()]
+        return [value]
+
+    @staticmethod
+    def _coerce_float(value: Any, default: float = 0.0) -> float:
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return default
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list) and parsed:
+                        return MarketConnector._coerce_float(parsed[0], default)
+                except json.JSONDecodeError:
+                    return default
+            return float(stripped)
+        return float(value)

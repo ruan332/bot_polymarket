@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-
 import pytest
 
 from core.market_connector import MarketConnector
@@ -90,3 +89,53 @@ async def test_place_order_uses_py_clob_client_when_live_enabled(monkeypatch) ->
     assert created["order_args"].token_id == "token-1"
     assert created["order_args"].side == "BUY"
     assert created["post"]["signed_order"]["signed"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_active_markets_parses_json_encoded_arrays(monkeypatch) -> None:
+    payload = [
+        {
+            "id": "market-1",
+            "question": "Will BTC be above 100k?",
+            "description": "test",
+            "outcomePrices": "[\"0.41\", \"0.59\"]",
+            "clobTokenIds": "[\"token-yes-1\", \"token-no-1\"]",
+            "volume24hr": "12345.67",
+        }
+    ]
+
+    class FakeResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return payload
+
+    class FakeSession:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+        @property
+        def closed(self):
+            return False
+
+    connector = MarketConnector(FakeContext(live_trading=False))
+
+    async def fake_client():
+        return FakeSession()
+
+    monkeypatch.setattr(connector, "_client", fake_client)
+
+    markets = await connector.get_active_markets(limit=1)
+
+    assert markets[0]["price_yes"] == 0.41
+    assert markets[0]["price_no"] == 0.59
+    assert markets[0]["token_id_yes"] == "token-yes-1"
+    assert markets[0]["token_id_no"] == "token-no-1"
+    assert markets[0]["volume_24h"] == 12345.67

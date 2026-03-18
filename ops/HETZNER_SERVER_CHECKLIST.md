@@ -7,8 +7,8 @@
 - snapshot da VPS habilitado se fizer parte da sua rotina
 
 ## Rede
-- IP publico fixo da VPS
-- dominio apontado para o IP
+- IP publico fixo da VPS: `204.168.139.205`
+- dominio opcional no primeiro deploy; inicialmente pode operar por IP
 - portas liberadas:
   - `22/tcp`
   - `80/tcp`
@@ -27,7 +27,7 @@
 - firewall ativo
 
 ## Repositorio
-- repo GitHub pronto
+- repo GitHub: `https://github.com/ruan332/bot_polymarket`
 - branch de deploy definida (`main` ou release tag)
 - secrets do GitHub Actions configurados se usar deploy automatizado:
   - `VPS_HOST`
@@ -42,8 +42,12 @@
   - `LIVE_TRADING=false`
 
 ## Pos-deploy
-- `https://SEU_DOMINIO/` abre dashboard
-- `https://SEU_DOMINIO/api/healthz` responde `{"status":"ok"}`
+- no primeiro deploy por IP:
+  - `http://204.168.139.205/` abre dashboard
+  - `http://204.168.139.205/api/healthz` responde `{"status":"ok"}`
+- depois, quando houver dominio apontado:
+  - `https://SEU_DOMINIO/`
+  - `https://SEU_DOMINIO/api/healthz`
 - `docker compose -f docker-compose.prod.yml ps` sem containers reiniciando
 - logs de `api` e `agents` sem erro continuo
 

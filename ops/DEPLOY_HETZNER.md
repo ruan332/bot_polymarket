@@ -39,7 +39,9 @@ Portainer pode ser instalado depois como painel de observabilidade e operacao, m
 
 ## Passo a passo
 1. Criar a VPS na Hetzner.
-2. Apontar o dominio para o IP da VPS.
+2. VPS atual: `204.168.139.205`
+3. Repositorio: `https://github.com/ruan332/bot_polymarket`
+4. No primeiro deploy, pode usar o IP diretamente sem dominio.
 3. Acessar via SSH.
 4. Rodar:
 
@@ -53,7 +55,7 @@ chmod +x scripts/bootstrap-hetzner-ubuntu.sh
 ```bash
 sudo mkdir -p /opt/polymarket-bot
 sudo chown "$USER":"$USER" /opt/polymarket-bot
-git clone <SEU_REPO_GITHUB> /opt/polymarket-bot
+git clone https://github.com/ruan332/bot_polymarket /opt/polymarket-bot
 cd /opt/polymarket-bot
 ```
 
@@ -64,7 +66,7 @@ cd /opt/polymarket-bot
 - `POSTGRES_USER`
 - `DATABASE_URL`
 - `REDIS_URL`
-- `DOMAIN`
+- `DOMAIN=204.168.139.205` no primeiro deploy
 - `LIVE_TRADING=false` inicialmente
 - `SMOKE_TEST_MODE=false` para leitura real do Polymarket
 - se for live:
@@ -109,6 +111,10 @@ APP_DIR=/opt/polymarket-bot ./scripts/backup-postgres.sh
 2. `SMOKE_TEST_MODE=false`, `LIVE_TRADING=false`
 3. Validar mercado real em leitura
 4. So depois `LIVE_TRADING=true`
+
+## Observacao sobre IP sem dominio
+- Com `DOMAIN=204.168.139.205`, use `http://204.168.139.205`
+- HTTPS automatico do Caddy faz mais sentido depois que houver dominio real apontado para a VPS
 
 ## Observacoes Hetzner
 - Se voce usar **Volumes** separados da Hetzner para dados, backups/snapshots do servidor **nao** incluem esses Volumes.

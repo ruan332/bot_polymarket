@@ -21,11 +21,11 @@ class ModelProvider:
 
     def reload_config(self) -> None:
         agent_cfg = self.context.agents_config.agents[self.agent_name]
-        self.model = agent_cfg.model
+        self.model = self._qualify_model_name(agent_cfg.model, agent_cfg.provider)
         self.provider = agent_cfg.provider
         self.temperature = agent_cfg.temperature
         self.max_tokens = agent_cfg.max_tokens
-        self.fallback_model = agent_cfg.fallback_model
+        self.fallback_model = self._qualify_model_name(agent_cfg.fallback_model, agent_cfg.provider)
         self.daily_cost_limit = agent_cfg.daily_cost_limit_usd
 
     async def call(self, prompt: str, system: str | None = None) -> ModelResponse:
@@ -108,6 +108,15 @@ class ModelProvider:
             provider="smoke",
             fallback_used=False,
         )
+
+    @staticmethod
+    def _qualify_model_name(model: str, provider: str) -> str:
+        if "/" in model:
+            return model
+        provider_prefix = provider.strip().lower()
+        if not provider_prefix:
+            return model
+        return f"{provider_prefix}/{model}"
 
 
 def json_dumps(payload: dict[str, Any]) -> str:

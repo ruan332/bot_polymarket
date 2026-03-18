@@ -9,8 +9,8 @@ if [[ -z "$BASE_URL" ]]; then
   if [[ -n "$DOMAIN" ]]; then
     BASE_URL="https://$DOMAIN"
   else
-    echo "Use BASE_URL=http://204.168.139.205 ./scripts/post-deploy-check.sh"
-    echo "ou DOMAIN=seu-dominio ./scripts/post-deploy-check.sh"
+    echo "Use DOMAIN=bot.codifica.tec.br ./scripts/post-deploy-check.sh"
+    echo "ou BASE_URL=https://bot.codifica.tec.br ./scripts/post-deploy-check.sh"
     exit 1
   fi
 fi

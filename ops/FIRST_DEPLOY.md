@@ -20,7 +20,7 @@ nano .env
 ```
 
 Preencha no minimo:
-- `DOMAIN=204.168.139.205`
+- `DOMAIN=bot.codifica.tec.br`
 - `POSTGRES_PASSWORD`
 - `DATABASE_URL`
 - chaves de IA
@@ -37,7 +37,7 @@ APP_DIR=/opt/polymarket-bot BRANCH=main ./scripts/deploy-vps.sh
 ## 4. Verificar
 ```bash
 chmod +x scripts/post-deploy-check.sh
-BASE_URL=http://204.168.139.205 ./scripts/post-deploy-check.sh
+DOMAIN=bot.codifica.tec.br ./scripts/post-deploy-check.sh
 ```
 
 ## 5. Logs uteis
@@ -55,7 +55,9 @@ docker compose -f docker-compose.prod.yml logs -f caddy
 5. So depois considerar `LIVE_TRADING=true`
 
 ## 7. Quando adicionar dominio
-Depois que um dominio estiver apontando para `204.168.139.205`:
-- troque `DOMAIN` no `.env`
-- rode novo deploy
-- passe a validar via `https://SEU_DOMINIO`
+Neste projeto, use `bot.codifica.tec.br` desde o inicio.
+
+Antes do deploy:
+1. configure o DNS na Cloudflare conforme `ops/CLOUDFLARE_DNS.md`
+2. use `DNS only` no primeiro deploy
+3. depois que o Caddy emitir certificado e a origem responder corretamente, opcionalmente mude para `Proxied`

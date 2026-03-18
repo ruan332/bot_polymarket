@@ -41,9 +41,10 @@ Portainer pode ser instalado depois como painel de observabilidade e operacao, m
 1. Criar a VPS na Hetzner.
 2. VPS atual: `204.168.139.205`
 3. Repositorio: `https://github.com/ruan332/bot_polymarket`
-4. No primeiro deploy, pode usar o IP diretamente sem dominio.
-3. Acessar via SSH.
-4. Rodar:
+4. Dominio alvo: `bot.codifica.tec.br`
+5. Configurar o DNS na Cloudflare antes do deploy, inicialmente em `DNS only`
+6. Acessar via SSH.
+7. Rodar:
 
 ```bash
 chmod +x scripts/bootstrap-hetzner-ubuntu.sh
@@ -66,7 +67,7 @@ cd /opt/polymarket-bot
 - `POSTGRES_USER`
 - `DATABASE_URL`
 - `REDIS_URL`
-- `DOMAIN=204.168.139.205` no primeiro deploy
+- `DOMAIN=bot.codifica.tec.br`
 - `LIVE_TRADING=false` inicialmente
 - `SMOKE_TEST_MODE=false` para leitura real do Polymarket
 - se for live:
@@ -113,8 +114,26 @@ APP_DIR=/opt/polymarket-bot ./scripts/backup-postgres.sh
 4. So depois `LIVE_TRADING=true`
 
 ## Observacao sobre IP sem dominio
-- Com `DOMAIN=204.168.139.205`, use `http://204.168.139.205`
-- HTTPS automatico do Caddy faz mais sentido depois que houver dominio real apontado para a VPS
+- Para este projeto, use o subdominio `bot.codifica.tec.br`
+- Configure primeiro em Cloudflare como `DNS only`
+- Depois do certificado emitido pelo Caddy, voce pode optar por `Proxied`
+- Se usar `Proxied`, prefira `SSL/TLS = Full (strict)` na Cloudflare
+
+## Correcao via SSH
+Quando fizer ajustes no codigo e quiser aplicar na VPS:
+
+```bash
+ssh root@204.168.139.205
+cd /opt/polymarket-bot
+git status
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+APP_DIR=/opt/polymarket-bot BRANCH=main ./scripts/deploy-vps.sh
+DOMAIN=bot.codifica.tec.br ./scripts/post-deploy-check.sh
+docker compose -f docker-compose.prod.yml logs --tail=100 api
+docker compose -f docker-compose.prod.yml logs --tail=100 agents
+```
 
 ## Observacoes Hetzner
 - Se voce usar **Volumes** separados da Hetzner para dados, backups/snapshots do servidor **nao** incluem esses Volumes.

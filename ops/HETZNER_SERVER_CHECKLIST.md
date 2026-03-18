@@ -8,7 +8,9 @@
 
 ## Rede
 - IP publico fixo da VPS: `204.168.139.205`
-- dominio opcional no primeiro deploy; inicialmente pode operar por IP
+- subdominio alvo: `bot.codifica.tec.br`
+- criar o registro na Cloudflare apontando para `204.168.139.205`
+- usar `DNS only` no primeiro deploy
 - portas liberadas:
   - `22/tcp`
   - `80/tcp`
@@ -42,14 +44,11 @@
   - `LIVE_TRADING=false`
 
 ## Pos-deploy
-- no primeiro deploy por IP:
-  - `http://204.168.139.205/` abre dashboard
-  - `http://204.168.139.205/api/healthz` responde `{"status":"ok"}`
-- depois, quando houver dominio apontado:
-  - `https://SEU_DOMINIO/`
-  - `https://SEU_DOMINIO/api/healthz`
+- `https://bot.codifica.tec.br/` abre dashboard
+- `https://bot.codifica.tec.br/api/healthz` responde `{"status":"ok"}`
 - `docker compose -f docker-compose.prod.yml ps` sem containers reiniciando
 - logs de `api` e `agents` sem erro continuo
+- se optar por Cloudflare proxied depois, validar `SSL/TLS -> Full (strict)`
 
 ## Antes de live trading
 - `SMOKE_TEST_MODE=false`

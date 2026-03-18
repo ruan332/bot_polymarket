@@ -19,7 +19,7 @@ class FakeBus:
         self.streams: dict[str, list[tuple[str, dict]]] = defaultdict(list)
         self.hashes: dict[str, dict] = defaultdict(dict)
         self.config_version = 0
-        self.model_overrides: dict[str, str] = {}
+        self.runtime_overrides: dict[str, dict[str, str]] = {}
         self.published_control: list[tuple[str, dict]] = []
         self._counter = 0
 
@@ -48,14 +48,18 @@ class FakeBus:
     async def bootstrap_runtime_config(self, config) -> None:
         return None
 
-    async def get_agent_model_override(self, agent_name: str) -> str | None:
-        return self.model_overrides.get(agent_name)
+    async def get_agent_runtime_override(self, agent_name: str) -> dict[str, str] | None:
+        return self.runtime_overrides.get(agent_name)
 
     async def get_config_version(self) -> int:
         return self.config_version
 
-    async def set_agent_model(self, agent_name: str, model: str) -> int:
-        self.model_overrides[agent_name] = model
+    async def set_agent_runtime_override(self, agent_name: str, config) -> int:
+        self.runtime_overrides[agent_name] = {
+            "model": config.model,
+            "provider": config.provider,
+            "fallback_model": config.fallback_model,
+        }
         self.config_version += 1
         return self.config_version
 

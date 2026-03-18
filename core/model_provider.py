@@ -66,10 +66,16 @@ class ModelProvider:
         )
 
     async def sync_runtime_override(self) -> int:
-        override = await self.context.bus.get_agent_model_override(self.agent_name)
+        override = await self.context.bus.get_agent_runtime_override(self.agent_name)
         version = await self.context.bus.get_config_version()
         if override:
-            self.context.agents_config.agents[self.agent_name].model = override
+            agent_cfg = self.context.agents_config.agents[self.agent_name]
+            if override.get("model"):
+                agent_cfg.model = override["model"]
+            if override.get("provider"):
+                agent_cfg.provider = override["provider"]
+            if override.get("fallback_model"):
+                agent_cfg.fallback_model = override["fallback_model"]
         self.reload_config()
         return version
 

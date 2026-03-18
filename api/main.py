@@ -41,7 +41,7 @@ async def swap_model(req: ModelSwapRequest) -> dict[str, str | int]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     await context.reload_configs()
-    version = await context.bus.set_agent_model(req.agent, updated.agents[req.agent].model)
+    version = await context.bus.set_agent_runtime_override(req.agent, updated.agents[req.agent])
     await context.bus.publish_event(
         "events:control",
         {

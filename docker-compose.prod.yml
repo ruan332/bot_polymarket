@@ -33,6 +33,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    volumes:
+      - ./config:/app/config
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000
     depends_on:
       - postgres
@@ -50,6 +52,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    volumes:
+      - ./config:/app/config
     command: python run_agents.py
     depends_on:
       - postgres

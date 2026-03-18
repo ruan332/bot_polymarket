@@ -5,7 +5,7 @@ from typing import Any
 
 from redis.asyncio import Redis
 
-from core.config import AgentsConfig
+from core.config import AgentRuntimeConfig, AgentsConfig
 
 
 class RedisBus:
@@ -51,16 +51,31 @@ class RedisBus:
         exists = await self.redis.exists("runtime:agents:version")
         if exists:
             return
-        payload = {agent: cfg.model for agent, cfg in config.agents.items()}
+        payload = {
+            agent: json.dumps(
+                {
+                    "model": cfg.model,
+                    "provider": cfg.provider,
+                    "fallback_model": cfg.fallback_model,
+                }
+            )
+            for agent, cfg in config.agents.items()
+        }
         if payload:
-            await self.redis.hset("runtime:agents:models", mapping=payload)
+            await self.redis.hset("runtime:agents:config", mapping=payload)
         await self.redis.set("runtime:agents:version", 1)
 
-    async def get_agent_model_override(self, agent_name: str) -> str | None:
-        value = await self.redis.hget("runtime:agents:models", agent_name)
+    async def get_agent_runtime_override(self, agent_name: str) -> dict[str, str] | None:
+        value = await self.redis.hget("runtime:agents:config", agent_name)
         if value is None:
             return None
-        return value.decode() if isinstance(value, bytes) else str(value)
+        decoded = value.decode() if isinstance(value, bytes) else str(value)
+        payload = json.loads(decoded)
+        return {
+            "model": str(payload.get("model", "")),
+            "provider": str(payload.get("provider", "")),
+            "fallback_model": str(payload.get("fallback_model", "")),
+        }
 
     async def get_config_version(self) -> int:
         value = await self.redis.get("runtime:agents:version")
@@ -68,8 +83,18 @@ class RedisBus:
             return 0
         return int(value.decode() if isinstance(value, bytes) else value)
 
-    async def set_agent_model(self, agent_name: str, model: str) -> int:
-        await self.redis.hset("runtime:agents:models", agent_name, model)
+    async def set_agent_runtime_override(self, agent_name: str, config: AgentRuntimeConfig) -> int:
+        await self.redis.hset(
+            "runtime:agents:config",
+            agent_name,
+            json.dumps(
+                {
+                    "model": config.model,
+                    "provider": config.provider,
+                    "fallback_model": config.fallback_model,
+                }
+            ),
+        )
         return await self.redis.incr("runtime:agents:version")
 
     async def get_daily_cost(self, key: str) -> float:

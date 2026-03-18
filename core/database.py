@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import asyncpg
@@ -375,6 +375,228 @@ class TradingRepository:
             "orders": int(orders["count"] or 0),
             "risk_events": int(risk_events["count"] or 0),
             "portfolio": portfolio.model_dump(),
+        }
+
+    async def get_performance_report(self, hours: int = 24) -> dict[str, Any]:
+        window_start = datetime.now(UTC) - timedelta(hours=max(hours, 1))
+        portfolio = await self.get_portfolio_summary()
+
+        signals_count_row = await self.db.fetchrow("SELECT COUNT(*) AS count FROM signals WHERE created_at >= $1", window_start)
+        decisions_count_row = await self.db.fetchrow(
+            "SELECT COUNT(*) AS count FROM agent_decisions WHERE created_at >= $1",
+            window_start,
+        )
+        orders_count_row = await self.db.fetchrow(
+            "SELECT COUNT(*) AS count FROM paper_orders WHERE created_at >= $1",
+            window_start,
+        )
+        risk_count_row = await self.db.fetchrow(
+            "SELECT COUNT(*) AS count FROM risk_events WHERE created_at >= $1",
+            window_start,
+        )
+        signal_stats_row = await self.db.fetchrow(
+            """
+            SELECT
+                AVG((payload->>'edge')::double precision) AS avg_edge,
+                AVG((payload->>'confidence')::double precision) AS avg_confidence
+            FROM signals
+            WHERE created_at >= $1
+            """,
+            window_start,
+        )
+        order_stats_row = await self.db.fetchrow(
+            """
+            SELECT
+                COALESCE(SUM((payload->>'notional_usd')::double precision), 0) AS total_notional,
+                AVG((payload->>'notional_usd')::double precision) AS avg_notional
+            FROM paper_orders
+            WHERE created_at >= $1 AND status = 'simulated'
+            """,
+            window_start,
+        )
+        llm_cost_rows = await self.db.fetch(
+            """
+            SELECT agent, SUM(cost_usd) AS cost_usd, COUNT(*) AS calls
+            FROM llm_calls
+            WHERE created_at >= $1
+            GROUP BY agent
+            ORDER BY agent
+            """,
+            window_start,
+        )
+        risk_rows = await self.db.fetch(
+            """
+            SELECT reason, COUNT(*) AS count
+            FROM risk_events
+            WHERE created_at >= $1
+            GROUP BY reason
+            ORDER BY count DESC, reason ASC
+            LIMIT 8
+            """,
+            window_start,
+        )
+        top_market_rows = await self.db.fetch(
+            """
+            SELECT
+                market_id,
+                market_question,
+                COUNT(*) AS signal_count,
+                AVG(edge) AS avg_edge,
+                AVG(confidence) AS avg_confidence
+            FROM (
+                SELECT
+                    payload->>'market_id' AS market_id,
+                    payload->>'market_question' AS market_question,
+                    (payload->>'edge')::double precision AS edge,
+                    (payload->>'confidence')::double precision AS confidence
+                FROM signals
+                WHERE created_at >= $1
+            ) signal_data
+            GROUP BY market_id, market_question
+            ORDER BY signal_count DESC, avg_edge DESC
+            LIMIT 6
+            """,
+            window_start,
+        )
+        market_order_rows = await self.db.fetch(
+            """
+            SELECT
+                payload->>'market_id' AS market_id,
+                COUNT(*) AS order_count
+            FROM paper_orders
+            WHERE created_at >= $1 AND status = 'simulated'
+            GROUP BY payload->>'market_id'
+            """,
+            window_start,
+        )
+        time_series_rows = await self.db.fetch(
+            """
+            WITH signal_counts AS (
+                SELECT date_trunc('hour', created_at) AS bucket, COUNT(*) AS signals
+                FROM signals
+                WHERE created_at >= $1
+                GROUP BY 1
+            ),
+            decision_counts AS (
+                SELECT date_trunc('hour', created_at) AS bucket, COUNT(*) AS decisions
+                FROM agent_decisions
+                WHERE created_at >= $1
+                GROUP BY 1
+            ),
+            order_counts AS (
+                SELECT date_trunc('hour', created_at) AS bucket, COUNT(*) AS orders
+                FROM paper_orders
+                WHERE created_at >= $1
+                GROUP BY 1
+            ),
+            risk_counts AS (
+                SELECT date_trunc('hour', created_at) AS bucket, COUNT(*) AS risk_events
+                FROM risk_events
+                WHERE created_at >= $1
+                GROUP BY 1
+            )
+            SELECT
+                COALESCE(s.bucket, d.bucket, o.bucket, r.bucket) AS bucket,
+                COALESCE(s.signals, 0) AS signals,
+                COALESCE(d.decisions, 0) AS decisions,
+                COALESCE(o.orders, 0) AS orders,
+                COALESCE(r.risk_events, 0) AS risk_events
+            FROM signal_counts s
+            FULL OUTER JOIN decision_counts d ON d.bucket = s.bucket
+            FULL OUTER JOIN order_counts o ON o.bucket = COALESCE(s.bucket, d.bucket)
+            FULL OUTER JOIN risk_counts r ON r.bucket = COALESCE(s.bucket, d.bucket, o.bucket)
+            ORDER BY bucket ASC
+            """,
+            window_start,
+        )
+        equity_rows = await self.db.fetch(
+            """
+            SELECT created_at, total_equity, total_pnl, unrealized_pnl, available_balance
+            FROM equity_snapshots
+            WHERE created_at >= $1
+            ORDER BY created_at ASC
+            LIMIT 240
+            """,
+            window_start,
+        )
+
+        signals = int(signals_count_row["count"] or 0) if signals_count_row else 0
+        decisions = int(decisions_count_row["count"] or 0) if decisions_count_row else 0
+        orders = int(orders_count_row["count"] or 0) if orders_count_row else 0
+        risk_events = int(risk_count_row["count"] or 0) if risk_count_row else 0
+        total_cost = sum(float(row["cost_usd"] or 0.0) for row in llm_cost_rows)
+        open_positions = await self.get_open_positions()
+        positive_positions = sum(1 for position in open_positions if float(position["unrealized_pnl"]) > 0)
+        order_count_by_market = {
+            str(row["market_id"]): int(row["order_count"] or 0)
+            for row in market_order_rows
+            if row["market_id"]
+        }
+
+        return {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "window_hours": hours,
+            "summary": {
+                "signals": signals,
+                "decisions": decisions,
+                "orders": orders,
+                "risk_events": risk_events,
+                "approval_rate": round(decisions / signals, 4) if signals else 0.0,
+                "execution_rate": round(orders / decisions, 4) if decisions else 0.0,
+                "positive_position_rate": round(positive_positions / len(open_positions), 4) if open_positions else 0.0,
+                "avg_edge": round(float(signal_stats_row["avg_edge"] or 0.0), 4) if signal_stats_row else 0.0,
+                "avg_confidence": round(float(signal_stats_row["avg_confidence"] or 0.0), 4) if signal_stats_row else 0.0,
+                "total_order_notional": round(float(order_stats_row["total_notional"] or 0.0), 4) if order_stats_row else 0.0,
+                "avg_order_notional": round(float(order_stats_row["avg_notional"] or 0.0), 4) if order_stats_row else 0.0,
+                "llm_cost_usd": round(total_cost, 4),
+                **portfolio.model_dump(),
+            },
+            "cost_by_agent": [
+                {
+                    "agent": row["agent"],
+                    "cost_usd": round(float(row["cost_usd"] or 0.0), 4),
+                    "calls": int(row["calls"] or 0),
+                }
+                for row in llm_cost_rows
+            ],
+            "risk_breakdown": [
+                {"reason": row["reason"], "count": int(row["count"] or 0)}
+                for row in risk_rows
+            ],
+            "top_markets": [
+                {
+                    "market_id": row["market_id"],
+                    "market_question": row["market_question"],
+                    "signal_count": int(row["signal_count"] or 0),
+                    "order_count": order_count_by_market.get(str(row["market_id"]), 0),
+                    "avg_edge": round(float(row["avg_edge"] or 0.0), 4),
+                    "avg_confidence": round(float(row["avg_confidence"] or 0.0), 4),
+                }
+                for row in top_market_rows
+            ],
+            "open_positions": open_positions[:8],
+            "time_series": {
+                "pipeline": [
+                    {
+                        "bucket": row["bucket"].isoformat() if row["bucket"] else "",
+                        "signals": int(row["signals"] or 0),
+                        "decisions": int(row["decisions"] or 0),
+                        "orders": int(row["orders"] or 0),
+                        "risk_events": int(row["risk_events"] or 0),
+                    }
+                    for row in time_series_rows
+                ],
+                "equity": [
+                    {
+                        "created_at": row["created_at"].isoformat(),
+                        "total_equity": round(float(row["total_equity"] or 0.0), 4),
+                        "total_pnl": round(float(row["total_pnl"] or 0.0), 4),
+                        "unrealized_pnl": round(float(row["unrealized_pnl"] or 0.0), 4),
+                        "available_balance": round(float(row["available_balance"] or 0.0), 4),
+                    }
+                    for row in equity_rows
+                ],
+            },
         }
 
     async def record_market_snapshots(self, snapshots: list[MarketSnapshotPayload]) -> None:

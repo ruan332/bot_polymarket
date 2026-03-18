@@ -120,6 +120,11 @@ async def metrics_overview() -> dict[str, object]:
     return await get_context().repository.metrics_overview()
 
 
+@app.get("/metrics/performance")
+async def performance_report(hours: int = 24) -> dict[str, object]:
+    return await get_context().repository.get_performance_report(hours=hours)
+
+
 @app.get("/risk-events/recent")
 async def recent_risk_events(limit: int = 20) -> list[dict[str, object]]:
     return await get_context().repository.get_recent_risk_events(limit=limit)

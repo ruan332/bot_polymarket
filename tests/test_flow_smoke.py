@@ -169,6 +169,32 @@ class FakeRepository:
             "portfolio": (await self.get_portfolio_summary()).model_dump(),
         }
 
+    async def get_performance_report(self, hours: int = 24):
+        return {
+            "generated_at": "2026-03-18T12:05:00Z",
+            "window_hours": hours,
+            "summary": {
+                "signals": len(self.signals),
+                "decisions": len(self.decisions),
+                "orders": len(self.orders),
+                "risk_events": len(self.risk_events),
+                "approval_rate": 1.0 if self.signals else 0.0,
+                "execution_rate": 1.0 if self.decisions else 0.0,
+                "positive_position_rate": 0.0,
+                "avg_edge": 0.22,
+                "avg_confidence": 0.77,
+                "total_order_notional": 44.0,
+                "avg_order_notional": 44.0,
+                "llm_cost_usd": 0.01,
+                **(await self.get_portfolio_summary()).model_dump(),
+            },
+            "cost_by_agent": [{"agent": "claude", "cost_usd": 0.01, "calls": 1}],
+            "risk_breakdown": [{"reason": "review rejected signal", "count": 1}],
+            "top_markets": [{"market_id": "m-1", "market_question": "Will ETH rally?", "signal_count": 1, "order_count": 1, "avg_edge": 0.22, "avg_confidence": 0.77}],
+            "open_positions": [],
+            "time_series": {"pipeline": [], "equity": []},
+        }
+
 
 class FakeContext:
     def __init__(self):
@@ -343,6 +369,7 @@ def test_api_smoke(monkeypatch) -> None:
         assert client.get("/portfolio/equity-history").status_code == 200
         assert client.get("/portfolio/positions").status_code == 200
         assert client.get("/metrics/overview").json()["signals"] == 1
+        assert client.get("/metrics/performance").json()["summary"]["signals"] == 1
         response = client.post("/agents/swap-model", json={"agent": "claude", "model": "openai/gpt-4o-mini"})
         assert response.status_code == 200
         assert response.json()["provider"] == "openai"

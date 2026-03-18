@@ -9,4 +9,3 @@ __pycache__
 dashboard/.next
 dashboard/node_modules
 tests
-scripts

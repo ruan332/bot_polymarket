@@ -36,17 +36,29 @@ async def healthz() -> dict[str, str]:
 async def swap_model(req: ModelSwapRequest) -> dict[str, str | int]:
     context = get_context()
     try:
-        update_agent_model(req.agent, req.model)
+        updated = update_agent_model(req.agent, req.model, provider=req.provider, fallback_model=req.fallback_model)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     await context.reload_configs()
-    version = await context.bus.set_agent_model(req.agent, req.model)
+    version = await context.bus.set_agent_model(req.agent, updated.agents[req.agent].model)
     await context.bus.publish_event(
         "events:control",
-        {"event_type": "agent.reload_requested", "version": "v1", "agent": req.agent, "model": req.model},
+        {
+            "event_type": "agent.reload_requested",
+            "version": "v1",
+            "agent": req.agent,
+            "model": updated.agents[req.agent].model,
+            "provider": updated.agents[req.agent].provider,
+        },
     )
-    return {"status": "ok", "agent": req.agent, "new_model": req.model, "config_version": version}
+    return {
+        "status": "ok",
+        "agent": req.agent,
+        "new_model": updated.agents[req.agent].model,
+        "provider": updated.agents[req.agent].provider,
+        "config_version": version,
+    }
 
 
 @app.get("/agents/status")

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from core.config import load_agents_config, load_risk_config, update_agent_model
+from core.config import infer_provider_from_model, load_agents_config, load_risk_config, update_agent_model
 
 
 def test_load_agents_config_reads_yaml() -> None:
@@ -25,11 +25,11 @@ def test_update_agent_model_is_atomic(tmp_path: Path) -> None:
             {
                 "agents": {
                     "claude": {
-                        "model": "claude-sonnet-4-6",
+                        "model": "claude-sonnet-4-20250514",
                         "provider": "anthropic",
                         "temperature": 0.1,
                         "max_tokens": 1000,
-                        "fallback_model": "claude-haiku-4-5",
+                        "fallback_model": "claude-3-5-haiku-20241022",
                         "daily_cost_limit_usd": 0.5,
                     }
                 }
@@ -38,7 +38,15 @@ def test_update_agent_model_is_atomic(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    updated = update_agent_model("claude", "claude-haiku-4-5", path=path)
-    assert updated.agents["claude"].model == "claude-haiku-4-5"
+    updated = update_agent_model("claude", "openai/gpt-4o-mini", path=path)
+    assert updated.agents["claude"].model == "gpt-4o-mini"
+    assert updated.agents["claude"].provider == "openai"
+    assert updated.agents["claude"].fallback_model == "gpt-4o-mini"
     reloaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert reloaded["agents"]["claude"]["model"] == "claude-haiku-4-5"
+    assert reloaded["agents"]["claude"]["model"] == "gpt-4o-mini"
+    assert reloaded["agents"]["claude"]["provider"] == "openai"
+
+
+def test_infer_provider_from_model_handles_prefixed_and_plain_models() -> None:
+    assert infer_provider_from_model("openai/gpt-4o-mini") == ("openai", "gpt-4o-mini")
+    assert infer_provider_from_model("claude-sonnet-4-20250514") == ("anthropic", "claude-sonnet-4-20250514")

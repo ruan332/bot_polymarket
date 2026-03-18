@@ -10,7 +10,7 @@ from agents.claude_agent import ClaudeAgent
 from agents.claw_agent import ClawAgent
 from agents.codex_agent import CodexAgent
 from api import main as api_main
-from core.config import load_agents_config, load_risk_config
+from core.config import infer_provider_from_model, load_agents_config, load_risk_config
 from core.schemas import ModelResponse, PortfolioSummary
 
 
@@ -317,7 +317,19 @@ def test_api_smoke(monkeypatch) -> None:
         return None
 
     monkeypatch.setattr(api_main.AppContext, "create", fake_create)
-    monkeypatch.setattr(api_main, "update_agent_model", lambda agent, model: fake_context.agents_config)
+    def fake_update(agent: str, model: str, provider: str | None = None, fallback_model: str | None = None):
+        selected_provider, normalized_model = infer_provider_from_model(model)
+        agent_cfg = fake_context.agents_config.agents[agent]
+        agent_cfg.model = normalized_model
+        agent_cfg.provider = provider or selected_provider or agent_cfg.provider
+        if fallback_model:
+            _, normalized_fallback = infer_provider_from_model(fallback_model)
+            agent_cfg.fallback_model = normalized_fallback
+        elif agent_cfg.provider == "openai":
+            agent_cfg.fallback_model = normalized_model
+        return fake_context.agents_config
+
+    monkeypatch.setattr(api_main, "update_agent_model", fake_update)
 
     with TestClient(api_main.app) as client:
         assert client.get("/agents/status").status_code == 200
@@ -327,5 +339,6 @@ def test_api_smoke(monkeypatch) -> None:
         assert client.get("/portfolio/equity-history").status_code == 200
         assert client.get("/portfolio/positions").status_code == 200
         assert client.get("/metrics/overview").json()["signals"] == 1
-        response = client.post("/agents/swap-model", json={"agent": "claude", "model": "claude-haiku-4-5"})
+        response = client.post("/agents/swap-model", json={"agent": "claude", "model": "openai/gpt-4o-mini"})
         assert response.status_code == 200
+        assert response.json()["provider"] == "openai"

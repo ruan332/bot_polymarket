@@ -119,3 +119,5 @@ class EquitySnapshotPoint(BaseModel):
 class ModelSwapRequest(BaseModel):
     agent: Literal["claude", "codex", "claw"]
     model: str
+    provider: str | None = None
+    fallback_model: str | None = None

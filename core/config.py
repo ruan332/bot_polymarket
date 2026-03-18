@@ -94,11 +94,42 @@ def load_risk_config(path: Path = RISK_CONFIG_PATH) -> RiskSettings:
     return RiskConfig.model_validate(_load_yaml(path)).risk
 
 
-def update_agent_model(agent_name: str, model: str, path: Path = AGENTS_CONFIG_PATH) -> AgentsConfig:
+def infer_provider_from_model(model: str) -> tuple[str | None, str]:
+    raw_model = model.strip()
+    if "/" in raw_model:
+        provider, model_name = raw_model.split("/", 1)
+        return provider.strip().lower(), model_name.strip()
+    lowered = raw_model.lower()
+    if lowered.startswith(("gpt-", "o1", "o3", "o4")):
+        return "openai", raw_model
+    if lowered.startswith("claude"):
+        return "anthropic", raw_model
+    if lowered.startswith("gemini") or lowered.startswith("models/gemini"):
+        return "google", raw_model
+    return None, raw_model
+
+
+def update_agent_model(
+    agent_name: str,
+    model: str,
+    provider: str | None = None,
+    fallback_model: str | None = None,
+    path: Path = AGENTS_CONFIG_PATH,
+) -> AgentsConfig:
     payload = _load_yaml(path)
     if agent_name not in payload.get("agents", {}):
         raise KeyError(f"unknown agent: {agent_name}")
-    payload["agents"][agent_name]["model"] = model
+    previous_provider = str(payload["agents"][agent_name].get("provider", "")).strip().lower()
+    inferred_provider, normalized_model = infer_provider_from_model(model)
+    selected_provider = (provider or inferred_provider or payload["agents"][agent_name].get("provider", "")).strip().lower()
+    payload["agents"][agent_name]["model"] = normalized_model
+    if selected_provider:
+        payload["agents"][agent_name]["provider"] = selected_provider
+    if fallback_model:
+        _, normalized_fallback = infer_provider_from_model(fallback_model)
+        payload["agents"][agent_name]["fallback_model"] = normalized_fallback
+    elif selected_provider != previous_provider:
+        payload["agents"][agent_name]["fallback_model"] = normalized_model
     with path.open("w", encoding="utf-8") as file:
         yaml.safe_dump(payload, file, sort_keys=False)
     return AgentsConfig.model_validate(payload)

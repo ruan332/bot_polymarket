@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 from abc import ABC, abstractmethod
 from datetime import datetime
 from uuid import uuid4
@@ -52,6 +53,8 @@ class BaseAgent(ABC):
         )
 
     async def on_error(self, error: Exception) -> None:
+        print(f"[{self.name}] {error}", flush=True)
+        traceback.print_exc()
         await self.context.repository.record_risk_event(
             event_id=str(uuid4()),
             agent=self.name,

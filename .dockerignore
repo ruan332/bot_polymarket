@@ -1,0 +1,12 @@
+.git
+.github
+.pytest_cache
+__pycache__
+*.pyc
+.env
+.env.local
+.local
+dashboard/.next
+dashboard/node_modules
+tests
+scripts

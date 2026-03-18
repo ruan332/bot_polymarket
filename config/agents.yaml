@@ -1,0 +1,24 @@
+agents:
+  claude:
+    model: "claude-sonnet-4-6"
+    provider: "anthropic"
+    temperature: 0.1
+    max_tokens: 1000
+    fallback_model: "claude-haiku-4-5"
+    daily_cost_limit_usd: 0.50
+
+  codex:
+    model: "gpt-4o-mini"
+    provider: "openai"
+    temperature: 0.0
+    max_tokens: 500
+    fallback_model: "gpt-4o-mini"
+    daily_cost_limit_usd: 0.10
+
+  claw:
+    model: "claude-haiku-4-5"
+    provider: "anthropic"
+    temperature: 0.0
+    max_tokens: 300
+    fallback_model: "claude-haiku-4-5"
+    daily_cost_limit_usd: 0.20

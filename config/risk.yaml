@@ -1,0 +1,14 @@
+risk:
+  min_edge: 0.19
+  max_kelly_fraction: 0.25
+  max_single_exposure_fraction: 0.10
+  max_single_position_usd: 100.0
+  max_total_exposure_usd: 300.0
+  max_daily_spend_usd: 5.0
+  max_price_slippage: 0.03
+  max_order_price: 0.90
+  min_market_volume_24h: 10000.0
+  max_open_positions: 5
+  circuit_breaker:
+    max_consecutive_failures: 3
+    cooldown_seconds: 300

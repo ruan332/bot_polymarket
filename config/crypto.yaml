@@ -1,0 +1,42 @@
+crypto:
+  enabled: true
+  direct_coin_only: true
+  major_assets:
+    - ETH
+    - SOL
+    - XRP
+    - DOGE
+    - ADA
+    - AVAX
+    - LINK
+  scan_priority:
+    - btc
+    - major
+    - small_cap
+  btc:
+    min_edge: 0.20
+    min_confidence: 0.60
+    min_volume_24h: 50000.0
+    min_news_sources: 1
+    min_news_support_score: 0.45
+    max_news_conflict_score: 0.45
+    max_position_usd: 100.0
+    cooldown_minutes: 20
+  major:
+    min_edge: 0.23
+    min_confidence: 0.64
+    min_volume_24h: 30000.0
+    min_news_sources: 2
+    min_news_support_score: 0.60
+    max_news_conflict_score: 0.30
+    max_position_usd: 70.0
+    cooldown_minutes: 45
+  small_cap:
+    min_edge: 0.28
+    min_confidence: 0.72
+    min_volume_24h: 75000.0
+    min_news_sources: 3
+    min_news_support_score: 0.72
+    max_news_conflict_score: 0.20
+    max_position_usd: 35.0
+    cooldown_minutes: 120

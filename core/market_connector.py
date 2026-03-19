@@ -13,6 +13,8 @@ from py_clob_client.order_builder.constants import BUY
 if TYPE_CHECKING:
     from core.app_context import AppContext
 
+from core.crypto import classify_crypto_market
+
 
 class MarketConnector:
     def __init__(self, context: AppContext):
@@ -29,7 +31,7 @@ class MarketConnector:
             self.session = aiohttp.ClientSession()
         return self.session
 
-    async def get_active_markets(self, limit: int = 20) -> list[dict[str, Any]]:
+    async def get_active_markets(self, limit: int = 20, crypto_only: bool = False) -> list[dict[str, Any]]:
         session = await self._client()
         async with session.get(
             f"{self.context.settings.polymarket_gamma_url}/markets",
@@ -50,20 +52,41 @@ class MarketConnector:
                 prices.append(round(1 - prices[0], 4))
             clob_token_ids = [str(token_id) for token_id in self._coerce_sequence(market.get("clobTokenIds"))]
             market_id = str(market.get("id") or market.get("conditionId") or (clob_token_ids[0] if clob_token_ids else ""))
+            question = str(market.get("question", "Unknown market"))
+            description = str(market.get("description", ""))
+            candidate = classify_crypto_market(question, description, self.context.crypto_config)
+            if crypto_only and candidate is None:
+                continue
+            token_id_yes = str(clob_token_ids[0]) if len(clob_token_ids) > 0 else str(market_id)
+            token_id_no = str(clob_token_ids[1]) if len(clob_token_ids) > 1 else str(market_id)
+            orderbook_yes = await self.get_orderbook_summary(token_id_yes) if candidate else {}
+            orderbook_no = await self.get_orderbook_summary(token_id_no) if candidate else {}
             normalized.append(
                 {
                     "id": str(market.get("id") or market.get("conditionId") or market_id),
-                    "question": market.get("question", "Unknown market"),
-                    "description": market.get("description", ""),
+                    "question": question,
+                    "description": description,
                     "price_yes": float(prices[0]),
                     "price_no": float(prices[1]) if len(prices) > 1 else round(1 - float(prices[0]), 4),
                     "volume_24h": self._coerce_float(market.get("volume24hr") or market.get("volume24hrClob"), 0.0),
                     "clob_token_ids": clob_token_ids,
-                    "token_id_yes": str(clob_token_ids[0]) if len(clob_token_ids) > 0 else str(market_id),
-                    "token_id_no": str(clob_token_ids[1]) if len(clob_token_ids) > 1 else str(market_id),
+                    "token_id_yes": token_id_yes,
+                    "token_id_no": token_id_no,
+                    "asset_symbol": candidate.asset_symbol if candidate else "",
+                    "asset_name": candidate.asset_name if candidate else "",
+                    "crypto_tier": candidate.crypto_tier if candidate else "",
+                    "market_kind": candidate.market_kind if candidate else "",
+                    "question_type": candidate.question_type if candidate else "",
+                    "thesis_tags": candidate.thesis_tags if candidate else [],
+                    "thesis_hash": candidate.thesis_hash if candidate else "",
+                    "orderbook_summary_yes": orderbook_yes,
+                    "orderbook_summary_no": orderbook_no,
                 }
             )
-        return normalized
+        if crypto_only:
+            priority = {tier: index for index, tier in enumerate(self.context.crypto_config.scan_priority)}
+            normalized.sort(key=lambda item: (priority.get(item.get("crypto_tier", ""), 99), -(item.get("volume_24h", 0.0))))
+        return normalized[:limit]
 
     async def get_orderbook(self, token_id: str) -> dict[str, Any]:
         session = await self._client()
@@ -73,6 +96,30 @@ class MarketConnector:
         ) as response:
             response.raise_for_status()
             return await response.json()
+
+    async def get_orderbook_summary(self, token_id: str) -> dict[str, Any]:
+        try:
+            book = await self.get_orderbook(token_id)
+        except Exception:
+            return {}
+        if not isinstance(book, dict):
+            return {}
+        bids = self._normalize_levels(book.get("bids") or book.get("buy") or [], reverse=True)
+        asks = self._normalize_levels(book.get("asks") or book.get("sell") or [], reverse=False)
+        best_bid = bids[0]["price"] if bids else 0.0
+        best_ask = asks[0]["price"] if asks else 0.0
+        spread_bps = 0.0
+        if best_bid > 0 and best_ask > 0:
+            mid = (best_bid + best_ask) / 2
+            if mid > 0:
+                spread_bps = abs(best_ask - best_bid) / mid * 10000
+        return {
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread_bps": round(spread_bps, 2),
+            "bid_depth": round(sum(level["price"] * level["size"] for level in bids[:5]), 4),
+            "ask_depth": round(sum(level["price"] * level["size"] for level in asks[:5]), 4),
+        }
 
     async def place_order(
         self,
@@ -194,3 +241,22 @@ class MarketConnector:
                     return default
             return float(stripped)
         return float(value)
+
+    @classmethod
+    def _normalize_levels(cls, levels: Any, *, reverse: bool) -> list[dict[str, float]]:
+        normalized: list[dict[str, float]] = []
+        if not isinstance(levels, list):
+            return normalized
+        for level in levels:
+            if isinstance(level, dict):
+                price = cls._coerce_float(level.get("price") or level.get("p"), 0.0)
+                size = cls._coerce_float(level.get("size") or level.get("quantity") or level.get("q"), 0.0)
+            elif isinstance(level, (list, tuple)) and len(level) >= 2:
+                price = cls._coerce_float(level[0], 0.0)
+                size = cls._coerce_float(level[1], 0.0)
+            else:
+                continue
+            if price > 0 and size > 0:
+                normalized.append({"price": price, "size": size})
+        normalized.sort(key=lambda item: item["price"], reverse=reverse)
+        return normalized

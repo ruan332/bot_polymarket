@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 AGENTS_CONFIG_PATH = ROOT_DIR / "config" / "agents.yaml"
 RISK_CONFIG_PATH = ROOT_DIR / "config" / "risk.yaml"
+CRYPTO_CONFIG_PATH = ROOT_DIR / "config" / "crypto.yaml"
 
 
 class AgentRuntimeConfig(BaseModel):
@@ -30,6 +31,76 @@ class AgentsConfig(BaseModel):
     agents: dict[str, AgentRuntimeConfig]
 
 
+class CryptoTierSettings(BaseModel):
+    min_edge: float = 0.20
+    min_confidence: float = 0.60
+    min_volume_24h: float = 10000.0
+    min_news_sources: int = 1
+    min_news_support_score: float = 0.50
+    max_news_conflict_score: float = 0.35
+    max_position_usd: float = 75.0
+    cooldown_minutes: int = 30
+
+    @field_validator("min_edge", "min_confidence", "min_news_support_score", "max_news_conflict_score")
+    @classmethod
+    def validate_probability(cls, value: float) -> float:
+        if not 0 <= value <= 1:
+            raise ValueError("value must be between 0 and 1")
+        return value
+
+
+class CryptoSettings(BaseModel):
+    enabled: bool = True
+    direct_coin_only: bool = True
+    major_assets: list[str] = Field(default_factory=lambda: ["ETH", "SOL", "XRP", "DOGE"])
+    scan_priority: list[Literal["btc", "major", "small_cap"]] = Field(
+        default_factory=lambda: ["btc", "major", "small_cap"]
+    )
+    btc: CryptoTierSettings = Field(
+        default_factory=lambda: CryptoTierSettings(
+            min_edge=0.20,
+            min_confidence=0.60,
+            min_volume_24h=50000.0,
+            min_news_sources=1,
+            min_news_support_score=0.45,
+            max_news_conflict_score=0.45,
+            max_position_usd=100.0,
+            cooldown_minutes=20,
+        )
+    )
+    major: CryptoTierSettings = Field(
+        default_factory=lambda: CryptoTierSettings(
+            min_edge=0.23,
+            min_confidence=0.64,
+            min_volume_24h=30000.0,
+            min_news_sources=2,
+            min_news_support_score=0.60,
+            max_news_conflict_score=0.30,
+            max_position_usd=70.0,
+            cooldown_minutes=45,
+        )
+    )
+    small_cap: CryptoTierSettings = Field(
+        default_factory=lambda: CryptoTierSettings(
+            min_edge=0.28,
+            min_confidence=0.72,
+            min_volume_24h=75000.0,
+            min_news_sources=3,
+            min_news_support_score=0.72,
+            max_news_conflict_score=0.20,
+            max_position_usd=35.0,
+            cooldown_minutes=120,
+        )
+    )
+
+    def tier(self, tier_name: str) -> CryptoTierSettings:
+        if tier_name == "btc":
+            return self.btc
+        if tier_name == "major":
+            return self.major
+        return self.small_cap
+
+
 class RiskSettings(BaseModel):
     min_edge: float = 0.19
     min_confidence: float = 0.55
@@ -38,11 +109,14 @@ class RiskSettings(BaseModel):
     max_single_position_usd: float = 100.0
     max_total_exposure_usd: float = 250.0
     max_daily_spend_usd: float = 5.0
+    min_market_volume_24h: float = 10000.0
+    max_order_price: float = 0.90
     max_spread_bps: int = 250
     max_slippage_bps: int = 150
     max_open_positions: int = 5
     circuit_breaker_error_threshold: int = 5
     circuit_breaker_loss_threshold_usd: float = 100.0
+    circuit_breaker_cooldown_seconds: int = 300
     default_limit_buffer_bps: int = 50
 
     @field_validator("min_edge", "min_confidence", "max_kelly_fraction", "max_single_exposure_fraction")
@@ -55,6 +129,10 @@ class RiskSettings(BaseModel):
 
 class RiskConfig(BaseModel):
     risk: RiskSettings
+
+
+class CryptoConfig(BaseModel):
+    crypto: CryptoSettings
 
 
 class AppSettings(BaseSettings):
@@ -79,6 +157,21 @@ class AppSettings(BaseSettings):
     polymarket_gamma_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_url: str = "https://clob.polymarket.com"
     polymarket_market_ws: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    news_provider_primary: Literal["marketaux", "alphavantage"] = "marketaux"
+    news_provider_fallback: Literal["marketaux", "alphavantage"] = "alphavantage"
+    news_lookback_hours: int = 24
+    news_http_timeout_seconds: int = 15
+    news_fallback_on_quota: bool = True
+    news_fallback_on_rate_limit: bool = True
+    news_fallback_on_upstream_error: bool = True
+    news_fallback_on_empty_result: bool = False
+    marketaux_api_key: str = ""
+    marketaux_base_url: str = "https://api.marketaux.com/v1/news/all"
+    marketaux_language: str = "en"
+    marketaux_limit_per_request: int = 3
+    alphavantage_api_key: str = ""
+    alphavantage_base_url: str = "https://www.alphavantage.co/query"
+    alphavantage_news_limit: int = 50
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -92,6 +185,10 @@ def load_agents_config(path: Path = AGENTS_CONFIG_PATH) -> AgentsConfig:
 
 def load_risk_config(path: Path = RISK_CONFIG_PATH) -> RiskSettings:
     return RiskConfig.model_validate(_load_yaml(path)).risk
+
+
+def load_crypto_config(path: Path = CRYPTO_CONFIG_PATH) -> CryptoSettings:
+    return CryptoConfig.model_validate(_load_yaml(path)).crypto
 
 
 def infer_provider_from_model(model: str) -> tuple[str | None, str]:

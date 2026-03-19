@@ -6,7 +6,7 @@ from typing import Any
 
 import asyncpg
 
-from core.schemas import AgentHeartbeat, EquitySnapshotPoint, MarketSnapshotPayload, PortfolioSummary
+from core.schemas import AgentHeartbeat, EquitySnapshotPoint, MarketSnapshotPayload, NewsValidationPayload, PortfolioSummary
 
 
 SCHEMA_SQL = """
@@ -37,9 +37,12 @@ CREATE TABLE IF NOT EXISTS paper_orders (
 );
 
 CREATE TABLE IF NOT EXISTS positions (
-    market_id TEXT PRIMARY KEY,
+    market_id TEXT NOT NULL,
+    position_key TEXT,
     token_id TEXT,
     market_question TEXT NOT NULL DEFAULT '',
+    asset_symbol TEXT NOT NULL DEFAULT '',
+    crypto_tier TEXT NOT NULL DEFAULT '',
     direction TEXT NOT NULL,
     size INTEGER NOT NULL,
     average_price DOUBLE PRECISION NOT NULL,
@@ -49,6 +52,12 @@ CREATE TABLE IF NOT EXISTS positions (
 
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS token_id TEXT;
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS market_question TEXT NOT NULL DEFAULT '';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS position_key TEXT;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS asset_symbol TEXT NOT NULL DEFAULT '';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS crypto_tier TEXT NOT NULL DEFAULT '';
+UPDATE positions SET position_key = COALESCE(NULLIF(position_key, ''), market_id || ':' || direction);
+ALTER TABLE positions DROP CONSTRAINT IF EXISTS positions_pkey;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_position_key ON positions (position_key);
 
 CREATE TABLE IF NOT EXISTS llm_calls (
     id UUID PRIMARY KEY,
@@ -111,11 +120,22 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS news_validations (
+    id UUID PRIMARY KEY,
+    signal_id UUID NOT NULL UNIQUE,
+    event_type TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_market_snapshots_market_created_at
 ON market_snapshots (market_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_equity_snapshots_created_at
 ON equity_snapshots (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_news_validations_signal_id
+ON news_validations (signal_id);
 """
 
 
@@ -171,12 +191,59 @@ class TradingRepository:
             _as_json(payload),
         )
 
+    async def has_recent_signal_duplicate(
+        self,
+        *,
+        market_id: str,
+        direction: str,
+        thesis_hash: str,
+        cooldown_minutes: int,
+    ) -> bool:
+        if cooldown_minutes <= 0:
+            return False
+        rows = await self.db.fetchrow(
+            """
+            SELECT 1
+            FROM signals
+            WHERE created_at >= $1
+              AND payload->>'market_id' = $2
+              AND payload->>'direction' = $3
+              AND payload->>'thesis_hash' = $4
+            LIMIT 1
+            """,
+            datetime.now(UTC) - timedelta(minutes=cooldown_minutes),
+            market_id,
+            direction,
+            thesis_hash,
+        )
+        return rows is not None
+
     async def record_decision(self, decision_id: str, signal_id: str, event_type: str, payload: dict[str, Any]) -> None:
         await self.db.execute(
             "INSERT INTO agent_decisions (id, signal_id, event_type, payload) VALUES ($1::uuid, $2::uuid, $3, $4::jsonb)",
             decision_id,
             signal_id,
             event_type,
+            _as_json(payload),
+        )
+
+    async def record_news_validation(self, validation: NewsValidationPayload) -> None:
+        await self.db.execute(
+            "INSERT INTO news_validations (id, signal_id, event_type, payload) VALUES ($1::uuid, $2::uuid, $3, $4::jsonb)",
+            validation.validation_id,
+            validation.signal_id,
+            validation.event_type,
+            _as_json(validation.model_dump(mode="json")),
+        )
+
+    async def attach_news_validation(self, signal_id: str, payload: dict[str, Any]) -> None:
+        await self.db.execute(
+            """
+            UPDATE signals
+            SET payload = jsonb_set(payload, '{news_validation}', $2::jsonb, true)
+            WHERE id = $1::uuid
+            """,
+            signal_id,
             _as_json(payload),
         )
 
@@ -194,6 +261,8 @@ class TradingRepository:
                 market_id=market_id,
                 token_id=str(payload.get("token_id", "")),
                 market_question=str(payload.get("market_question", "")),
+                asset_symbol=str(payload.get("asset_symbol", "")),
+                crypto_tier=str(payload.get("crypto_tier", "")),
                 direction=payload["direction"],
                 size=payload["size"],
                 average_price=payload["price_limit"],
@@ -293,6 +362,8 @@ class TradingRepository:
                 market_id,
                 token_id,
                 market_question,
+                asset_symbol,
+                crypto_tier,
                 direction,
                 size,
                 average_price,
@@ -333,17 +404,32 @@ class TradingRepository:
             unrealized_pnl=unrealized_pnl,
         )
 
-    async def get_recent_signals(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = await self.db.fetch("SELECT payload, created_at FROM signals ORDER BY created_at DESC LIMIT $1", limit)
-        return [self._decode_record(row) for row in rows]
+    async def get_recent_signals(
+        self,
+        limit: int = 20,
+        *,
+        asset: str | None = None,
+        tier: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return await self._recent_payloads("signals", limit=limit, asset=asset, tier=tier)
 
-    async def get_recent_decisions(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = await self.db.fetch("SELECT payload, created_at FROM agent_decisions ORDER BY created_at DESC LIMIT $1", limit)
-        return [self._decode_record(row) for row in rows]
+    async def get_recent_decisions(
+        self,
+        limit: int = 20,
+        *,
+        asset: str | None = None,
+        tier: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return await self._recent_payloads("agent_decisions", limit=limit, asset=asset, tier=tier)
 
-    async def get_recent_orders(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = await self.db.fetch("SELECT payload, created_at FROM paper_orders ORDER BY created_at DESC LIMIT $1", limit)
-        return [self._decode_record(row) for row in rows]
+    async def get_recent_orders(
+        self,
+        limit: int = 20,
+        *,
+        asset: str | None = None,
+        tier: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return await self._recent_payloads("paper_orders", limit=limit, asset=asset, tier=tier)
 
     async def get_recent_risk_events(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = await self.db.fetch("SELECT payload, created_at FROM risk_events ORDER BY created_at DESC LIMIT $1", limit)
@@ -377,41 +463,26 @@ class TradingRepository:
             "portfolio": portfolio.model_dump(),
         }
 
-    async def get_performance_report(self, hours: int = 24) -> dict[str, Any]:
+    async def get_performance_report(
+        self,
+        hours: int = 24,
+        *,
+        asset: str | None = None,
+        tier: str | None = None,
+    ) -> dict[str, Any]:
         window_start = datetime.now(UTC) - timedelta(hours=max(hours, 1))
         portfolio = await self.get_portfolio_summary()
-
-        signals_count_row = await self.db.fetchrow("SELECT COUNT(*) AS count FROM signals WHERE created_at >= $1", window_start)
-        decisions_count_row = await self.db.fetchrow(
-            "SELECT COUNT(*) AS count FROM agent_decisions WHERE created_at >= $1",
+        signal_rows = await self.db.fetch("SELECT payload, created_at FROM signals WHERE created_at >= $1 ORDER BY created_at ASC", window_start)
+        decision_rows = await self.db.fetch(
+            "SELECT payload, created_at FROM agent_decisions WHERE created_at >= $1 ORDER BY created_at ASC",
             window_start,
         )
-        orders_count_row = await self.db.fetchrow(
-            "SELECT COUNT(*) AS count FROM paper_orders WHERE created_at >= $1",
+        order_rows = await self.db.fetch(
+            "SELECT payload, created_at FROM paper_orders WHERE created_at >= $1 ORDER BY created_at ASC",
             window_start,
         )
-        risk_count_row = await self.db.fetchrow(
-            "SELECT COUNT(*) AS count FROM risk_events WHERE created_at >= $1",
-            window_start,
-        )
-        signal_stats_row = await self.db.fetchrow(
-            """
-            SELECT
-                AVG((payload->>'edge')::double precision) AS avg_edge,
-                AVG((payload->>'confidence')::double precision) AS avg_confidence
-            FROM signals
-            WHERE created_at >= $1
-            """,
-            window_start,
-        )
-        order_stats_row = await self.db.fetchrow(
-            """
-            SELECT
-                COALESCE(SUM((payload->>'notional_usd')::double precision), 0) AS total_notional,
-                AVG((payload->>'notional_usd')::double precision) AS avg_notional
-            FROM paper_orders
-            WHERE created_at >= $1 AND status = 'simulated'
-            """,
+        risk_event_rows = await self.db.fetch(
+            "SELECT payload, created_at FROM risk_events WHERE created_at >= $1 ORDER BY created_at ASC",
             window_start,
         )
         llm_cost_rows = await self.db.fetch(
@@ -421,91 +492,6 @@ class TradingRepository:
             WHERE created_at >= $1
             GROUP BY agent
             ORDER BY agent
-            """,
-            window_start,
-        )
-        risk_rows = await self.db.fetch(
-            """
-            SELECT reason, COUNT(*) AS count
-            FROM risk_events
-            WHERE created_at >= $1
-            GROUP BY reason
-            ORDER BY count DESC, reason ASC
-            LIMIT 8
-            """,
-            window_start,
-        )
-        top_market_rows = await self.db.fetch(
-            """
-            SELECT
-                market_id,
-                market_question,
-                COUNT(*) AS signal_count,
-                AVG(edge) AS avg_edge,
-                AVG(confidence) AS avg_confidence
-            FROM (
-                SELECT
-                    payload->>'market_id' AS market_id,
-                    payload->>'market_question' AS market_question,
-                    (payload->>'edge')::double precision AS edge,
-                    (payload->>'confidence')::double precision AS confidence
-                FROM signals
-                WHERE created_at >= $1
-            ) signal_data
-            GROUP BY market_id, market_question
-            ORDER BY signal_count DESC, avg_edge DESC
-            LIMIT 6
-            """,
-            window_start,
-        )
-        market_order_rows = await self.db.fetch(
-            """
-            SELECT
-                payload->>'market_id' AS market_id,
-                COUNT(*) AS order_count
-            FROM paper_orders
-            WHERE created_at >= $1 AND status = 'simulated'
-            GROUP BY payload->>'market_id'
-            """,
-            window_start,
-        )
-        time_series_rows = await self.db.fetch(
-            """
-            WITH signal_counts AS (
-                SELECT date_trunc('hour', created_at) AS bucket, COUNT(*) AS signals
-                FROM signals
-                WHERE created_at >= $1
-                GROUP BY 1
-            ),
-            decision_counts AS (
-                SELECT date_trunc('hour', created_at) AS bucket, COUNT(*) AS decisions
-                FROM agent_decisions
-                WHERE created_at >= $1
-                GROUP BY 1
-            ),
-            order_counts AS (
-                SELECT date_trunc('hour', created_at) AS bucket, COUNT(*) AS orders
-                FROM paper_orders
-                WHERE created_at >= $1
-                GROUP BY 1
-            ),
-            risk_counts AS (
-                SELECT date_trunc('hour', created_at) AS bucket, COUNT(*) AS risk_events
-                FROM risk_events
-                WHERE created_at >= $1
-                GROUP BY 1
-            )
-            SELECT
-                COALESCE(s.bucket, d.bucket, o.bucket, r.bucket) AS bucket,
-                COALESCE(s.signals, 0) AS signals,
-                COALESCE(d.decisions, 0) AS decisions,
-                COALESCE(o.orders, 0) AS orders,
-                COALESCE(r.risk_events, 0) AS risk_events
-            FROM signal_counts s
-            FULL OUTER JOIN decision_counts d ON d.bucket = s.bucket
-            FULL OUTER JOIN order_counts o ON o.bucket = COALESCE(s.bucket, d.bucket)
-            FULL OUTER JOIN risk_counts r ON r.bucket = COALESCE(s.bucket, d.bucket, o.bucket)
-            ORDER BY bucket ASC
             """,
             window_start,
         )
@@ -520,22 +506,57 @@ class TradingRepository:
             window_start,
         )
 
-        signals = int(signals_count_row["count"] or 0) if signals_count_row else 0
-        decisions = int(decisions_count_row["count"] or 0) if decisions_count_row else 0
-        orders = int(orders_count_row["count"] or 0) if orders_count_row else 0
-        risk_events = int(risk_count_row["count"] or 0) if risk_count_row else 0
+        signals_payloads = [self._decode_record(row) for row in signal_rows]
+        decisions_payloads = [self._decode_record(row) for row in decision_rows]
+        orders_payloads = [self._decode_record(row) for row in order_rows]
+        risk_payloads = [self._decode_record(row) for row in risk_event_rows]
+
+        signals_filtered = [item for item in signals_payloads if self._matches_filters(item, asset=asset, tier=tier)]
+        decisions_filtered = [item for item in decisions_payloads if self._matches_filters(item, asset=asset, tier=tier)]
+        orders_filtered = [item for item in orders_payloads if self._matches_filters(item, asset=asset, tier=tier)]
+        risk_filtered = [item for item in risk_payloads if self._matches_filters(item, asset=asset, tier=tier, allow_missing=True)]
+
+        signals = len(signals_filtered)
+        decisions = len(decisions_filtered)
+        orders = len(orders_filtered)
+        risk_events = len(risk_filtered)
         total_cost = sum(float(row["cost_usd"] or 0.0) for row in llm_cost_rows)
         open_positions = await self.get_open_positions()
+        open_positions = [item for item in open_positions if self._matches_filters(item, asset=asset, tier=tier)]
         positive_positions = sum(1 for position in open_positions if float(position["unrealized_pnl"]) > 0)
-        order_count_by_market = {
-            str(row["market_id"]): int(row["order_count"] or 0)
-            for row in market_order_rows
-            if row["market_id"]
-        }
+
+        signal_edges = [float(item.get("edge") or 0.0) for item in signals_filtered]
+        signal_confidences = [float(item.get("confidence") or 0.0) for item in signals_filtered]
+        simulated_orders = [item for item in orders_filtered if str(item.get("status")) == "simulated"]
+        total_notional = sum(float(item.get("notional_usd") or 0.0) for item in simulated_orders)
+        avg_notional = total_notional / len(simulated_orders) if simulated_orders else 0.0
+
+        order_count_by_market: dict[str, int] = {}
+        for item in simulated_orders:
+            market_id = str(item.get("market_id") or "")
+            if market_id:
+                order_count_by_market[market_id] = order_count_by_market.get(market_id, 0) + 1
+
+        top_markets = self._top_markets(signals_filtered, order_count_by_market)
+        risk_breakdown = self._count_by_key(risk_filtered, "reason", limit=8)
+        asset_breakdown = self._count_by_key(signals_filtered, "asset_symbol", limit=8)
+        tier_breakdown = self._count_by_key(signals_filtered, "crypto_tier", limit=3)
+        news_breakdown = self._news_breakdown(signals_filtered)
+        news_provider_breakdown = self._news_provider_breakdown(signals_filtered)
+        news_fallback_breakdown = self._news_fallback_breakdown(signals_filtered)
+        last_news_provider = self._last_news_provider(signals_filtered)
+        time_series = self._build_pipeline_time_series(
+            signals_filtered,
+            decisions_filtered,
+            orders_filtered,
+            risk_filtered,
+        )
 
         return {
             "generated_at": datetime.now(UTC).isoformat(),
             "window_hours": hours,
+            "asset_filter": asset or "",
+            "tier_filter": tier or "",
             "summary": {
                 "signals": signals,
                 "decisions": decisions,
@@ -544,10 +565,10 @@ class TradingRepository:
                 "approval_rate": round(decisions / signals, 4) if signals else 0.0,
                 "execution_rate": round(orders / decisions, 4) if decisions else 0.0,
                 "positive_position_rate": round(positive_positions / len(open_positions), 4) if open_positions else 0.0,
-                "avg_edge": round(float(signal_stats_row["avg_edge"] or 0.0), 4) if signal_stats_row else 0.0,
-                "avg_confidence": round(float(signal_stats_row["avg_confidence"] or 0.0), 4) if signal_stats_row else 0.0,
-                "total_order_notional": round(float(order_stats_row["total_notional"] or 0.0), 4) if order_stats_row else 0.0,
-                "avg_order_notional": round(float(order_stats_row["avg_notional"] or 0.0), 4) if order_stats_row else 0.0,
+                "avg_edge": round(sum(signal_edges) / len(signal_edges), 4) if signal_edges else 0.0,
+                "avg_confidence": round(sum(signal_confidences) / len(signal_confidences), 4) if signal_confidences else 0.0,
+                "total_order_notional": round(total_notional, 4),
+                "avg_order_notional": round(avg_notional, 4),
                 "llm_cost_usd": round(total_cost, 4),
                 **portfolio.model_dump(),
             },
@@ -559,33 +580,17 @@ class TradingRepository:
                 }
                 for row in llm_cost_rows
             ],
-            "risk_breakdown": [
-                {"reason": row["reason"], "count": int(row["count"] or 0)}
-                for row in risk_rows
-            ],
-            "top_markets": [
-                {
-                    "market_id": row["market_id"],
-                    "market_question": row["market_question"],
-                    "signal_count": int(row["signal_count"] or 0),
-                    "order_count": order_count_by_market.get(str(row["market_id"]), 0),
-                    "avg_edge": round(float(row["avg_edge"] or 0.0), 4),
-                    "avg_confidence": round(float(row["avg_confidence"] or 0.0), 4),
-                }
-                for row in top_market_rows
-            ],
+            "risk_breakdown": risk_breakdown,
+            "asset_breakdown": asset_breakdown,
+            "tier_breakdown": tier_breakdown,
+            "news_breakdown": news_breakdown,
+            "news_provider_breakdown": news_provider_breakdown,
+            "news_fallback_breakdown": news_fallback_breakdown,
+            "last_news_provider": last_news_provider,
+            "top_markets": top_markets,
             "open_positions": open_positions[:8],
             "time_series": {
-                "pipeline": [
-                    {
-                        "bucket": row["bucket"].isoformat() if row["bucket"] else "",
-                        "signals": int(row["signals"] or 0),
-                        "decisions": int(row["decisions"] or 0),
-                        "orders": int(row["orders"] or 0),
-                        "risk_events": int(row["risk_events"] or 0),
-                    }
-                    for row in time_series_rows
-                ],
+                "pipeline": time_series,
                 "equity": [
                     {
                         "created_at": row["created_at"].isoformat(),
@@ -615,7 +620,7 @@ class TradingRepository:
                 (item->>'price_yes')::double precision,
                 (item->>'price_no')::double precision,
                 (item->>'volume_24h')::double precision,
-                COALESCE(item->'metadata', '{}'::jsonb),
+                item,
                 (item->>'created_at')::timestamptz
             FROM jsonb_array_elements($1::jsonb) AS item
             """,
@@ -660,6 +665,7 @@ class TradingRepository:
         rows = await self.db.fetch(
             """
             SELECT market_id, token_id, market_question, direction, size, average_price, exposure_usd, updated_at
+                 , asset_symbol, crypto_tier
             FROM positions
             ORDER BY updated_at DESC
             """
@@ -679,6 +685,8 @@ class TradingRepository:
                     "market_id": row["market_id"],
                     "token_id": row["token_id"],
                     "market_question": row["market_question"],
+                    "asset_symbol": row["asset_symbol"],
+                    "crypto_tier": row["crypto_tier"],
                     "direction": row["direction"],
                     "size": size,
                     "average_price": float(row["average_price"] or 0.0),
@@ -771,23 +779,216 @@ class TradingRepository:
         rows = await self.db.fetch(query, *args)
         return [self._decode_record(row) for row in rows]
 
+    async def _recent_payloads(
+        self,
+        table: str,
+        *,
+        limit: int,
+        asset: str | None = None,
+        tier: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        args: list[Any] = []
+        if asset:
+            args.append(asset.upper())
+            clauses.append(f"payload->>'asset_symbol' = ${len(args)}")
+        if tier:
+            args.append(tier)
+            clauses.append(f"payload->>'crypto_tier' = ${len(args)}")
+        args.append(limit)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = f"SELECT payload, created_at FROM {table} {where} ORDER BY created_at DESC LIMIT ${len(args)}"
+        rows = await self.db.fetch(query, *args)
+        return [self._decode_record(row) for row in rows]
+
+    @staticmethod
+    def _matches_filters(
+        payload: dict[str, Any],
+        *,
+        asset: str | None = None,
+        tier: str | None = None,
+        allow_missing: bool = False,
+    ) -> bool:
+        if asset:
+            asset_value = str(payload.get("asset_symbol") or "").upper()
+            if not asset_value:
+                if not allow_missing:
+                    return False
+            elif asset_value != asset.upper():
+                return False
+        if tier:
+            tier_value = str(payload.get("crypto_tier") or "").lower()
+            if not tier_value:
+                if not allow_missing:
+                    return False
+            elif tier_value != tier.lower():
+                return False
+        return True
+
+    @staticmethod
+    def _count_by_key(items: list[dict[str, Any]], key: str, *, limit: int) -> list[dict[str, Any]]:
+        counts: dict[str, int] = {}
+        for item in items:
+            value = str(item.get(key) or "").strip()
+            if not value:
+                continue
+            counts[value] = counts.get(value, 0) + 1
+        ordered = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+        return [{"label": label, "count": count} for label, count in ordered[:limit]]
+
+    @staticmethod
+    def _news_breakdown(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        summary = {"validated": 0, "rejected": 0, "pending": 0}
+        for item in items:
+            news_validation = item.get("news_validation") or {}
+            if not news_validation:
+                summary["pending"] += 1
+            elif news_validation.get("validated"):
+                summary["validated"] += 1
+            else:
+                summary["rejected"] += 1
+        return [{"label": key, "count": value} for key, value in summary.items()]
+
+    @staticmethod
+    def _news_provider_breakdown(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        counts: dict[str, int] = {}
+        for item in items:
+            news_validation = item.get("news_validation") or {}
+            provider_used = str(news_validation.get("provider_used") or "").strip().lower()
+            if not provider_used:
+                continue
+            counts[provider_used] = counts.get(provider_used, 0) + 1
+        ordered = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+        return [{"label": label, "count": count} for label, count in ordered]
+
+    @staticmethod
+    def _news_fallback_breakdown(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        summary = {"primary_only": 0, "fallback_used": 0, "unknown": 0}
+        for item in items:
+            news_validation = item.get("news_validation") or {}
+            if not news_validation:
+                summary["unknown"] += 1
+            elif news_validation.get("fallback_used"):
+                summary["fallback_used"] += 1
+            else:
+                summary["primary_only"] += 1
+        return [{"label": key, "count": value} for key, value in summary.items()]
+
+    @staticmethod
+    def _last_news_provider(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+        for item in reversed(items):
+            news_validation = item.get("news_validation") or {}
+            provider_used = str(news_validation.get("provider_used") or "").strip()
+            if not provider_used:
+                continue
+            return {
+                "provider_used": provider_used,
+                "fallback_used": bool(news_validation.get("fallback_used")),
+                "signal_id": str(item.get("signal_id") or ""),
+                "asset_symbol": str(item.get("asset_symbol") or ""),
+                "crypto_tier": str(item.get("crypto_tier") or ""),
+                "created_at": (
+                    item.get("created_at").isoformat()
+                    if isinstance(item.get("created_at"), datetime)
+                    else item.get("created_at")
+                ),
+            }
+        return None
+
+    @staticmethod
+    def _top_markets(signals: list[dict[str, Any]], order_count_by_market: dict[str, int]) -> list[dict[str, Any]]:
+        buckets: dict[str, dict[str, Any]] = {}
+        for item in signals:
+            market_id = str(item.get("market_id") or "")
+            if not market_id:
+                continue
+            bucket = buckets.setdefault(
+                market_id,
+                {
+                    "market_id": market_id,
+                    "market_question": item.get("market_question", ""),
+                    "asset_symbol": item.get("asset_symbol", ""),
+                    "crypto_tier": item.get("crypto_tier", ""),
+                    "signal_count": 0,
+                    "edge_total": 0.0,
+                    "confidence_total": 0.0,
+                },
+            )
+            bucket["signal_count"] += 1
+            bucket["edge_total"] += float(item.get("edge") or 0.0)
+            bucket["confidence_total"] += float(item.get("confidence") or 0.0)
+        ordered = sorted(
+            buckets.values(),
+            key=lambda item: (-int(item["signal_count"]), -float(item["edge_total"]), str(item["market_id"])),
+        )
+        results: list[dict[str, Any]] = []
+        for item in ordered[:6]:
+            signal_count = int(item["signal_count"])
+            results.append(
+                {
+                    "market_id": item["market_id"],
+                    "market_question": item["market_question"],
+                    "asset_symbol": item["asset_symbol"],
+                    "crypto_tier": item["crypto_tier"],
+                    "signal_count": signal_count,
+                    "order_count": order_count_by_market.get(str(item["market_id"]), 0),
+                    "avg_edge": round(float(item["edge_total"]) / signal_count, 4) if signal_count else 0.0,
+                    "avg_confidence": round(float(item["confidence_total"]) / signal_count, 4) if signal_count else 0.0,
+                }
+            )
+        return results
+
+    @staticmethod
+    def _build_pipeline_time_series(
+        signals: list[dict[str, Any]],
+        decisions: list[dict[str, Any]],
+        orders: list[dict[str, Any]],
+        risk_events: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        buckets: dict[str, dict[str, Any]] = {}
+
+        def touch(items: list[dict[str, Any]], key: str) -> None:
+            for item in items:
+                created_at = item.get("created_at")
+                if created_at is None:
+                    continue
+                dt = created_at.astimezone(UTC) if isinstance(created_at, datetime) else datetime.fromisoformat(
+                    str(created_at).replace("Z", "+00:00")
+                ).astimezone(UTC)
+                bucket = dt.replace(minute=0, second=0, microsecond=0).isoformat()
+                entry = buckets.setdefault(bucket, {"bucket": bucket, "signals": 0, "decisions": 0, "orders": 0, "risk_events": 0})
+                entry[key] += 1
+
+        touch(signals, "signals")
+        touch(decisions, "decisions")
+        touch(orders, "orders")
+        touch(risk_events, "risk_events")
+        return [buckets[key] for key in sorted(buckets)]
+
     async def _upsert_position(
         self,
         market_id: str,
         token_id: str,
         market_question: str,
+        asset_symbol: str,
+        crypto_tier: str,
         direction: str,
         size: int,
         average_price: float,
         exposure_usd: float,
     ) -> None:
+        position_key = f"{market_id}:{direction}"
         await self.db.execute(
             """
-            INSERT INTO positions (market_id, token_id, market_question, direction, size, average_price, exposure_usd, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (market_id) DO UPDATE
+            INSERT INTO positions (
+                market_id, position_key, token_id, market_question, asset_symbol, crypto_tier, direction, size, average_price, exposure_usd, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (position_key) DO UPDATE
             SET token_id = EXCLUDED.token_id,
                 market_question = EXCLUDED.market_question,
+                asset_symbol = EXCLUDED.asset_symbol,
+                crypto_tier = EXCLUDED.crypto_tier,
                 direction = EXCLUDED.direction,
                 size = positions.size + EXCLUDED.size,
                 average_price = CASE
@@ -799,8 +1000,11 @@ class TradingRepository:
                 updated_at = EXCLUDED.updated_at
             """,
             market_id,
+            position_key,
             token_id,
             market_question,
+            asset_symbol,
+            crypto_tier,
             direction,
             size,
             average_price,

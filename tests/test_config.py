@@ -1,9 +1,11 @@
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import yaml
 
-from core.config import infer_provider_from_model, load_agents_config, load_risk_config, update_agent_model
+from core.config import AppSettings, infer_provider_from_model, load_agents_config, load_crypto_config, load_risk_config, update_agent_model
+from core.crypto import classify_crypto_market
 
 
 def test_load_agents_config_reads_yaml() -> None:
@@ -18,8 +20,34 @@ def test_load_risk_config_reads_thresholds() -> None:
     assert risk.max_kelly_fraction == pytest.approx(0.25)
 
 
-def test_update_agent_model_is_atomic(tmp_path: Path) -> None:
-    path = tmp_path / "agents.yaml"
+def test_load_crypto_config_reads_tiers() -> None:
+    crypto = load_crypto_config()
+    assert crypto.enabled is True
+    assert crypto.direct_coin_only is True
+    assert "BTC" not in crypto.major_assets
+    assert crypto.btc.min_edge <= crypto.small_cap.min_edge
+
+
+def test_classify_crypto_market_accepts_direct_coin_markets() -> None:
+    crypto = load_crypto_config()
+    candidate = classify_crypto_market("Will BTC be above 100k?", "test market", crypto)
+    assert candidate is not None
+    assert candidate.asset_symbol == "BTC"
+    assert candidate.crypto_tier == "btc"
+    assert candidate.market_kind == "direct_coin"
+    assert candidate.thesis_hash
+
+
+def test_classify_crypto_market_rejects_indirect_crypto_markets() -> None:
+    crypto = load_crypto_config()
+    candidate = classify_crypto_market("Will a BTC ETF be approved?", "regulation market", crypto)
+    assert candidate is None
+
+
+def test_update_agent_model_is_atomic() -> None:
+    temp_dir = Path(".tmp") / f"agent-config-{uuid4().hex}"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    path = temp_dir / "agents.yaml"
     path.write_text(
         yaml.safe_dump(
             {
@@ -45,8 +73,45 @@ def test_update_agent_model_is_atomic(tmp_path: Path) -> None:
     reloaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert reloaded["agents"]["claude"]["model"] == "gpt-4o-mini"
     assert reloaded["agents"]["claude"]["provider"] == "openai"
+    path.unlink(missing_ok=True)
+    temp_dir.rmdir()
 
 
 def test_infer_provider_from_model_handles_prefixed_and_plain_models() -> None:
     assert infer_provider_from_model("openai/gpt-4o-mini") == ("openai", "gpt-4o-mini")
     assert infer_provider_from_model("claude-sonnet-4-20250514") == ("anthropic", "claude-sonnet-4-20250514")
+
+
+def test_app_settings_news_provider_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in (
+        "NEWS_PROVIDER_PRIMARY",
+        "NEWS_PROVIDER_FALLBACK",
+        "NEWS_LOOKBACK_HOURS",
+        "NEWS_HTTP_TIMEOUT_SECONDS",
+        "MARKETAUX_API_KEY",
+        "ALPHAVANTAGE_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = AppSettings(_env_file=None)
+
+    assert settings.news_provider_primary == "marketaux"
+    assert settings.news_provider_fallback == "alphavantage"
+    assert settings.news_lookback_hours == 24
+    assert settings.news_fallback_on_empty_result is False
+
+
+def test_app_settings_news_provider_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEWS_PROVIDER_PRIMARY", "alphavantage")
+    monkeypatch.setenv("NEWS_PROVIDER_FALLBACK", "marketaux")
+    monkeypatch.setenv("MARKETAUX_API_KEY", "marketaux-key")
+    monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "alpha-key")
+    monkeypatch.setenv("NEWS_LOOKBACK_HOURS", "12")
+
+    settings = AppSettings(_env_file=None)
+
+    assert settings.news_provider_primary == "alphavantage"
+    assert settings.news_provider_fallback == "marketaux"
+    assert settings.marketaux_api_key == "marketaux-key"
+    assert settings.alphavantage_api_key == "alpha-key"
+    assert settings.news_lookback_hours == 12

@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from core.config import CryptoSettings
+from core.utils import sanitize_text, stable_hash
+
+
+ASSET_ALIASES: dict[str, tuple[str, ...]] = {
+    "BTC": ("btc", "bitcoin"),
+    "ETH": ("eth", "ethereum"),
+    "SOL": ("sol", "solana"),
+    "XRP": ("xrp", "ripple"),
+    "DOGE": ("doge", "dogecoin"),
+    "ADA": ("ada", "cardano"),
+    "AVAX": ("avax", "avalanche"),
+    "LINK": ("link", "chainlink"),
+    "DOT": ("dot", "polkadot"),
+    "LTC": ("ltc", "litecoin"),
+    "BNB": ("bnb", "binance coin"),
+    "SUI": ("sui",),
+    "APT": ("apt", "aptos"),
+    "ARB": ("arb", "arbitrum"),
+    "OP": ("op", "optimism"),
+    "ATOM": ("atom", "cosmos"),
+    "NEAR": ("near",),
+    "PEPE": ("pepe",),
+    "TRX": ("trx", "tron"),
+    "UNI": ("uni", "uniswap"),
+}
+
+ASSET_NAMES = {
+    "BTC": "Bitcoin",
+    "ETH": "Ethereum",
+    "SOL": "Solana",
+    "XRP": "XRP",
+    "DOGE": "Dogecoin",
+    "ADA": "Cardano",
+    "AVAX": "Avalanche",
+    "LINK": "Chainlink",
+    "DOT": "Polkadot",
+    "LTC": "Litecoin",
+    "BNB": "BNB",
+    "SUI": "Sui",
+    "APT": "Aptos",
+    "ARB": "Arbitrum",
+    "OP": "Optimism",
+    "ATOM": "Cosmos",
+    "NEAR": "Near",
+    "PEPE": "Pepe",
+    "TRX": "Tron",
+    "UNI": "Uniswap",
+}
+
+INDIRECT_KEYWORDS = {
+    "etf",
+    "sec",
+    "regulation",
+    "regulatory",
+    "listing",
+    "listed",
+    "hack",
+    "exploit",
+    "airdrop",
+    "adoption",
+    "treasury",
+    "reserve",
+}
+DIRECT_MARKET_KEYWORDS = {
+    "above",
+    "below",
+    "between",
+    "price",
+    "trading at",
+    "close above",
+    "close below",
+    "hit",
+    "reach",
+}
+
+
+@dataclass
+class CryptoMarketCandidate:
+    asset_symbol: str
+    asset_name: str
+    crypto_tier: str
+    market_kind: str
+    question_type: str
+    thesis_tags: list[str]
+    thesis_hash: str
+
+
+def detect_asset_symbol(question: str, description: str = "") -> str | None:
+    text = f"{question} {description}".lower()
+    matches: list[str] = []
+    for symbol, aliases in ASSET_ALIASES.items():
+        for alias in aliases:
+            if re.search(rf"\b{re.escape(alias.lower())}\b", text):
+                matches.append(symbol)
+                break
+    unique = sorted(set(matches))
+    if len(unique) != 1:
+        return None
+    return unique[0]
+
+
+def classify_crypto_market(question: str, description: str, config: CryptoSettings) -> CryptoMarketCandidate | None:
+    symbol = detect_asset_symbol(question, description)
+    if symbol is None:
+        return None
+
+    text = f"{question} {description}".lower()
+    if config.direct_coin_only and any(keyword in text for keyword in INDIRECT_KEYWORDS):
+        return None
+    if not any(keyword in text for keyword in DIRECT_MARKET_KEYWORDS):
+        return None
+
+    tier = "btc" if symbol == "BTC" else ("major" if symbol in {item.upper() for item in config.major_assets} else "small_cap")
+    question_type = classify_question_type(question, description)
+    thesis_tags = [symbol.lower(), tier, question_type]
+    thesis_hash = stable_hash(f"{symbol}|{sanitize_text(question, 160)}|{question_type}", length=16)
+    return CryptoMarketCandidate(
+        asset_symbol=symbol,
+        asset_name=ASSET_NAMES.get(symbol, symbol),
+        crypto_tier=tier,
+        market_kind="direct_coin",
+        question_type=question_type,
+        thesis_tags=thesis_tags,
+        thesis_hash=thesis_hash,
+    )
+
+
+def classify_question_type(question: str, description: str = "") -> str:
+    text = f"{question} {description}".lower()
+    if "between" in text or "range" in text:
+        return "range"
+    if "above" in text or "over" in text or "reach" in text or "hit" in text:
+        return "upside_target"
+    if "below" in text or "under" in text:
+        return "downside_target"
+    return "direction"

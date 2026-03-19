@@ -46,7 +46,15 @@ class ClawAgent(BaseAgent):
         try:
             guard = await self.risk.build_execution_guard(review)
         except RiskBlockedError as exc:
-            await self.risk.record_block(self.name, str(exc), {"signal_id": review.signal_id})
+            await self.risk.record_block(
+                self.name,
+                str(exc),
+                {
+                    "signal_id": review.signal_id,
+                    "asset_symbol": review.asset_symbol,
+                    "crypto_tier": review.crypto_tier,
+                },
+            )
             return
 
         signal = review.original_signal
@@ -54,9 +62,13 @@ class ClawAgent(BaseAgent):
 Signal:
 - signal_id: {signal.signal_id}
 - market_id: {signal.market_id}
+- asset_symbol: {signal.asset_symbol}
+- crypto_tier: {signal.crypto_tier}
 - direction: {signal.direction}
 - edge: {signal.edge:.4f}
 - price: {signal.price:.4f}
+- liquidity_summary: {signal.liquidity_summary}
+- news_validation: {review.news_validation.model_dump(mode='json') if review.news_validation else {}}
 - guarded_size: {guard.size}
 - guarded_price_limit: {guard.price_limit:.4f}
 """
@@ -72,7 +84,11 @@ Signal:
             await self.risk.record_block(
                 self.name,
                 str(payload.get("reason", "executor declined")),
-                {"signal_id": review.signal_id},
+                {
+                    "signal_id": review.signal_id,
+                    "asset_symbol": review.asset_symbol,
+                    "crypto_tier": review.crypto_tier,
+                },
             )
             return
 
@@ -91,12 +107,15 @@ Signal:
             market_id=signal.market_id,
             token_id=signal.token_id,
             market_question=signal.market_question,
+            asset_symbol=signal.asset_symbol,
+            crypto_tier=signal.crypto_tier,
             direction=signal.direction,
             size=size,
             price_limit=price_limit,
             notional_usd=round(size * signal.price, 4),
             status=str(order_result["status"]),
             reason=str(payload.get("reason", "")),
+            news_validation=review.news_validation.model_dump(mode="json") if review.news_validation else None,
         )
         await self.context.repository.record_paper_order(
             paper_order.order_id,

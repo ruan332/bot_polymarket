@@ -29,7 +29,42 @@ class SignalPayload(BaseModel):
     price: float
     price_yes: float
     price_no: float
+    volume_24h: float = 0.0
+    asset_symbol: str
+    asset_name: str
+    crypto_tier: Literal["btc", "major", "small_cap"]
+    market_kind: str = "direct_coin"
+    question_type: str = "direction"
+    thesis_tags: list[str] = Field(default_factory=list)
+    thesis_hash: str = ""
     reasoning: str = ""
+    liquidity_summary: dict[str, Any] = Field(default_factory=dict)
+    news_validation: dict[str, Any] | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class NewsValidationPayload(BaseModel):
+    version: str = "v1"
+    event_type: Literal["signal.news_validated"] = "signal.news_validated"
+    validation_id: str
+    signal_id: str
+    market_id: str
+    asset_symbol: str
+    asset_name: str
+    crypto_tier: Literal["btc", "major", "small_cap"]
+    validated: bool
+    support_score: float
+    conflict_score: float
+    source_count: int
+    provider_used: str = ""
+    fallback_used: bool = False
+    provider_attempts: list[dict[str, Any]] = Field(default_factory=list)
+    primary_error_type: str | None = None
+    primary_error_message: str | None = None
+    freshness_minutes: int | None = None
+    headlines: list[str] = Field(default_factory=list)
+    reason: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -39,11 +74,14 @@ class ReviewPayload(BaseModel):
     event_type: Literal["signal.reviewed"] = "signal.reviewed"
     signal_id: str
     approved: bool
+    asset_symbol: str = ""
+    crypto_tier: Literal["btc", "major", "small_cap"] | None = None
     corrected_price_limit: float | None = None
     kelly_size: int = 0
     notes: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     original_signal: SignalPayload
+    news_validation: NewsValidationPayload | None = None
 
 
 class PaperOrderPayload(BaseModel):
@@ -54,12 +92,15 @@ class PaperOrderPayload(BaseModel):
     market_id: str
     token_id: str
     market_question: str = ""
+    asset_symbol: str = ""
+    crypto_tier: Literal["btc", "major", "small_cap"] | None = None
     direction: Literal["YES", "NO"]
     size: int
     price_limit: float
     notional_usd: float
     status: Literal["simulated", "blocked"] = "simulated"
     reason: str = ""
+    news_validation: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -100,6 +141,12 @@ class MarketSnapshotPayload(BaseModel):
     price_yes: float
     price_no: float
     volume_24h: float = 0.0
+    asset_symbol: str = ""
+    asset_name: str = ""
+    crypto_tier: str = ""
+    market_kind: str = ""
+    question_type: str = ""
+    thesis_tags: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -117,7 +164,7 @@ class EquitySnapshotPoint(BaseModel):
 
 
 class ModelSwapRequest(BaseModel):
-    agent: Literal["claude", "codex", "claw"]
+    agent: Literal["claude", "news_validator", "codex", "claw"]
     model: str
     provider: str | None = None
     fallback_model: str | None = None

@@ -1,14 +1,17 @@
 risk:
   min_edge: 0.19
+  min_confidence: 0.55
   max_kelly_fraction: 0.25
   max_single_exposure_fraction: 0.10
   max_single_position_usd: 100.0
   max_total_exposure_usd: 300.0
   max_daily_spend_usd: 5.0
-  max_price_slippage: 0.03
+  max_spread_bps: 250
+  max_slippage_bps: 150
   max_order_price: 0.90
   min_market_volume_24h: 10000.0
   max_open_positions: 5
-  circuit_breaker:
-    max_consecutive_failures: 3
-    cooldown_seconds: 300
+  circuit_breaker_error_threshold: 3
+  circuit_breaker_loss_threshold_usd: 100.0
+  circuit_breaker_cooldown_seconds: 300
+  default_limit_buffer_bps: 50

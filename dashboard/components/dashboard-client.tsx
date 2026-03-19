@@ -21,15 +21,30 @@ type CostSummary = {
 type Signal = {
   signal_id: string;
   market_question: string;
+  asset_symbol: string;
+  crypto_tier: "btc" | "major" | "small_cap";
   direction: "YES" | "NO";
   edge: number;
   confidence: number;
   price: number;
+  volume_24h: number;
+  news_validation?: {
+    validated: boolean;
+    support_score: number;
+    conflict_score: number;
+    source_count: number;
+    provider_used?: string;
+    fallback_used?: boolean;
+    primary_error_type?: string | null;
+    reason: string;
+  } | null;
   created_at: string;
 };
 
 type Decision = {
   signal_id: string;
+  asset_symbol: string;
+  crypto_tier: "btc" | "major" | "small_cap" | null;
   approved: boolean;
   corrected_price_limit: number | null;
   kelly_size: number;
@@ -42,6 +57,8 @@ type Order = {
   signal_id: string;
   market_id: string;
   market_question?: string;
+  asset_symbol: string;
+  crypto_tier: "btc" | "major" | "small_cap" | null;
   direction: "YES" | "NO";
   size: number;
   price_limit: number;
@@ -70,6 +87,8 @@ type PortfolioSummary = {
 type Position = {
   market_id: string;
   market_question: string;
+  asset_symbol?: string;
+  crypto_tier?: "btc" | "major" | "small_cap";
   direction: "YES" | "NO";
   size: number;
   average_price: number;
@@ -81,6 +100,8 @@ type Position = {
 type PerformanceReport = {
   generated_at: string;
   window_hours: number;
+  asset_filter: string;
+  tier_filter: string;
   summary: {
     signals: number;
     decisions: number;
@@ -104,10 +125,25 @@ type PerformanceReport = {
     unrealized_pnl: number;
   };
   cost_by_agent: Array<{ agent: string; cost_usd: number; calls: number }>;
-  risk_breakdown: Array<{ reason: string; count: number }>;
+  risk_breakdown: Array<{ label: string; count: number }>;
+  asset_breakdown: Array<{ label: string; count: number }>;
+  tier_breakdown: Array<{ label: string; count: number }>;
+  news_breakdown: Array<{ label: string; count: number }>;
+  news_provider_breakdown: Array<{ label: string; count: number }>;
+  news_fallback_breakdown: Array<{ label: string; count: number }>;
+  last_news_provider: {
+    provider_used: string;
+    fallback_used: boolean;
+    signal_id: string;
+    asset_symbol: string;
+    crypto_tier: string;
+    created_at: string;
+  } | null;
   top_markets: Array<{
     market_id: string;
     market_question: string;
+    asset_symbol: string;
+    crypto_tier: string;
     signal_count: number;
     order_count: number;
     avg_edge: number;
@@ -169,6 +205,10 @@ function asCurrency(value: number) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);
+}
+
+function breakdownCount(items: Array<{ label: string; count: number }>, label: string) {
+  return items.find((item) => item.label === label)?.count ?? 0;
 }
 
 export function DashboardClient() {
@@ -242,6 +282,8 @@ export function DashboardClient() {
 
   const performance = state.performance;
   const summary = performance?.summary;
+  const lastNewsProvider = performance?.last_news_provider;
+  const fallbackHits = breakdownCount(performance?.news_fallback_breakdown ?? [], "fallback_used");
 
   return (
     <main className="terminal-shell">
@@ -295,6 +337,13 @@ export function DashboardClient() {
         <MetricCard label="Execution Rate" value={summary ? asPercent(summary.execution_rate) : "0.0%"} hint="paper orders over approved reviews" tone="amber" />
         <MetricCard label="Avg Edge" value={summary ? summary.avg_edge.toFixed(3) : "0.000"} hint="average signal edge in window" tone="green" />
         <MetricCard label="24h LLM Cost" value={asCurrency(summary?.llm_cost_usd ?? 0)} hint="provider spend in the active window" tone="red" />
+        <MetricCard
+          label="News Source"
+          value={lastNewsProvider?.provider_used ?? "n/a"}
+          hint={lastNewsProvider?.fallback_used ? "latest validation came from fallback" : "latest validation source"}
+          tone="slate"
+        />
+        <MetricCard label="Fallback Hits" value={`${fallbackHits}`} hint="provider failovers in active window" tone="amber" />
       </section>
 
       <section className="dashboard-grid">
@@ -339,9 +388,10 @@ export function DashboardClient() {
               <div key={market.market_id} className="stack-row">
                 <div className="row-main">
                   <strong>{market.market_question}</strong>
-                  <span className="mono subtle">{market.signal_count} signals</span>
+                  <span className="mono subtle">{market.asset_symbol} / {market.crypto_tier}</span>
                 </div>
                 <div className="row-meta">
+                  <span className="mono">{market.signal_count} signals</span>
                   <span className="mono">edge {market.avg_edge.toFixed(3)}</span>
                   <span className="mono">conf {market.avg_confidence.toFixed(2)}</span>
                   <span className="mono">orders {market.order_count}</span>
@@ -360,9 +410,9 @@ export function DashboardClient() {
             {state.decisions.slice(0, 6).map((decision) => (
               <div key={`${decision.signal_id}-${decision.created_at}`} className="stack-row">
                 <div className="row-main">
-                  <strong>{decision.approved ? "approved" : "rejected"}</strong>
+                  <strong>{decision.asset_symbol} {decision.approved ? "approved" : "rejected"}</strong>
                   <span className={decision.approved ? "running mono" : "blocked mono"}>
-                    kelly {decision.kelly_size}
+                    {decision.crypto_tier ?? "unknown"} / kelly {decision.kelly_size}
                   </span>
                 </div>
                 <span>{decision.notes}</span>
@@ -381,12 +431,13 @@ export function DashboardClient() {
             {state.positions.slice(0, 8).map((position) => (
               <div key={`${position.market_id}-${position.direction}`} className="stack-row">
                 <div className="row-main">
-                  <strong>{position.direction} {position.market_question || position.market_id}</strong>
+                  <strong>{position.asset_symbol ?? "?"} {position.direction} {position.market_question || position.market_id}</strong>
                   <span className={position.unrealized_pnl >= 0 ? "running mono" : "blocked mono"}>
                     {asCurrency(position.unrealized_pnl)}
                   </span>
                 </div>
                 <div className="row-meta">
+                  <span className="mono">{position.crypto_tier ?? "unknown"}</span>
                   <span className="mono">{position.size} contracts</span>
                   <span className="mono">avg {position.average_price.toFixed(3)}</span>
                   <span className="mono">mark {position.current_price.toFixed(3)}</span>
@@ -406,9 +457,9 @@ export function DashboardClient() {
             {state.orders.slice(0, 6).map((order) => (
               <div key={order.order_id} className="stack-row">
                 <div className="row-main">
-                  <strong>{order.direction}</strong>
+                  <strong>{order.asset_symbol} {order.direction}</strong>
                   <span className={order.status === "simulated" ? "running mono" : "blocked mono"}>
-                    {order.status}
+                    {order.crypto_tier ?? "unknown"} / {order.status}
                   </span>
                 </div>
                 <span>{order.market_question || order.market_id}</span>
@@ -430,12 +481,19 @@ export function DashboardClient() {
             {state.signals.slice(0, 8).map((signal) => (
               <div key={signal.signal_id} className="stack-row">
                 <div className="row-main">
-                  <strong>{signal.direction} {signal.market_question}</strong>
-                  <span className="mono subtle">{signal.edge.toFixed(3)} edge</span>
+                  <strong>{signal.asset_symbol} {signal.direction} {signal.market_question}</strong>
+                  <span className="mono subtle">{signal.crypto_tier} / {signal.edge.toFixed(3)} edge</span>
                 </div>
                 <div className="row-meta">
                   <span className="mono">price {signal.price.toFixed(3)}</span>
                   <span className="mono">conf {signal.confidence.toFixed(2)}</span>
+                  <span className={signal.news_validation?.validated ? "running mono" : "blocked mono"}>
+                    news {signal.news_validation?.validated ? "ok" : "pending/block"}
+                  </span>
+                  <span className="mono">
+                    src {signal.news_validation?.provider_used ?? "n/a"}
+                    {signal.news_validation?.fallback_used ? " (fb)" : ""}
+                  </span>
                   <span className="mono">{new Date(signal.created_at).toLocaleTimeString()}</span>
                 </div>
               </div>
@@ -457,6 +515,79 @@ export function DashboardClient() {
                 </div>
                 <span>{event.reason}</span>
                 <span className="mono subtle">{new Date(event.created_at).toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </article>
+
+        <article className="panel span-6">
+          <div className="panel-head">
+            <h3>Tier Mix</h3>
+            <span className="terminal-pill">crypto focus</span>
+          </div>
+          <div className="stack-list compact">
+            {(performance?.tier_breakdown ?? []).map((item) => (
+              <div key={item.label} className="stack-row">
+                <div className="row-main">
+                  <strong>{item.label}</strong>
+                  <span className="mono subtle">{item.count} signals</span>
+                </div>
+              </div>
+            ))}
+            {(performance?.asset_breakdown ?? []).slice(0, 5).map((item) => (
+              <div key={item.label} className="stack-row">
+                <div className="row-main">
+                  <strong>{item.label}</strong>
+                  <span className="mono subtle">{item.count} signals</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </article>
+
+        <article className="panel span-6">
+          <div className="panel-head">
+            <h3>News Gate</h3>
+            <span className="terminal-pill">validation</span>
+          </div>
+          <div className="stack-list compact">
+            {lastNewsProvider ? (
+              <div className="stack-row">
+                <div className="row-main">
+                  <strong>last source</strong>
+                  <span className={lastNewsProvider.fallback_used ? "blocked mono" : "running mono"}>
+                    {lastNewsProvider.provider_used}
+                    {lastNewsProvider.fallback_used ? " / fallback" : " / primary"}
+                  </span>
+                </div>
+                <span className="mono subtle">
+                  {lastNewsProvider.asset_symbol} {lastNewsProvider.crypto_tier} @{" "}
+                  {new Date(lastNewsProvider.created_at).toLocaleTimeString()}
+                </span>
+              </div>
+            ) : null}
+            {(performance?.news_breakdown ?? []).map((item) => (
+              <div key={item.label} className="stack-row">
+                <div className="row-main">
+                  <strong>{item.label}</strong>
+                  <span className="mono subtle">{item.count}</span>
+                </div>
+              </div>
+            ))}
+            {(performance?.news_provider_breakdown ?? []).map((item) => (
+              <div key={`provider-${item.label}`} className="stack-row">
+                <div className="row-main">
+                  <strong>{item.label}</strong>
+                  <span className="mono subtle">{item.count} validations</span>
+                </div>
+              </div>
+            ))}
+            {(performance?.news_fallback_breakdown ?? []).map((item) => (
+              <div key={`fallback-${item.label}`} className="stack-row">
+                <div className="row-main">
+                  <strong>{item.label}</strong>
+                  <span className="mono subtle">{item.count}</span>
+                </div>
               </div>
             ))}
           </div>

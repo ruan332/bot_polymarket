@@ -18,13 +18,13 @@ import {
 type CostPoint = { agent: string; cost_usd: number; calls: number };
 type PipelinePoint = { bucket: string; signals: number; decisions: number; orders: number; risk_events: number };
 type EquityPoint = { created_at: string; total_equity: number; total_pnl: number; unrealized_pnl: number };
-type RiskPoint = { reason: string; count: number };
+type BreakdownPoint = { label: string; count: number };
 
 type Props = {
   costs: CostPoint[];
   pipeline: PipelinePoint[];
   equity: EquityPoint[];
-  riskBreakdown: RiskPoint[];
+  riskBreakdown: BreakdownPoint[];
 };
 
 export function OperationsCharts({ costs, pipeline, equity, riskBreakdown }: Props) {
@@ -144,7 +144,7 @@ export function OperationsCharts({ costs, pipeline, equity, riskBreakdown }: Pro
               <CartesianGrid stroke="rgba(148, 163, 184, 0.16)" strokeDasharray="4 4" />
               <XAxis type="number" stroke="#94a3b8" allowDecimals={false} />
               <YAxis
-                dataKey="reason"
+                dataKey="label"
                 type="category"
                 stroke="#94a3b8"
                 width={138}

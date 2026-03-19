@@ -6,6 +6,15 @@ agents:
     max_tokens: 1000
     fallback_model: "claude-3-5-haiku-20241022"
     daily_cost_limit_usd: 0.50
+    scan_limit: 24
+
+  news_validator:
+    model: "gpt-4o-mini"
+    provider: "openai"
+    temperature: 0.0
+    max_tokens: 700
+    fallback_model: "gpt-4o-mini"
+    daily_cost_limit_usd: 0.30
 
   codex:
     model: "gpt-4o-mini"

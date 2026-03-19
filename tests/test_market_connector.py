@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 import pytest
 
+from core.config import load_crypto_config
 from core.market_connector import MarketConnector
 
 
@@ -25,6 +26,7 @@ class FakeContext:
             polymarket_signature_type=0,
             polymarket_chain_id=137,
         )
+        self.crypto_config = load_crypto_config()
         self.repository = FakeRepository()
         self.bus = None
 
@@ -130,7 +132,11 @@ async def test_get_active_markets_parses_json_encoded_arrays(monkeypatch) -> Non
     async def fake_client():
         return FakeSession()
 
+    async def fake_orderbook_summary(token_id: str):
+        return {"best_bid": 0.4, "best_ask": 0.41, "spread_bps": 243.9, "bid_depth": 100.0, "ask_depth": 90.0}
+
     monkeypatch.setattr(connector, "_client", fake_client)
+    monkeypatch.setattr(connector, "get_orderbook_summary", fake_orderbook_summary)
 
     markets = await connector.get_active_markets(limit=1)
 
@@ -139,3 +145,68 @@ async def test_get_active_markets_parses_json_encoded_arrays(monkeypatch) -> Non
     assert markets[0]["token_id_yes"] == "token-yes-1"
     assert markets[0]["token_id_no"] == "token-no-1"
     assert markets[0]["volume_24h"] == 12345.67
+    assert markets[0]["asset_symbol"] == "BTC"
+    assert markets[0]["crypto_tier"] == "btc"
+    assert markets[0]["question_type"] == "upside_target"
+    assert markets[0]["thesis_hash"]
+    assert markets[0]["orderbook_summary_yes"]["best_bid"] == 0.4
+
+
+@pytest.mark.asyncio
+async def test_get_active_markets_filters_indirect_crypto_markets(monkeypatch) -> None:
+    payload = [
+        {
+            "id": "market-1",
+            "question": "Will BTC be above 100k?",
+            "description": "test",
+            "outcomePrices": "[\"0.41\", \"0.59\"]",
+            "clobTokenIds": "[\"token-yes-1\", \"token-no-1\"]",
+            "volume24hr": "12345.67",
+        },
+        {
+            "id": "market-2",
+            "question": "Will a BTC ETF be approved?",
+            "description": "regulation",
+            "outcomePrices": "[\"0.20\", \"0.80\"]",
+            "clobTokenIds": "[\"token-yes-2\", \"token-no-2\"]",
+            "volume24hr": "50000.00",
+        },
+    ]
+
+    class FakeResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return payload
+
+    class FakeSession:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+        @property
+        def closed(self):
+            return False
+
+    connector = MarketConnector(FakeContext(live_trading=False))
+
+    async def fake_client():
+        return FakeSession()
+
+    async def fake_orderbook_summary(token_id: str):
+        return {"best_bid": 0.4, "best_ask": 0.41, "spread_bps": 243.9, "bid_depth": 100.0, "ask_depth": 90.0}
+
+    monkeypatch.setattr(connector, "_client", fake_client)
+    monkeypatch.setattr(connector, "get_orderbook_summary", fake_orderbook_summary)
+
+    markets = await connector.get_active_markets(limit=2, crypto_only=True)
+
+    assert len(markets) == 1
+    assert markets[0]["id"] == "market-1"
+    assert markets[0]["asset_symbol"] == "BTC"

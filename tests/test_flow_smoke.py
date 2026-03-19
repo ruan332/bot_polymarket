@@ -9,8 +9,9 @@ from fastapi.testclient import TestClient
 from agents.claude_agent import ClaudeAgent
 from agents.claw_agent import ClawAgent
 from agents.codex_agent import CodexAgent
+from agents.news_validator_agent import NewsValidatorAgent
 from api import main as api_main
-from core.config import infer_provider_from_model, load_agents_config, load_risk_config
+from core.config import infer_provider_from_model, load_agents_config, load_crypto_config, load_risk_config
 from core.schemas import ModelResponse, PortfolioSummary
 
 
@@ -89,6 +90,7 @@ class FakeRepository:
         self.positions: dict[str, dict] = {}
         self.market_snapshots: list[dict] = []
         self.equity_history: list[dict] = []
+        self.news_validations: list[dict] = []
 
     async def record_signal(self, signal_id: str, event_type: str, payload: dict) -> None:
         self.signals.append(payload)
@@ -96,13 +98,40 @@ class FakeRepository:
     async def record_decision(self, decision_id: str, signal_id: str, event_type: str, payload: dict) -> None:
         self.decisions.append(payload)
 
+    async def record_news_validation(self, validation) -> None:
+        self.news_validations.append(validation.model_dump(mode="json"))
+
+    async def attach_news_validation(self, signal_id: str, payload: dict) -> None:
+        for signal in self.signals:
+            if signal["signal_id"] == signal_id:
+                signal["news_validation"] = payload
+
+    async def has_recent_signal_duplicate(
+        self,
+        *,
+        market_id: str,
+        direction: str,
+        thesis_hash: str,
+        cooldown_minutes: int,
+    ) -> bool:
+        return any(
+            signal.get("market_id") == market_id
+            and signal.get("direction") == direction
+            and signal.get("thesis_hash") == thesis_hash
+            for signal in self.signals
+        )
+
     async def record_paper_order(self, order_id: str, signal_id: str, market_id: str, status: str, payload: dict) -> None:
         self.orders.append(payload)
         if status == "simulated":
-            self.positions[market_id] = {
+            position_key = f"{market_id}:{payload['direction']}"
+            self.positions[position_key] = {
                 "market_id": market_id,
+                "position_key": position_key,
                 "token_id": payload["token_id"],
                 "market_question": payload.get("market_question", ""),
+                "asset_symbol": payload.get("asset_symbol", ""),
+                "crypto_tier": payload.get("crypto_tier", ""),
                 "direction": payload["direction"],
                 "size": payload["size"],
                 "average_price": payload["price_limit"],
@@ -139,17 +168,28 @@ class FakeRepository:
             unrealized_pnl=current_market_value - total_exposure,
         )
 
-    async def get_recent_signals(self, limit: int = 20):
-        return list(reversed(self.signals[-limit:]))
+    @staticmethod
+    def _matches(payload: dict, asset: str | None = None, tier: str | None = None) -> bool:
+        if asset and str(payload.get("asset_symbol", "")).upper() != asset.upper():
+            return False
+        if tier and str(payload.get("crypto_tier", "")).lower() != tier.lower():
+            return False
+        return True
 
-    async def get_recent_orders(self, limit: int = 20):
-        return list(reversed(self.orders[-limit:]))
+    async def get_recent_signals(self, limit: int = 20, asset: str | None = None, tier: str | None = None):
+        items = [item for item in self.signals if self._matches(item, asset, tier)]
+        return list(reversed(items[-limit:]))
+
+    async def get_recent_orders(self, limit: int = 20, asset: str | None = None, tier: str | None = None):
+        items = [item for item in self.orders if self._matches(item, asset, tier)]
+        return list(reversed(items[-limit:]))
 
     async def get_recent_risk_events(self, limit: int = 20):
         return list(reversed(self.risk_events[-limit:]))
 
-    async def get_recent_decisions(self, limit: int = 20):
-        return list(reversed(self.decisions[-limit:]))
+    async def get_recent_decisions(self, limit: int = 20, asset: str | None = None, tier: str | None = None):
+        items = [item for item in self.decisions if self._matches(item, asset, tier)]
+        return list(reversed(items[-limit:]))
 
     async def get_equity_history(self, limit: int = 100):
         return list(self.equity_history[-limit:])
@@ -169,17 +209,23 @@ class FakeRepository:
             "portfolio": (await self.get_portfolio_summary()).model_dump(),
         }
 
-    async def get_performance_report(self, hours: int = 24):
+    async def get_performance_report(self, hours: int = 24, asset: str | None = None, tier: str | None = None):
+        signals = [item for item in self.signals if self._matches(item, asset, tier)]
+        decisions = [item for item in self.decisions if self._matches(item, asset, tier)]
+        orders = [item for item in self.orders if self._matches(item, asset, tier)]
+        open_positions = [item for item in self.positions.values() if self._matches(item, asset, tier)]
         return {
             "generated_at": "2026-03-18T12:05:00Z",
             "window_hours": hours,
+            "asset_filter": asset or "",
+            "tier_filter": tier or "",
             "summary": {
-                "signals": len(self.signals),
-                "decisions": len(self.decisions),
-                "orders": len(self.orders),
+                "signals": len(signals),
+                "decisions": len(decisions),
+                "orders": len(orders),
                 "risk_events": len(self.risk_events),
-                "approval_rate": 1.0 if self.signals else 0.0,
-                "execution_rate": 1.0 if self.decisions else 0.0,
+                "approval_rate": 1.0 if signals else 0.0,
+                "execution_rate": 1.0 if decisions else 0.0,
                 "positive_position_rate": 0.0,
                 "avg_edge": 0.22,
                 "avg_confidence": 0.77,
@@ -189,9 +235,41 @@ class FakeRepository:
                 **(await self.get_portfolio_summary()).model_dump(),
             },
             "cost_by_agent": [{"agent": "claude", "cost_usd": 0.01, "calls": 1}],
-            "risk_breakdown": [{"reason": "review rejected signal", "count": 1}],
-            "top_markets": [{"market_id": "m-1", "market_question": "Will ETH rally?", "signal_count": 1, "order_count": 1, "avg_edge": 0.22, "avg_confidence": 0.77}],
-            "open_positions": [],
+            "risk_breakdown": [{"label": "review rejected signal", "count": 1}],
+            "asset_breakdown": [{"label": "BTC", "count": len(signals)}],
+            "tier_breakdown": [{"label": "btc", "count": len(signals)}],
+            "news_breakdown": [{"label": "validated", "count": len(signals)}],
+            "news_provider_breakdown": [{"label": "smoke", "count": len(signals)}],
+            "news_fallback_breakdown": [
+                {"label": "primary_only", "count": len(signals)},
+                {"label": "fallback_used", "count": 0},
+                {"label": "unknown", "count": 0},
+            ],
+            "last_news_provider": (
+                {
+                    "provider_used": "smoke",
+                    "fallback_used": False,
+                    "signal_id": signals[-1]["signal_id"],
+                    "asset_symbol": signals[-1]["asset_symbol"],
+                    "crypto_tier": signals[-1]["crypto_tier"],
+                    "created_at": signals[-1]["created_at"],
+                }
+                if signals
+                else None
+            ),
+            "top_markets": [
+                {
+                    "market_id": "m-1",
+                    "market_question": "Will ETH rally?",
+                    "asset_symbol": "BTC",
+                    "crypto_tier": "btc",
+                    "signal_count": len(signals),
+                    "order_count": len(orders),
+                    "avg_edge": 0.22,
+                    "avg_confidence": 0.77,
+                }
+            ],
+            "open_positions": open_positions,
             "time_series": {"pipeline": [], "equity": []},
         }
 
@@ -202,7 +280,7 @@ class FakeContext:
             max_daily_spend_usd=5.0,
             paper_bankroll_usd=1000.0,
             live_trading=False,
-            smoke_test_mode=False,
+            smoke_test_mode=True,
             polymarket_gamma_url="https://gamma-api.polymarket.com",
             polymarket_clob_url="https://clob.polymarket.com",
             polymarket_market_ws="wss://ws-subscriptions-clob.polymarket.com/ws/market",
@@ -213,22 +291,39 @@ class FakeContext:
             polymarket_funder="",
             polymarket_signature_type=0,
             polymarket_chain_id=137,
+            news_provider_primary="marketaux",
+            news_provider_fallback="alphavantage",
+            news_lookback_hours=24,
+            news_http_timeout_seconds=15,
+            news_fallback_on_quota=True,
+            news_fallback_on_rate_limit=True,
+            news_fallback_on_upstream_error=True,
+            news_fallback_on_empty_result=False,
+            marketaux_api_key="",
+            marketaux_base_url="https://api.marketaux.com/v1/news/all",
+            marketaux_language="en",
+            marketaux_limit_per_request=3,
+            alphavantage_api_key="",
+            alphavantage_base_url="https://www.alphavantage.co/query",
+            alphavantage_news_limit=50,
         )
         self.agents_config = load_agents_config()
         self.risk_config = load_risk_config()
+        self.crypto_config = load_crypto_config()
         self.repository = FakeRepository()
         self.bus = FakeBus()
 
     async def reload_configs(self) -> None:
         self.agents_config = load_agents_config()
         self.risk_config = load_risk_config()
+        self.crypto_config = load_crypto_config()
 
     async def close(self) -> None:
         return None
 
 
 @pytest.mark.asyncio
-async def test_signal_review_execute_flow_smoke(monkeypatch) -> None:
+async def test_signal_news_review_execute_flow_smoke(monkeypatch) -> None:
     context = FakeContext()
     market = {
         "id": "market-1",
@@ -240,9 +335,19 @@ async def test_signal_review_execute_flow_smoke(monkeypatch) -> None:
         "token_id_yes": "token-yes-1",
         "token_id_no": "token-no-1",
         "clob_token_ids": ["token-yes-1", "token-no-1"],
+        "asset_symbol": "BTC",
+        "asset_name": "Bitcoin",
+        "crypto_tier": "btc",
+        "market_kind": "direct_coin",
+        "question_type": "upside_target",
+        "thesis_tags": ["btc", "btc", "upside_target"],
+        "thesis_hash": "btc-btc",
+        "orderbook_summary_yes": {"best_bid": 0.39, "best_ask": 0.41, "spread_bps": 50.0, "bid_depth": 100.0, "ask_depth": 200.0},
+        "orderbook_summary_no": {"best_bid": 0.59, "best_ask": 0.61, "spread_bps": 50.0, "bid_depth": 100.0, "ask_depth": 200.0},
     }
 
     claude = ClaudeAgent(context)
+    news_validator = NewsValidatorAgent(context)
     codex = CodexAgent(context)
     claw = ClawAgent(context)
 
@@ -276,7 +381,7 @@ async def test_signal_review_execute_flow_smoke(monkeypatch) -> None:
             provider="test",
         )
 
-    async def fake_markets(limit: int = 20):
+    async def fake_markets(limit: int = 20, crypto_only: bool = True):
         return [market]
 
     monkeypatch.setattr(claude.connector, "get_active_markets", fake_markets)
@@ -287,7 +392,14 @@ async def test_signal_review_execute_flow_smoke(monkeypatch) -> None:
     await claude.tick()
     assert len(context.repository.signals) == 1
     assert len(context.repository.market_snapshots) == 1
-    assert len(context.bus.streams["signals:created"]) == 1
+    assert len(context.bus.streams["signals:candidates"]) == 1
+
+    await news_validator.tick()
+    assert len(context.repository.news_validations) == 1
+    assert context.repository.signals[0]["news_validation"]["validated"] is True
+    assert context.repository.signals[0]["news_validation"]["provider_used"] == "smoke"
+    assert context.repository.signals[0]["news_validation"]["fallback_used"] is False
+    assert len(context.bus.streams["signals:validated"]) == 1
 
     await codex.tick()
     assert len(context.repository.decisions) == 1
@@ -297,7 +409,10 @@ async def test_signal_review_execute_flow_smoke(monkeypatch) -> None:
     assert len(context.repository.orders) == 1
     assert context.repository.orders[0]["status"] == "simulated"
     assert context.repository.orders[0]["token_id"] == "token-yes-1"
-    assert context.repository.orders[0]["market_question"] == "Will BTC be above 100k?"
+    assert context.repository.orders[0]["asset_symbol"] == "BTC"
+    assert context.repository.orders[0]["crypto_tier"] == "btc"
+    assert context.repository.orders[0]["news_validation"]["validated"] is True
+    assert context.repository.orders[0]["news_validation"]["provider_used"] == "smoke"
     portfolio = await context.repository.get_portfolio_summary()
     assert portfolio.open_positions == 1
     assert portfolio.total_exposure > 0
@@ -308,7 +423,9 @@ def test_api_smoke(monkeypatch) -> None:
     fake_context.repository.signals.append(
         {
             "signal_id": "sig-1",
-            "market_question": "Will ETH rally?",
+            "market_question": "Will BTC rally?",
+            "asset_symbol": "BTC",
+            "crypto_tier": "btc",
             "direction": "YES",
             "edge": 0.22,
             "confidence": 0.77,
@@ -320,12 +437,26 @@ def test_api_smoke(monkeypatch) -> None:
             "order_id": "ord-1",
             "signal_id": "sig-1",
             "market_id": "m-1",
+            "asset_symbol": "BTC",
+            "crypto_tier": "btc",
             "direction": "YES",
             "size": 100,
             "price_limit": 0.44,
             "status": "simulated",
             "created_at": "2026-03-18T12:01:00Z",
             "notional_usd": 44.0,
+        }
+    )
+    fake_context.repository.decisions.append(
+        {
+            "signal_id": "sig-1",
+            "asset_symbol": "BTC",
+            "crypto_tier": "btc",
+            "approved": True,
+            "corrected_price_limit": 0.405,
+            "kelly_size": 100,
+            "notes": "good",
+            "created_at": "2026-03-18T12:01:30Z",
         }
     )
     fake_context.repository.risk_events.append(
@@ -343,10 +474,6 @@ def test_api_smoke(monkeypatch) -> None:
     async def fake_create():
         return fake_context
 
-    async def fake_update(agent: str, model: str):
-        return None
-
-    monkeypatch.setattr(api_main.AppContext, "create", fake_create)
     def fake_update(agent: str, model: str, provider: str | None = None, fallback_model: str | None = None):
         selected_provider, normalized_model = infer_provider_from_model(model)
         agent_cfg = fake_context.agents_config.agents[agent]
@@ -359,17 +486,22 @@ def test_api_smoke(monkeypatch) -> None:
             agent_cfg.fallback_model = normalized_model
         return fake_context.agents_config
 
+    monkeypatch.setattr(api_main.AppContext, "create", fake_create)
     monkeypatch.setattr(api_main, "update_agent_model", fake_update)
 
     with TestClient(api_main.app) as client:
         assert client.get("/agents/status").status_code == 200
-        assert client.get("/signals/recent").json()[0]["signal_id"] == "sig-1"
-        assert client.get("/orders/recent").json()[0]["order_id"] == "ord-1"
+        assert client.get("/signals/recent?asset=BTC&tier=btc").json()[0]["signal_id"] == "sig-1"
+        assert client.get("/orders/recent?asset=BTC&tier=btc").json()[0]["order_id"] == "ord-1"
+        assert client.get("/decisions/recent?asset=BTC&tier=btc").json()[0]["signal_id"] == "sig-1"
         assert client.get("/risk-events/recent").status_code == 200
         assert client.get("/portfolio/equity-history").status_code == 200
         assert client.get("/portfolio/positions").status_code == 200
         assert client.get("/metrics/overview").json()["signals"] == 1
-        assert client.get("/metrics/performance").json()["summary"]["signals"] == 1
+        performance = client.get("/metrics/performance?hours=24&asset=BTC&tier=btc").json()
+        assert performance["summary"]["signals"] == 1
+        assert performance["asset_filter"] == "BTC"
+        assert performance["tier_filter"] == "btc"
         response = client.post("/agents/swap-model", json={"agent": "claude", "model": "openai/gpt-4o-mini"})
         assert response.status_code == 200
         assert response.json()["provider"] == "openai"

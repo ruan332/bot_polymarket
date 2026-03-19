@@ -6,6 +6,11 @@ BRANCH="${BRANCH:-main}"
 
 cd "$APP_DIR"
 
+if [[ ! -f .env ]]; then
+  echo ".env is missing in $APP_DIR; aborting deploy to avoid booting with empty production config."
+  exit 1
+fi
+
 git fetch origin
 git checkout "$BRANCH"
 git pull --ff-only origin "$BRANCH"

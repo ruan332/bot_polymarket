@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any
@@ -28,3 +29,7 @@ def extract_first_float(raw: str, patterns: list[str], default: float | None = N
         if match:
             return float(match.group(1))
     return default
+
+
+def stable_hash(raw: str, length: int = 12) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:length]

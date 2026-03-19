@@ -20,6 +20,7 @@ O projeto roda em `paper trading` ou `live trading` com esta topologia:
 - Projeto local: [C:\Projetos\bot_polymarket](C:\Projetos\bot_polymarket)
 - Config de agentes: [C:\Projetos\bot_polymarket\config\agents.yaml](C:\Projetos\bot_polymarket\config\agents.yaml)
 - Config de risco: [C:\Projetos\bot_polymarket\config\risk.yaml](C:\Projetos\bot_polymarket\config\risk.yaml)
+- Config de cripto: [C:\Projetos\bot_polymarket\config\crypto.yaml](C:\Projetos\bot_polymarket\config\crypto.yaml)
 - Compose de producao: [C:\Projetos\bot_polymarket\docker-compose.prod.yml](C:\Projetos\bot_polymarket\docker-compose.prod.yml)
 - Dockerfile de producao: [C:\Projetos\bot_polymarket\Dockerfile.prod](C:\Projetos\bot_polymarket\Dockerfile.prod)
 - Script de deploy VPS: [C:\Projetos\bot_polymarket\scripts\deploy-vps.sh](C:\Projetos\bot_polymarket\scripts\deploy-vps.sh)
@@ -55,6 +56,8 @@ Requisitos:
 
 - `OPENAI_API_KEY` preenchida se agentes estiverem em OpenAI
 - `ANTHROPIC_API_KEY` preenchida se algum agente usar Anthropic
+- `MARKETAUX_API_KEY` preenchida para a fonte principal de noticias
+- `ALPHAVANTAGE_API_KEY` recomendada como fallback automatico quando a primaria bater limite ou falhar
 
 ### Live trading
 
@@ -91,6 +94,21 @@ REDIS_URL=redis://redis:6379/0
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 GOOGLE_API_KEY=
+NEWS_PROVIDER_PRIMARY=marketaux
+NEWS_PROVIDER_FALLBACK=alphavantage
+NEWS_LOOKBACK_HOURS=24
+NEWS_HTTP_TIMEOUT_SECONDS=15
+NEWS_FALLBACK_ON_QUOTA=true
+NEWS_FALLBACK_ON_RATE_LIMIT=true
+NEWS_FALLBACK_ON_UPSTREAM_ERROR=true
+NEWS_FALLBACK_ON_EMPTY_RESULT=false
+MARKETAUX_API_KEY=
+MARKETAUX_BASE_URL=https://api.marketaux.com/v1/news/all
+MARKETAUX_LANGUAGE=en
+MARKETAUX_LIMIT_PER_REQUEST=3
+ALPHAVANTAGE_API_KEY=
+ALPHAVANTAGE_BASE_URL=https://www.alphavantage.co/query
+ALPHAVANTAGE_NEWS_LIMIT=50
 
 LIVE_TRADING=false
 SMOKE_TEST_MODE=false
@@ -111,6 +129,13 @@ Para gerar `.env` inicial:
 ./scripts/prepare-prod-env.sh
 ```
 
+Notas operacionais importantes:
+
+- o `.env` real da VPS fica fora do Git e continua preservado em `git pull`
+- atualizar `.env.production.example` nao altera o `.env` real ja existente
+- `scripts/prepare-prod-env.sh` nao sobrescreve `.env` existente
+- `scripts/deploy-vps.sh` agora aborta se `.env` estiver ausente, para evitar subir o stack sem configuracao valida
+
 ## Configuracoes de Estrategia
 
 ### Agentes
@@ -126,6 +151,27 @@ Campos mais importantes:
 - `fallback_model`
 - `daily_cost_limit_usd`
 
+Agentes esperados em runtime:
+
+- `claude`: scanner cripto
+- `news_validator`: valida contexto de noticias
+- `codex`: revisao operacional
+- `claw`: executor paper/live
+
+### Cripto
+
+Arquivo:
+
+- [config/crypto.yaml](C:\Projetos\bot_polymarket\config\crypto.yaml)
+
+Parametros mais sensiveis:
+
+- `major_assets`
+- `scan_priority`
+- `btc.*`
+- `major.*`
+- `small_cap.*`
+
 ### Risco
 
 Arquivo:
@@ -135,10 +181,12 @@ Arquivo:
 Parametros mais sensiveis:
 
 - `min_edge`
+- `min_confidence`
 - `max_single_position_usd`
 - `max_total_exposure_usd`
 - `max_open_positions`
-- `max_price_slippage`
+- `max_spread_bps`
+- `max_slippage_bps`
 - `max_order_price`
 - `min_market_volume_24h`
 
@@ -156,6 +204,7 @@ O script:
 - faz `git fetch`
 - faz `git checkout` da branch
 - faz `git pull --ff-only`
+- exige que o arquivo `.env` ja exista no host e nao recria esse arquivo
 - executa `docker compose -f docker-compose.prod.yml build --pull`
 - executa `docker compose -f docker-compose.prod.yml up -d`
 

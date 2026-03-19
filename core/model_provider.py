@@ -94,6 +94,15 @@ class ModelProvider:
             content = json_dumps(
                 {"edge": 0.24, "direction": "YES", "confidence": 0.78, "reasoning": "smoke test stub response"}
             )
+        elif self.agent_name == "news_validator":
+            content = json_dumps(
+                {
+                    "support_score": 0.82,
+                    "conflict_score": 0.08,
+                    "reason": "supportive recent crypto headlines",
+                    "headline_summaries": ["supportive order flow", "constructive market backdrop"],
+                }
+            )
         elif self.agent_name == "codex":
             price = extract_first_float(prompt, [r"preco:\s*([0-9.]+)", r"price:\s*([0-9.]+)"], 0.40) or 0.40
             content = json_dumps(

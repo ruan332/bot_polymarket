@@ -1,7 +1,12 @@
 .env
 .env.local
 .local/
+.tmp/
+.tools/
+.pip-cache/
+pytest-cache-files-*/
 dashboard/.next/
+dashboard/.npm-cache/
 dashboard/node_modules/
 __pycache__/
 *.pyc

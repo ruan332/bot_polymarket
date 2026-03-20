@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 
 from core.app_context import AppContext
-from core.config import update_agent_model
+from core.config import get_enabled_agent_names, update_agent_model
 from core.cost_tracker import CostTracker
 from core.schemas import ModelSwapRequest
 
@@ -65,7 +65,8 @@ async def swap_model(req: ModelSwapRequest) -> dict[str, str | int]:
 async def agents_status() -> dict[str, object]:
     context = get_context()
     rows = await context.repository.get_agent_status()
-    models = {agent: cfg.model for agent, cfg in context.agents_config.agents.items()}
+    enabled_agents = get_enabled_agent_names(context.settings, context.agents_config)
+    models = {agent: context.agents_config.agents[agent].model for agent in enabled_agents}
     status = {
         row["agent"]: {
             "model": row["model"],
@@ -75,6 +76,7 @@ async def agents_status() -> dict[str, object]:
             "meta": row["meta"],
         }
         for row in rows
+        if row["agent"] in models
     }
     for agent_name, model in models.items():
         status.setdefault(
@@ -87,7 +89,10 @@ async def agents_status() -> dict[str, object]:
 @app.get("/costs/daily")
 async def daily_costs() -> list[dict[str, object]]:
     context = get_context()
-    return [await CostTracker(agent_name, context).get_daily_summary() for agent_name in context.agents_config.agents]
+    return [
+        await CostTracker(agent_name, context).get_daily_summary()
+        for agent_name in get_enabled_agent_names(context.settings, context.agents_config)
+    ]
 
 
 @app.get("/signals/recent")

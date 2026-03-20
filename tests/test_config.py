@@ -88,6 +88,7 @@ def test_app_settings_news_provider_defaults(monkeypatch: pytest.MonkeyPatch) ->
         "NEWS_PROVIDER_FALLBACK",
         "NEWS_LOOKBACK_HOURS",
         "NEWS_HTTP_TIMEOUT_SECONDS",
+        "NEWS_VALIDATION_ENABLED",
         "MARKETAUX_API_KEY",
         "ALPHAVANTAGE_API_KEY",
     ):
@@ -98,12 +99,14 @@ def test_app_settings_news_provider_defaults(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.news_provider_primary == "marketaux"
     assert settings.news_provider_fallback == "alphavantage"
     assert settings.news_lookback_hours == 24
+    assert settings.news_validation_enabled is True
     assert settings.news_fallback_on_empty_result is False
 
 
 def test_app_settings_news_provider_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NEWS_PROVIDER_PRIMARY", "alphavantage")
     monkeypatch.setenv("NEWS_PROVIDER_FALLBACK", "marketaux")
+    monkeypatch.setenv("NEWS_VALIDATION_ENABLED", "false")
     monkeypatch.setenv("MARKETAUX_API_KEY", "marketaux-key")
     monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "alpha-key")
     monkeypatch.setenv("NEWS_LOOKBACK_HOURS", "12")
@@ -112,6 +115,7 @@ def test_app_settings_news_provider_env_overrides(monkeypatch: pytest.MonkeyPatc
 
     assert settings.news_provider_primary == "alphavantage"
     assert settings.news_provider_fallback == "marketaux"
+    assert settings.news_validation_enabled is False
     assert settings.marketaux_api_key == "marketaux-key"
     assert settings.alphavantage_api_key == "alpha-key"
     assert settings.news_lookback_hours == 12

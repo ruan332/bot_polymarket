@@ -98,7 +98,10 @@ class ClaudeAgent(BaseAgent):
                 continue
 
             await self.context.repository.record_signal(signal.signal_id, signal.event_type, signal.model_dump(mode="json"))
-            await self.context.bus.publish_event("signals:candidates", signal.model_dump(mode="json"))
+            target_stream = (
+                "signals:candidates" if self.context.settings.news_validation_enabled else "signals:validated"
+            )
+            await self.context.bus.publish_event(target_stream, signal.model_dump(mode="json"))
 
     async def calc_edge(self, market: dict) -> SignalPayload | None:
         prompt = f"""

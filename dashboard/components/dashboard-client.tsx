@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 
 type AgentStatus = {
   model: string;
@@ -168,6 +168,14 @@ type PerformanceReport = {
   };
 };
 
+type LogEntry = {
+  id: string;
+  time: string;
+  type: "signal" | "decision" | "order" | "risk";
+  message: string;
+  raw_time: string;
+};
+
 type DashboardState = {
   statuses: Record<string, AgentStatus>;
   costs: CostSummary[];
@@ -178,6 +186,7 @@ type DashboardState = {
   portfolio: PortfolioSummary | null;
   positions: Position[];
   performance: PerformanceReport | null;
+  logs: LogEntry[];
 };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
@@ -222,6 +231,7 @@ export function DashboardClient() {
     portfolio: null,
     positions: [],
     performance: null,
+    logs: [],
   });
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string>("booting");
@@ -248,6 +258,43 @@ export function DashboardClient() {
           return;
         }
 
+        // Generate unified logs from events
+        const newLogs: LogEntry[] = [];
+        
+        signals.forEach(s => newLogs.push({
+          id: `sig-${s.signal_id}`,
+          time: new Date(s.created_at).toLocaleTimeString(),
+          type: "signal",
+          message: `NEW SIGNAL: ${s.asset_symbol} ${s.direction} | Edge: ${s.edge.toFixed(3)} | ${s.market_question}`,
+          raw_time: s.created_at
+        }));
+
+        decisions.forEach(d => newLogs.push({
+          id: `dec-${d.signal_id}-${d.created_at}`,
+          time: new Date(d.created_at).toLocaleTimeString(),
+          type: "decision",
+          message: `DECISION: ${d.asset_symbol} ${d.approved ? "APPROVED" : "REJECTED"} | Kelly: ${d.kelly_size.toFixed(2)} | ${d.notes}`,
+          raw_time: d.created_at
+        }));
+
+        orders.forEach(o => newLogs.push({
+          id: `ord-${o.order_id}`,
+          time: new Date(o.created_at).toLocaleTimeString(),
+          type: "order",
+          message: `ORDER: ${o.asset_symbol} ${o.direction} | ${o.size} shares @ ${o.price_limit.toFixed(3)} | Status: ${o.status}`,
+          raw_time: o.created_at
+        }));
+
+        riskEvents.forEach(r => newLogs.push({
+          id: `risk-${r.created_at}-${r.agent}`,
+          time: new Date(r.created_at).toLocaleTimeString(),
+          type: "risk",
+          message: `RISK BLOCK: [${r.agent}] ${r.reason}`,
+          raw_time: r.created_at
+        }));
+
+        newLogs.sort((a, b) => b.raw_time.localeCompare(a.raw_time));
+
         setState({
           statuses,
           costs,
@@ -258,6 +305,7 @@ export function DashboardClient() {
           portfolio,
           positions,
           performance,
+          logs: newLogs.slice(0, 100), // Keep last 100 logs
         });
         setError(null);
         setLastUpdated(new Date().toLocaleTimeString());
@@ -284,6 +332,10 @@ export function DashboardClient() {
   const summary = performance?.summary;
   const lastNewsProvider = performance?.last_news_provider;
   const fallbackHits = breakdownCount(performance?.news_fallback_breakdown ?? [], "fallback_used");
+  
+  const runningAgents = Object.values(state.statuses).filter(s => s.running).length;
+  const totalAgents = Object.keys(state.statuses).length;
+  const lastActivity = state.logs[0]?.time ?? "none";
 
   return (
     <main className="terminal-shell">
@@ -298,302 +350,161 @@ export function DashboardClient() {
 
         <div className="hero-copy">
           <div>
-            <p className="eyebrow">$ boot polymarket-bot --mode paper</p>
-            <h1>Terminal-grade market room.</h1>
+            <p className="eyebrow">$ sudo poly-console --tail=live</p>
+            <h1>System Command Center</h1>
             <p className="hero-text">
-              Dark operations console for scanning, review, execution and risk control. The board tracks the live
-              paper-trading loop, performance over the last 24 hours and current exposure with a compact mobile-first
-              layout.
+              Multi-agent autonomous intelligence suite for Polymarket. 
+              Real-time synchronization with Redis cluster and predictive modeling.
             </p>
           </div>
 
           <div className="hero-console">
             <div className="console-line">
-              <span className="prompt">$</span>
-              <span>window: {performance?.window_hours ?? 24}h</span>
+              <span className="prompt">root@polymarket:~$</span>
+              <span>uptime --status</span>
             </div>
             <div className="console-line">
-              <span className="prompt">$</span>
-              <span>signals: {summary?.signals ?? 0}</span>
+              <span className="prompt">&gt;</span>
+              <span>Active Agents: {runningAgents}/{totalAgents}</span>
             </div>
             <div className="console-line">
-              <span className="prompt">$</span>
-              <span>approval: {summary ? asPercent(summary.approval_rate) : "0.0%"}</span>
+              <span className="prompt">&gt;</span>
+              <span>Last Pulse: {lastActivity}</span>
             </div>
             <div className="console-line">
-              <span className="prompt">$</span>
-              <span>execution: {summary ? asPercent(summary.execution_rate) : "0.0%"}</span>
+              <span className="prompt">&gt;</span>
+              <span>Approval: {summary ? asPercent(summary.approval_rate) : "0.0%"}</span>
             </div>
           </div>
         </div>
       </section>
 
       <section className="metrics-grid">
-        <MetricCard label="Total Equity" value={asCurrency(state.portfolio?.total_equity ?? 0)} hint="cash plus marked positions" tone="cyan" />
-        <MetricCard label="Available Balance" value={asCurrency(state.portfolio?.available_balance ?? 0)} hint="free bankroll remaining" tone="green" />
-        <MetricCard label="Total Exposure" value={asCurrency(state.portfolio?.total_exposure ?? 0)} hint="paper notional currently deployed" tone="amber" />
-        <MetricCard label="Open Positions" value={`${state.portfolio?.open_positions ?? 0}`} hint="book entries still active" tone="slate" />
-        <MetricCard label="Approval Rate" value={summary ? asPercent(summary.approval_rate) : "0.0%"} hint="reviews approved over emitted signals" tone="cyan" />
-        <MetricCard label="Execution Rate" value={summary ? asPercent(summary.execution_rate) : "0.0%"} hint="paper orders over approved reviews" tone="amber" />
-        <MetricCard label="Avg Edge" value={summary ? summary.avg_edge.toFixed(3) : "0.000"} hint="average signal edge in window" tone="green" />
-        <MetricCard label="24h LLM Cost" value={asCurrency(summary?.llm_cost_usd ?? 0)} hint="provider spend in the active window" tone="red" />
-        <MetricCard
-          label="News Source"
-          value={lastNewsProvider?.provider_used ?? "n/a"}
-          hint={lastNewsProvider?.fallback_used ? "latest validation came from fallback" : "latest validation source"}
-          tone="slate"
-        />
-        <MetricCard label="Fallback Hits" value={`${fallbackHits}`} hint="provider failovers in active window" tone="amber" />
+        <MetricCard label="Net Equity" value={asCurrency(state.portfolio?.total_equity ?? 0)} hint="Current liquidation value" tone="cyan" />
+        <MetricCard label="Liquidity" value={asCurrency(state.portfolio?.available_balance ?? 0)} hint="Ready for deployment" tone="green" />
+        <MetricCard label="Exposure" value={asCurrency(state.portfolio?.total_exposure ?? 0)} hint="Capital at risk" tone="amber" />
+        <MetricCard label="Positions" value={`${state.portfolio?.open_positions ?? 0}`} hint="Active market entries" tone="slate" />
+        <MetricCard label="Win Rate" value={summary ? asPercent(summary.approval_rate) : "0.0%"} hint="System approval confidence" tone="cyan" />
+        <MetricCard label="Throughput" value={summary ? asPercent(summary.execution_rate) : "0.0%"} hint="Approval to execution ratio" tone="amber" />
+        <MetricCard label="Avg Alpha" value={summary ? summary.avg_edge.toFixed(3) : "0.000"} hint="Market edge per signal" tone="green" />
+        <MetricCard label="API Overhead" value={asCurrency(summary?.llm_cost_usd ?? 0)} hint="LLM provider expenditure" tone="red" />
+        <MetricCard label="Active Agents" value={`${runningAgents}/${totalAgents}`} hint="Core runtime status" tone="green" />
+        <MetricCard label="Last Signal" value={lastActivity} hint="Most recent market event" tone="slate" />
       </section>
 
-      <section className="dashboard-grid">
-        <article className="panel panel-sidebar span-3">
+      <div className="dashboard-grid">
+        <article className="panel span-4">
           <div className="panel-head">
-            <h3>Agent Runtime</h3>
-            <span className="terminal-pill">{Object.keys(state.statuses).length} agents</span>
+            <h3>Log Terminal</h3>
+            <span className="terminal-pill">live feed</span>
+          </div>
+          <LogTerminal logs={state.logs} />
+        </article>
+
+        <article className="panel span-3">
+          <div className="panel-head">
+            <h3>Agent Network</h3>
+            <span className="terminal-pill">{runningAgents} online</span>
           </div>
           <div className="stack-list">
             {Object.entries(state.statuses).map(([name, status]) => (
               <div key={name} className="stack-row">
-                <div className="row-main">
+                <div className="row-main agent-status">
+                  <div className={`status-indicator ${status.running ? "online" : "offline"}`}></div>
                   <strong>{name}</strong>
                   <span className={status.running ? "running mono" : "blocked mono"}>
-                    {status.running ? "online" : "offline"}
+                    {status.running ? "ACTIVE" : "IDLE"}
                   </span>
                 </div>
-                <span className="mono muted">{status.model}</span>
-                <span className="mono subtle">cfg #{status.config_version}</span>
-                <span className="mono subtle">
-                  seen {status.last_seen ? new Date(status.last_seen).toLocaleTimeString() : "never"}
-                </span>
+                <span className="mono subtle">{status.model}</span>
+                <span className="mono subtle">v{status.config_version} | seen {status.last_seen ? new Date(status.last_seen).toLocaleTimeString() : "never"}</span>
               </div>
             ))}
           </div>
         </article>
-
-        <OperationsCharts
-          costs={performance?.cost_by_agent ?? state.costs}
-          pipeline={performance?.time_series.pipeline ?? []}
-          equity={performance?.time_series.equity ?? []}
-          riskBreakdown={performance?.risk_breakdown ?? []}
-        />
 
         <article className="panel span-5">
-          <div className="panel-head">
-            <h3>Top Markets</h3>
-            <span className="terminal-pill">signal density</span>
-          </div>
-          <div className="stack-list">
-            {(performance?.top_markets ?? []).slice(0, 6).map((market) => (
-              <div key={market.market_id} className="stack-row">
-                <div className="row-main">
-                  <strong>{market.market_question}</strong>
-                  <span className="mono subtle">{market.asset_symbol} / {market.crypto_tier}</span>
-                </div>
-                <div className="row-meta">
-                  <span className="mono">{market.signal_count} signals</span>
-                  <span className="mono">edge {market.avg_edge.toFixed(3)}</span>
-                  <span className="mono">conf {market.avg_confidence.toFixed(2)}</span>
-                  <span className="mono">orders {market.order_count}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </article>
-
-        <article className="panel span-4">
-          <div className="panel-head">
-            <h3>Recent Reviews</h3>
-            <span className="terminal-pill">{state.decisions.length} cached</span>
-          </div>
-          <div className="stack-list compact">
-            {state.decisions.slice(0, 6).map((decision) => (
-              <div key={`${decision.signal_id}-${decision.created_at}`} className="stack-row">
-                <div className="row-main">
-                  <strong>{decision.asset_symbol} {decision.approved ? "approved" : "rejected"}</strong>
-                  <span className={decision.approved ? "running mono" : "blocked mono"}>
-                    {decision.crypto_tier ?? "unknown"} / kelly {decision.kelly_size}
-                  </span>
-                </div>
-                <span>{decision.notes}</span>
-                <span className="mono subtle">{new Date(decision.created_at).toLocaleString()}</span>
-              </div>
-            ))}
-          </div>
+           <OperationsCharts
+            costs={performance?.cost_by_agent ?? state.costs}
+            pipeline={performance?.time_series.pipeline ?? []}
+            equity={performance?.time_series.equity ?? []}
+            riskBreakdown={performance?.risk_breakdown ?? []}
+          />
         </article>
 
         <article className="panel span-8">
           <div className="panel-head">
-            <h3>Open Positions</h3>
+            <h3>Portfolio Positions</h3>
             <span className="terminal-pill">{state.positions.length} active</span>
           </div>
           <div className="stack-list">
-            {state.positions.slice(0, 8).map((position) => (
-              <div key={`${position.market_id}-${position.direction}`} className="stack-row">
-                <div className="row-main">
-                  <strong>{position.asset_symbol ?? "?"} {position.direction} {position.market_question || position.market_id}</strong>
-                  <span className={position.unrealized_pnl >= 0 ? "running mono" : "blocked mono"}>
-                    {asCurrency(position.unrealized_pnl)}
-                  </span>
+            {state.positions.length === 0 ? (
+              <p className="mono subtle p-4">SYSTEM READY. SCANNING FOR ENTRIES...</p>
+            ) : (
+              state.positions.map((position) => (
+                <div key={`${position.market_id}-${position.direction}`} className="stack-row">
+                  <div className="row-main">
+                    <strong>{position.asset_symbol ?? "?"} {position.direction} <span className="mono subtle">{position.market_question || position.market_id}</span></strong>
+                    <span className={position.unrealized_pnl >= 0 ? "running mono" : "blocked mono"}>
+                      {asCurrency(position.unrealized_pnl)}
+                    </span>
+                  </div>
+                  <div className="row-meta">
+                    <span className="mono">{position.size} shares</span>
+                    <span className="mono">ENTRY: {position.average_price.toFixed(3)}</span>
+                    <span className="mono">MARK: {position.current_price.toFixed(3)}</span>
+                    <span className="mono">VALUE: {asCurrency(position.current_value_usd)}</span>
+                  </div>
                 </div>
-                <div className="row-meta">
-                  <span className="mono">{position.crypto_tier ?? "unknown"}</span>
-                  <span className="mono">{position.size} contracts</span>
-                  <span className="mono">avg {position.average_price.toFixed(3)}</span>
-                  <span className="mono">mark {position.current_price.toFixed(3)}</span>
-                  <span className="mono">value {asCurrency(position.current_value_usd)}</span>
-                </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </article>
 
         <article className="panel span-4">
           <div className="panel-head">
-            <h3>Recent Orders</h3>
-            <span className="terminal-pill">{state.orders.length} cached</span>
+            <h3>Risk Monitoring</h3>
+            <span className="terminal-pill">watchdog</span>
           </div>
           <div className="stack-list compact">
-            {state.orders.slice(0, 6).map((order) => (
-              <div key={order.order_id} className="stack-row">
-                <div className="row-main">
-                  <strong>{order.asset_symbol} {order.direction}</strong>
-                  <span className={order.status === "simulated" ? "running mono" : "blocked mono"}>
-                    {order.crypto_tier ?? "unknown"} / {order.status}
-                  </span>
-                </div>
-                <span>{order.market_question || order.market_id}</span>
-                <div className="row-meta">
-                  <span className="mono">{order.size} @ {order.price_limit.toFixed(3)}</span>
-                  <span className="mono">{asCurrency(order.notional_usd)}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </article>
-
-        <article className="panel span-6">
-          <div className="panel-head">
-            <h3>Recent Signals</h3>
-            <span className="terminal-pill">{state.signals.length} cached</span>
-          </div>
-          <div className="stack-list">
-            {state.signals.slice(0, 8).map((signal) => (
-              <div key={signal.signal_id} className="stack-row">
-                <div className="row-main">
-                  <strong>{signal.asset_symbol} {signal.direction} {signal.market_question}</strong>
-                  <span className="mono subtle">{signal.crypto_tier} / {signal.edge.toFixed(3)} edge</span>
-                </div>
-                <div className="row-meta">
-                  <span className="mono">price {signal.price.toFixed(3)}</span>
-                  <span className="mono">conf {signal.confidence.toFixed(2)}</span>
-                  <span className={signal.news_validation?.validated ? "running mono" : "blocked mono"}>
-                    news {signal.news_validation?.validated ? "ok" : "pending/block"}
-                  </span>
-                  <span className="mono">
-                    src {signal.news_validation?.provider_used ?? "n/a"}
-                    {signal.news_validation?.fallback_used ? " (fb)" : ""}
-                  </span>
-                  <span className="mono">{new Date(signal.created_at).toLocaleTimeString()}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </article>
-
-        <article className="panel span-6">
-          <div className="panel-head">
-            <h3>Risk Tape</h3>
-            <span className="terminal-pill">{state.riskEvents.length} cached</span>
-          </div>
-          <div className="stack-list">
-            {state.riskEvents.slice(0, 8).map((event) => (
+            {state.riskEvents.slice(0, 10).map((event) => (
               <div key={`${event.agent}-${event.created_at}-${event.reason}`} className="stack-row">
                 <div className="row-main">
                   <strong>{event.agent}</strong>
-                  <span className="blocked mono">blocked</span>
+                  <span className="blocked mono">HALTED</span>
                 </div>
-                <span>{event.reason}</span>
-                <span className="mono subtle">{new Date(event.created_at).toLocaleString()}</span>
+                <span className="mono muted">{event.reason}</span>
+                <span className="mono subtle text-right">{new Date(event.created_at).toLocaleTimeString()}</span>
               </div>
             ))}
+            {state.riskEvents.length === 0 && <p className="mono subtle">NO CRITICAL ALERTS</p>}
           </div>
         </article>
-
-        <article className="panel span-6">
-          <div className="panel-head">
-            <h3>Tier Mix</h3>
-            <span className="terminal-pill">crypto focus</span>
-          </div>
-          <div className="stack-list compact">
-            {(performance?.tier_breakdown ?? []).map((item) => (
-              <div key={item.label} className="stack-row">
-                <div className="row-main">
-                  <strong>{item.label}</strong>
-                  <span className="mono subtle">{item.count} signals</span>
-                </div>
-              </div>
-            ))}
-            {(performance?.asset_breakdown ?? []).slice(0, 5).map((item) => (
-              <div key={item.label} className="stack-row">
-                <div className="row-main">
-                  <strong>{item.label}</strong>
-                  <span className="mono subtle">{item.count} signals</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </article>
-
-        <article className="panel span-6">
-          <div className="panel-head">
-            <h3>News Gate</h3>
-            <span className="terminal-pill">validation</span>
-          </div>
-          <div className="stack-list compact">
-            {lastNewsProvider ? (
-              <div className="stack-row">
-                <div className="row-main">
-                  <strong>last source</strong>
-                  <span className={lastNewsProvider.fallback_used ? "blocked mono" : "running mono"}>
-                    {lastNewsProvider.provider_used}
-                    {lastNewsProvider.fallback_used ? " / fallback" : " / primary"}
-                  </span>
-                </div>
-                <span className="mono subtle">
-                  {lastNewsProvider.asset_symbol} {lastNewsProvider.crypto_tier} @{" "}
-                  {new Date(lastNewsProvider.created_at).toLocaleTimeString()}
-                </span>
-              </div>
-            ) : null}
-            {(performance?.news_breakdown ?? []).map((item) => (
-              <div key={item.label} className="stack-row">
-                <div className="row-main">
-                  <strong>{item.label}</strong>
-                  <span className="mono subtle">{item.count}</span>
-                </div>
-              </div>
-            ))}
-            {(performance?.news_provider_breakdown ?? []).map((item) => (
-              <div key={`provider-${item.label}`} className="stack-row">
-                <div className="row-main">
-                  <strong>{item.label}</strong>
-                  <span className="mono subtle">{item.count} validations</span>
-                </div>
-              </div>
-            ))}
-            {(performance?.news_fallback_breakdown ?? []).map((item) => (
-              <div key={`fallback-${item.label}`} className="stack-row">
-                <div className="row-main">
-                  <strong>{item.label}</strong>
-                  <span className="mono subtle">{item.count}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </article>
-      </section>
+      </div>
     </main>
+  );
+}
+
+function LogTerminal({ logs }: { logs: LogEntry[] }) {
+  const terminalRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (terminalRef.current) {
+      terminalRef.current.scrollTop = 0; // Newest at top for easier reading in small panels
+    }
+  }, [logs]);
+
+  return (
+    <div className="log-terminal" ref={terminalRef}>
+      {logs.map((log) => (
+        <div key={log.id} className="log-entry">
+          <span className="log-time">[{log.time}]</span>
+          <span className={`log-tag tag-${log.type}`}>{log.type}</span>
+          <span className="log-message">{log.message}</span>
+        </div>
+      ))}
+      {logs.length === 0 && <div className="log-entry subtle">Waiting for system logs...</div>}
+    </div>
   );
 }
 
@@ -616,3 +527,4 @@ function MetricCard({
     </article>
   );
 }
+

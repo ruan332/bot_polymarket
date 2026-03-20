@@ -41,6 +41,7 @@ Usado para validacao basica do pipeline sem depender do fluxo real.
 ```env
 SMOKE_TEST_MODE=true
 LIVE_TRADING=false
+NEWS_VALIDATION_ENABLED=true
 ```
 
 ### Paper trading com mercado real
@@ -50,6 +51,7 @@ Modo recomendado para teste operacional.
 ```env
 SMOKE_TEST_MODE=false
 LIVE_TRADING=false
+NEWS_VALIDATION_ENABLED=true
 ```
 
 Requisitos:
@@ -66,6 +68,7 @@ So habilitar depois de validar `paper trading`.
 ```env
 SMOKE_TEST_MODE=false
 LIVE_TRADING=true
+NEWS_VALIDATION_ENABLED=true
 ```
 
 Requisitos adicionais:
@@ -94,6 +97,7 @@ REDIS_URL=redis://redis:6379/0
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 GOOGLE_API_KEY=
+NEWS_VALIDATION_ENABLED=true
 NEWS_PROVIDER_PRIMARY=marketaux
 NEWS_PROVIDER_FALLBACK=alphavantage
 NEWS_LOOKBACK_HOURS=24
@@ -136,6 +140,12 @@ Notas operacionais importantes:
 - `scripts/prepare-prod-env.sh` nao sobrescreve `.env` existente
 - `scripts/deploy-vps.sh` agora aborta se `.env` estiver ausente, para evitar subir o stack sem configuracao valida
 
+Toggle de noticias:
+
+- `NEWS_VALIDATION_ENABLED=true`: fluxo completo `claude -> news_validator -> codex -> claw`
+- `NEWS_VALIDATION_ENABLED=false`: bypass da etapa de noticias e fluxo `claude -> codex -> claw`
+- com o toggle desligado, o agente `news_validator` nao sobe e `agents/status` nao deve listar esse agente
+
 ## Configuracoes de Estrategia
 
 ### Agentes
@@ -154,7 +164,7 @@ Campos mais importantes:
 Agentes esperados em runtime:
 
 - `claude`: scanner cripto
-- `news_validator`: valida contexto de noticias
+- `news_validator`: valida contexto de noticias quando `NEWS_VALIDATION_ENABLED=true`
 - `codex`: revisao operacional
 - `claw`: executor paper/live
 
@@ -166,11 +176,18 @@ Arquivo:
 
 Parametros mais sensiveis:
 
+- `enabled`
+- `direct_coin_only`
 - `major_assets`
 - `scan_priority`
 - `btc.*`
 - `major.*`
 - `small_cap.*`
+
+Escopo operacional atual:
+
+- com `enabled=true` e `direct_coin_only=true`, o scanner tenta operar apenas mercados de cripto direta
+- posicoes antigas sem `asset_symbol` ou `crypto_tier` no dashboard sao legado do banco e podem continuar visiveis ate serem encerradas ou limpas
 
 ### Risco
 

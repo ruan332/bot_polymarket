@@ -28,6 +28,26 @@ type Props = {
 };
 
 export function OperationsCharts({ costs, pipeline, equity, riskBreakdown }: Props) {
+  // Theme colors from CSS variables
+  const colors = {
+    green: "#4ade80",
+    cyan: "#38bdf8",
+    amber: "#fbbf24",
+    red: "#f87171",
+    slate: "#94a3b8",
+    bg: "#02040a",
+    line: "rgba(56, 189, 248, 0.15)",
+  };
+
+  const tooltipStyle = {
+    backgroundColor: "rgba(2, 4, 10, 0.95)",
+    border: `1px solid ${colors.line}`,
+    borderRadius: "4px",
+    color: "#e0f2fe",
+    fontFamily: "var(--font-mono), monospace",
+    fontSize: "0.85rem",
+  };
+
   return (
     <>
       <article className="panel chart-panel span-8">
@@ -40,32 +60,28 @@ export function OperationsCharts({ costs, pipeline, equity, riskBreakdown }: Pro
             <AreaChart data={equity}>
               <defs>
                 <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#31c48d" stopOpacity={0.42} />
-                  <stop offset="95%" stopColor="#31c48d" stopOpacity={0.04} />
+                  <stop offset="5%" stopColor={colors.green} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={colors.green} stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid stroke="rgba(148, 163, 184, 0.16)" strokeDasharray="4 4" />
+              <CartesianGrid stroke={colors.line} strokeDasharray="3 3" vertical={false} />
               <XAxis
                 dataKey="created_at"
-                stroke="#94a3b8"
-                tickFormatter={(value: string) => new Date(value).toLocaleTimeString()}
+                stroke={colors.slate}
+                tick={{ fontSize: 10 }}
+                tickFormatter={(value: string) => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 minTickGap={32}
               />
-              <YAxis stroke="#94a3b8" />
+              <YAxis stroke={colors.slate} tick={{ fontSize: 10 }} />
               <Tooltip
                 labelFormatter={(value: string) => new Date(value).toLocaleString()}
                 formatter={(value: number, name: string) => [`$${value.toFixed(2)}`, name]}
-                contentStyle={{
-                  backgroundColor: "#08111f",
-                  border: "1px solid rgba(49,196,141,0.25)",
-                  borderRadius: 10,
-                  color: "#e2e8f0",
-                }}
+                contentStyle={tooltipStyle}
               />
-              <Legend />
-              <Area type="monotone" dataKey="total_equity" stroke="#31c48d" fill="url(#equityFill)" strokeWidth={2.5} />
-              <Line type="monotone" dataKey="total_pnl" stroke="#60a5fa" strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="unrealized_pnl" stroke="#f59e0b" strokeWidth={2} dot={false} />
+              <Legend iconType="circle" wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+              <Area type="monotone" dataKey="total_equity" stroke={colors.green} fill="url(#equityFill)" strokeWidth={2} />
+              <Line type="monotone" dataKey="total_pnl" stroke={colors.cyan} strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="unrealized_pnl" stroke={colors.amber} strokeWidth={2} dot={false} />
             </AreaChart>
           </ResponsiveContainer>
         </div>
@@ -79,18 +95,14 @@ export function OperationsCharts({ costs, pipeline, equity, riskBreakdown }: Pro
         <div className="chart-wrap">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={costs}>
-              <CartesianGrid stroke="rgba(148, 163, 184, 0.16)" strokeDasharray="4 4" />
-              <XAxis dataKey="agent" stroke="#94a3b8" />
-              <YAxis stroke="#94a3b8" />
+              <CartesianGrid stroke={colors.line} strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="agent" stroke={colors.slate} tick={{ fontSize: 10 }} />
+              <YAxis stroke={colors.slate} tick={{ fontSize: 10 }} />
               <Tooltip
-                contentStyle={{
-                  backgroundColor: "#08111f",
-                  border: "1px solid rgba(96,165,250,0.22)",
-                  borderRadius: 10,
-                  color: "#e2e8f0",
-                }}
+                contentStyle={tooltipStyle}
+                formatter={(value: number) => [`$${value.toFixed(4)}`, "Cost"]}
               />
-              <Bar dataKey="cost_usd" fill="#60a5fa" radius={[6, 6, 0, 0]} />
+              <Bar dataKey="cost_usd" fill={colors.cyan} radius={[2, 2, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -104,30 +116,26 @@ export function OperationsCharts({ costs, pipeline, equity, riskBreakdown }: Pro
         <div className="chart-wrap">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={pipeline}>
-              <CartesianGrid stroke="rgba(148, 163, 184, 0.16)" strokeDasharray="4 4" />
+              <CartesianGrid stroke={colors.line} strokeDasharray="3 3" vertical={false} />
               <XAxis
                 dataKey="bucket"
-                stroke="#94a3b8"
+                stroke={colors.slate}
+                tick={{ fontSize: 10 }}
                 tickFormatter={(value: string) =>
                   new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
                 }
                 minTickGap={26}
               />
-              <YAxis stroke="#94a3b8" allowDecimals={false} />
+              <YAxis stroke={colors.slate} tick={{ fontSize: 10 }} allowDecimals={false} />
               <Tooltip
                 labelFormatter={(value: string) => new Date(value).toLocaleString()}
-                contentStyle={{
-                  backgroundColor: "#08111f",
-                  border: "1px solid rgba(96,165,250,0.22)",
-                  borderRadius: 10,
-                  color: "#e2e8f0",
-                }}
+                contentStyle={tooltipStyle}
               />
-              <Legend />
-              <Line type="monotone" dataKey="signals" stroke="#31c48d" strokeWidth={2.5} dot={false} />
-              <Line type="monotone" dataKey="decisions" stroke="#60a5fa" strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="orders" stroke="#f59e0b" strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="risk_events" stroke="#f87171" strokeWidth={2} dot={false} />
+              <Legend iconType="circle" wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+              <Line type="monotone" dataKey="signals" stroke={colors.green} strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="decisions" stroke={colors.cyan} strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="orders" stroke={colors.amber} strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="risk_events" stroke={colors.red} strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -141,24 +149,18 @@ export function OperationsCharts({ costs, pipeline, equity, riskBreakdown }: Pro
         <div className="chart-wrap">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={riskBreakdown} layout="vertical" margin={{ left: 12, right: 8 }}>
-              <CartesianGrid stroke="rgba(148, 163, 184, 0.16)" strokeDasharray="4 4" />
-              <XAxis type="number" stroke="#94a3b8" allowDecimals={false} />
+              <CartesianGrid stroke={colors.line} strokeDasharray="3 3" horizontal={false} />
+              <XAxis type="number" stroke={colors.slate} tick={{ fontSize: 10 }} allowDecimals={false} />
               <YAxis
                 dataKey="label"
                 type="category"
-                stroke="#94a3b8"
-                width={138}
-                tickFormatter={(value: string) => (value.length > 18 ? `${value.slice(0, 18)}...` : value)}
+                stroke={colors.slate}
+                width={120}
+                tick={{ fontSize: 9 }}
+                tickFormatter={(value: string) => (value.length > 15 ? `${value.slice(0, 15)}...` : value)}
               />
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: "#08111f",
-                  border: "1px solid rgba(248,113,113,0.25)",
-                  borderRadius: 10,
-                  color: "#e2e8f0",
-                }}
-              />
-              <Bar dataKey="count" fill="#f87171" radius={[0, 6, 6, 0]} />
+              <Tooltip contentStyle={tooltipStyle} />
+              <Bar dataKey="count" fill={colors.red} radius={[0, 2, 2, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -166,3 +168,4 @@ export function OperationsCharts({ costs, pipeline, equity, riskBreakdown }: Pro
     </>
   );
 }
+

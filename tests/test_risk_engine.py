@@ -122,3 +122,14 @@ async def test_build_execution_guard_blocks_small_caps_more_aggressively() -> No
     assert guard.notional_usd == pytest.approx(100.0)
     with pytest.raises(RiskBlockedError):
         await risk.build_execution_guard(make_review(small_cap_signal))
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_allows_missing_news_validation() -> None:
+    risk = RiskEngine(make_context())
+    signal = make_signal(symbol="BTC", tier="btc", edge=0.40, confidence=0.80, price=0.40, volume_24h=100000.0)
+
+    guard = await risk.build_execution_guard(make_review(signal))
+
+    assert guard.size == 250
+    assert guard.price_limit == pytest.approx(0.405)

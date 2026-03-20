@@ -281,6 +281,7 @@ class FakeContext:
             paper_bankroll_usd=1000.0,
             live_trading=False,
             smoke_test_mode=True,
+            news_validation_enabled=True,
             polymarket_gamma_url="https://gamma-api.polymarket.com",
             polymarket_clob_url="https://clob.polymarket.com",
             polymarket_market_ws="wss://ws-subscriptions-clob.polymarket.com/ws/market",
@@ -418,6 +419,87 @@ async def test_signal_news_review_execute_flow_smoke(monkeypatch) -> None:
     assert portfolio.total_exposure > 0
 
 
+@pytest.mark.asyncio
+async def test_signal_review_execute_flow_without_news_validation(monkeypatch) -> None:
+    context = FakeContext()
+    context.settings.news_validation_enabled = False
+    market = {
+        "id": "market-1",
+        "question": "Will BTC be above 100k?",
+        "description": "test market",
+        "price_yes": 0.40,
+        "price_no": 0.60,
+        "volume_24h": 50000.0,
+        "token_id_yes": "token-yes-1",
+        "token_id_no": "token-no-1",
+        "clob_token_ids": ["token-yes-1", "token-no-1"],
+        "asset_symbol": "BTC",
+        "asset_name": "Bitcoin",
+        "crypto_tier": "btc",
+        "market_kind": "direct_coin",
+        "question_type": "upside_target",
+        "thesis_tags": ["btc", "btc", "upside_target"],
+        "thesis_hash": "btc-btc",
+        "orderbook_summary_yes": {"best_bid": 0.39, "best_ask": 0.41, "spread_bps": 50.0, "bid_depth": 100.0, "ask_depth": 200.0},
+        "orderbook_summary_no": {"best_bid": 0.59, "best_ask": 0.61, "spread_bps": 50.0, "bid_depth": 100.0, "ask_depth": 200.0},
+    }
+
+    claude = ClaudeAgent(context)
+    codex = CodexAgent(context)
+    claw = ClawAgent(context)
+
+    async def fake_scan(*args, **kwargs):
+        return ModelResponse(
+            content='{"edge": 0.30, "direction": "YES", "confidence": 0.80, "reasoning": "spread mispriced"}',
+            input_tokens=10,
+            output_tokens=15,
+            model="test-scan",
+            cost_usd=0.01,
+            provider="test",
+        )
+
+    async def fake_review(*args, **kwargs):
+        return ModelResponse(
+            content='{"approved": true, "notes": "looks good", "corrected_price_limit": 0.405}',
+            input_tokens=8,
+            output_tokens=12,
+            model="test-review",
+            cost_usd=0.01,
+            provider="test",
+        )
+
+    async def fake_execute(*args, **kwargs):
+        return ModelResponse(
+            content='{"execute": true, "size": 100, "price_limit": 0.41, "reason": "paper fill"}',
+            input_tokens=8,
+            output_tokens=12,
+            model="test-exec",
+            cost_usd=0.01,
+            provider="test",
+        )
+
+    async def fake_markets(limit: int = 20, crypto_only: bool = True):
+        return [market]
+
+    monkeypatch.setattr(claude.connector, "get_active_markets", fake_markets)
+    monkeypatch.setattr(claude.provider, "call", fake_scan)
+    monkeypatch.setattr(codex.provider, "call", fake_review)
+    monkeypatch.setattr(claw.provider, "call", fake_execute)
+
+    await claude.tick()
+    assert len(context.repository.signals) == 1
+    assert len(context.bus.streams["signals:candidates"]) == 0
+    assert len(context.bus.streams["signals:validated"]) == 1
+
+    await codex.tick()
+    assert len(context.repository.decisions) == 1
+    assert context.repository.decisions[0]["news_validation"] is None
+
+    await claw.tick()
+    assert len(context.repository.orders) == 1
+    assert context.repository.orders[0]["news_validation"] is None
+
+
 def test_api_smoke(monkeypatch) -> None:
     fake_context = FakeContext()
     fake_context.repository.signals.append(
@@ -505,3 +587,19 @@ def test_api_smoke(monkeypatch) -> None:
         response = client.post("/agents/swap-model", json={"agent": "claude", "model": "openai/gpt-4o-mini"})
         assert response.status_code == 200
         assert response.json()["provider"] == "openai"
+
+
+def test_api_agents_status_hides_news_validator_when_disabled(monkeypatch) -> None:
+    fake_context = FakeContext()
+    fake_context.settings.news_validation_enabled = False
+
+    async def fake_create():
+        return fake_context
+
+    monkeypatch.setattr(api_main.AppContext, "create", fake_create)
+
+    with TestClient(api_main.app) as client:
+        status = client.get("/agents/status").json()
+        costs = client.get("/costs/daily").json()
+        assert "news_validator" not in status
+        assert all(item["agent"] != "news_validator" for item in costs)

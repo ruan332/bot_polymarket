@@ -143,6 +143,7 @@ class AppSettings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     live_trading: bool = False
     smoke_test_mode: bool = False
+    news_validation_enabled: bool = True
     max_daily_spend_usd: float = 5.0
     max_single_position_usd: float = 100.0
     paper_bankroll_usd: float = 1000.0
@@ -172,6 +173,13 @@ class AppSettings(BaseSettings):
     alphavantage_api_key: str = ""
     alphavantage_base_url: str = "https://www.alphavantage.co/query"
     alphavantage_news_limit: int = 50
+
+
+def get_enabled_agent_names(settings: AppSettings, agents_config: AgentsConfig) -> list[str]:
+    names = list(agents_config.agents.keys())
+    if not settings.news_validation_enabled:
+        names = [name for name in names if name != "news_validator"]
+    return names
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:

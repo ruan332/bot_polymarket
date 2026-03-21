@@ -1,5 +1,5 @@
 risk:
-  min_edge: 0.19
+  min_edge: 0.12
   min_confidence: 0.55
   max_kelly_fraction: 0.25
   max_single_exposure_fraction: 0.10

@@ -16,7 +16,7 @@ def test_load_agents_config_reads_yaml() -> None:
 
 def test_load_risk_config_reads_thresholds() -> None:
     risk = load_risk_config()
-    assert risk.min_edge == pytest.approx(0.19)
+    assert risk.min_edge == pytest.approx(0.12)
     assert risk.max_kelly_fraction == pytest.approx(0.25)
 
 

@@ -147,6 +147,16 @@ class RiskEngine:
             ),
             None,
         )
+        opposite_position = next(
+            (
+                item
+                for item in positions
+                if str(item.get("market_id")) == signal.market_id and str(item.get("direction")) != signal.direction
+            ),
+            None,
+        )
+        if opposite_position is not None:
+            raise RiskBlockedError("opposite position already open for this market")
         if portfolio.open_positions >= self.config.max_open_positions and existing_position is None:
             raise RiskBlockedError("max_open_positions reached")
         effective_daily_limit = max(self.config.max_daily_spend_usd, max_position_usd)

@@ -10,18 +10,19 @@ from core.risk_engine import RiskEngine
 from core.schemas import PortfolioSummary, ReviewPayload, SignalPayload
 
 
-def make_context():
+def make_context(*, positions: list[dict[str, object]] | None = None):
     crypto_config = load_crypto_config()
+    open_positions = positions or []
 
     class Repository:
         def __init__(self):
             self.summary = PortfolioSummary(
                 available_balance=1000.0,
-                total_exposure=0.0,
+                total_exposure=sum(float(item.get("cost_basis_usd") or 0.0) for item in open_positions),
                 current_market_value=0.0,
                 total_equity=1000.0,
                 total_pnl=0.0,
-                open_positions=0,
+                open_positions=len(open_positions),
                 realized_pnl=0.0,
                 unrealized_pnl=0.0,
             )
@@ -30,7 +31,7 @@ def make_context():
             return self.summary
 
         async def get_open_positions(self) -> list[dict[str, object]]:
-            return []
+            return open_positions
 
         async def get_execution_risk_state(self, hours: int = 24) -> dict[str, object]:
             return {
@@ -164,3 +165,42 @@ async def test_build_execution_guard_allows_missing_news_validation() -> None:
 
     assert guard.size == 250
     assert guard.price_limit == pytest.approx(0.405)
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_blocks_opposite_position_same_market() -> None:
+    existing_signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.40,
+        confidence=0.80,
+        price=0.40,
+        volume_24h=100000.0,
+    )
+    incoming_signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.40,
+        confidence=0.80,
+        price=0.60,
+        volume_24h=100000.0,
+    )
+    incoming_signal.direction = "NO"
+    incoming_signal.market_id = existing_signal.market_id
+
+    risk = RiskEngine(
+        make_context(
+            positions=[
+                {
+                    "market_id": existing_signal.market_id,
+                    "direction": "YES",
+                    "asset_symbol": "BTC",
+                    "strategy_id": existing_signal.strategy_id,
+                    "cost_basis_usd": 40.0,
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(RiskBlockedError, match="opposite position already open for this market"):
+        await risk.build_execution_guard(make_review(incoming_signal))

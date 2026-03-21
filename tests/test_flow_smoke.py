@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -622,6 +623,48 @@ async def test_signal_review_execute_flow_without_news_validation(monkeypatch) -
     await claw.tick()
     assert len(context.repository.orders) == 1
     assert context.repository.orders[0]["news_validation"] is None
+
+
+@pytest.mark.asyncio
+async def test_claw_exit_cycle_records_uuid_signal_id(monkeypatch) -> None:
+    context = FakeContext()
+    claw = ClawAgent(context)
+    context.repository.positions["market-1:YES"] = {
+        "market_id": "market-1",
+        "position_key": "market-1:YES",
+        "token_id": "token-yes-1",
+        "market_question": "Will BTC be above 100k?",
+        "asset_symbol": "BTC",
+        "crypto_tier": "btc",
+        "strategy_id": "mean_revert_bayes",
+        "regime": "mean_revert",
+        "direction": "YES",
+        "size": 2,
+        "average_price": 0.40,
+        "current_price": 0.50,
+        "cost_basis_usd": 0.80,
+        "current_value_usd": 1.0,
+        "unrealized_pnl": 0.20,
+        "take_profit_price": 0.45,
+        "stop_loss_price": 0.30,
+        "time_stop_minutes": 90,
+        "opened_at": "2026-03-21T10:00:00Z",
+        "scaled_out_count": 0,
+        "latest_spread_bps": 40.0,
+    }
+
+    async def fake_place_order(**kwargs):
+        return {"status": "simulated", **kwargs}
+
+    monkeypatch.setattr(claw.connector, "place_order", fake_place_order)
+
+    result = await claw.process_exit_cycle()
+
+    assert result["exit_orders_count"] == 1
+    assert len(context.repository.orders) == 1
+    assert context.repository.orders[0]["action"] == "close"
+    assert context.repository.orders[0]["exit_reason"] == "take_profit"
+    UUID(context.repository.orders[0]["signal_id"])
 
 
 def test_api_smoke(monkeypatch) -> None:

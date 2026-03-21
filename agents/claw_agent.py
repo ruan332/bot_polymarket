@@ -151,7 +151,7 @@ class ClawAgent(BaseAgent):
             )
             payload = PaperOrderPayload(
                 order_id=str(uuid4()),
-                signal_id=f"exit-{position['market_id']}-{uuid4().hex[:8]}",
+                signal_id=str(uuid4()),
                 market_id=str(position["market_id"]),
                 token_id=str(position["token_id"]),
                 market_question=str(position.get("market_question") or ""),

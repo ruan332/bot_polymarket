@@ -1361,9 +1361,9 @@ class TradingRepository:
         await self.db.execute(
             """
             UPDATE positions
-            SET size = $2,
-                exposure_usd = average_price * $2,
-                scaled_out_count = scaled_out_count + $3,
+            SET size = $2::integer,
+                exposure_usd = average_price * ($2::double precision),
+                scaled_out_count = scaled_out_count + $3::integer,
                 updated_at = $4
             WHERE position_key = $1
             """,

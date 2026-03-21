@@ -210,3 +210,78 @@ async def test_get_active_markets_filters_indirect_crypto_markets(monkeypatch) -
     assert len(markets) == 1
     assert markets[0]["id"] == "market-1"
     assert markets[0]["asset_symbol"] == "BTC"
+
+
+@pytest.mark.asyncio
+async def test_get_active_markets_expands_upstream_fetch_for_crypto_only(monkeypatch) -> None:
+    payload = [
+        {
+            "id": f"noise-{idx}",
+            "question": f"Will random topic {idx} happen?",
+            "description": "non-crypto market",
+            "outcomePrices": "[\"0.20\", \"0.80\"]",
+            "clobTokenIds": f"[\"noise-yes-{idx}\", \"noise-no-{idx}\"]",
+            "volume24hr": "100000.00",
+        }
+        for idx in range(60)
+    ]
+    payload.extend(
+        [
+            {
+                "id": "market-btc",
+                "question": "Will BTC be above 100k this month?",
+                "description": "test",
+                "outcomePrices": "[\"0.41\", \"0.59\"]",
+                "clobTokenIds": "[\"token-yes-btc\", \"token-no-btc\"]",
+                "volume24hr": "12345.67",
+            },
+            {
+                "id": "market-eth",
+                "question": "Will ETH be above 5k this month?",
+                "description": "test",
+                "outcomePrices": "[\"0.31\", \"0.69\"]",
+                "clobTokenIds": "[\"token-yes-eth\", \"token-no-eth\"]",
+                "volume24hr": "22345.67",
+            },
+        ]
+    )
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return payload
+
+    class FakeSession:
+        def get(self, url, *, params=None):
+            captured["url"] = url
+            captured["params"] = params or {}
+            return FakeResponse()
+
+        @property
+        def closed(self):
+            return False
+
+    connector = MarketConnector(FakeContext(live_trading=False))
+
+    async def fake_client():
+        return FakeSession()
+
+    async def fake_orderbook_summary(token_id: str):
+        return {"best_bid": 0.4, "best_ask": 0.41, "spread_bps": 25.0, "bid_depth": 1000.0, "ask_depth": 1000.0}
+
+    monkeypatch.setattr(connector, "_client", fake_client)
+    monkeypatch.setattr(connector, "get_orderbook_summary", fake_orderbook_summary)
+
+    markets = await connector.get_active_markets(limit=2, crypto_only=True)
+
+    assert captured["params"]["limit"] == 100
+    assert [item["id"] for item in markets] == ["market-btc", "market-eth"]

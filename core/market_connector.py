@@ -33,9 +33,12 @@ class MarketConnector:
 
     async def get_active_markets(self, limit: int = 20, crypto_only: bool = False) -> list[dict[str, Any]]:
         session = await self._client()
+        upstream_limit = limit
+        if crypto_only:
+            upstream_limit = min(max(limit * 8, 100), 250)
         async with session.get(
             f"{self.context.settings.polymarket_gamma_url}/markets",
-            params={"active": "true", "closed": "false", "limit": limit},
+            params={"active": "true", "closed": "false", "limit": upstream_limit},
         ) as response:
             response.raise_for_status()
             data = await response.json()
@@ -59,8 +62,6 @@ class MarketConnector:
                 continue
             token_id_yes = str(clob_token_ids[0]) if len(clob_token_ids) > 0 else str(market_id)
             token_id_no = str(clob_token_ids[1]) if len(clob_token_ids) > 1 else str(market_id)
-            orderbook_yes = await self.get_orderbook_summary(token_id_yes) if candidate else {}
-            orderbook_no = await self.get_orderbook_summary(token_id_no) if candidate else {}
             normalized.append(
                 {
                     "id": str(market.get("id") or market.get("conditionId") or market_id),
@@ -86,14 +87,20 @@ class MarketConnector:
                         or market.get("end_date_iso")
                         or ""
                     ),
-                    "orderbook_summary_yes": orderbook_yes,
-                    "orderbook_summary_no": orderbook_no,
+                    "orderbook_summary_yes": {},
+                    "orderbook_summary_no": {},
                 }
             )
         if crypto_only:
             priority = {tier: index for index, tier in enumerate(self.context.crypto_config.scan_priority)}
             normalized.sort(key=lambda item: (priority.get(item.get("crypto_tier", ""), 99), -(item.get("volume_24h", 0.0))))
-        return normalized[:limit]
+        selected = normalized[:limit]
+        for market in selected:
+            if not market.get("asset_symbol"):
+                continue
+            market["orderbook_summary_yes"] = await self.get_orderbook_summary(str(market["token_id_yes"]))
+            market["orderbook_summary_no"] = await self.get_orderbook_summary(str(market["token_id_no"]))
+        return selected
 
     async def get_orderbook(self, token_id: str) -> dict[str, Any]:
         session = await self._client()

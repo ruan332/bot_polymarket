@@ -44,6 +44,12 @@ def test_classify_crypto_market_rejects_indirect_crypto_markets() -> None:
     assert candidate is None
 
 
+def test_classify_crypto_market_rejects_thematic_long_horizon_markets() -> None:
+    crypto = load_crypto_config()
+    candidate = classify_crypto_market("Will bitcoin hit $1m before GTA VI?", "long horizon theme market", crypto)
+    assert candidate is None
+
+
 def test_update_agent_model_is_atomic() -> None:
     temp_dir = Path(".tmp") / f"agent-config-{uuid4().hex}"
     temp_dir.mkdir(parents=True, exist_ok=True)

@@ -67,6 +67,17 @@ INDIRECT_KEYWORDS = {
     "treasury",
     "reserve",
 }
+THEMATIC_EVENT_KEYWORDS = {
+    "gta",
+    "grand theft auto",
+    "super bowl",
+    "world cup",
+    "olympics",
+    "oscar",
+    "election",
+    "inauguration",
+    "wwdc",
+}
 DIRECT_MARKET_KEYWORDS = {
     "above",
     "below",
@@ -78,6 +89,16 @@ DIRECT_MARKET_KEYWORDS = {
     "hit",
     "reach",
 }
+CALENDAR_MARKER_PATTERN = re.compile(
+    r"\b("
+    r"today|tonight|tomorrow|this week|this month|this quarter|this year|"
+    r"end of (the )?(day|week|month|quarter|year)|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|"
+    r"aug|august|sep|sept|september|oct|october|nov|november|dec|december|"
+    r"q[1-4]|20\d{2}|\d{1,2}/\d{1,2}"
+    r")\b"
+)
 
 
 @dataclass
@@ -114,6 +135,10 @@ def classify_crypto_market(question: str, description: str, config: CryptoSettin
     if config.direct_coin_only and any(keyword in text for keyword in INDIRECT_KEYWORDS):
         return None
     if not any(keyword in text for keyword in DIRECT_MARKET_KEYWORDS):
+        return None
+    if any(keyword in text for keyword in THEMATIC_EVENT_KEYWORDS):
+        return None
+    if "before" in text and not CALENDAR_MARKER_PATTERN.search(text):
         return None
 
     tier = "btc" if symbol == "BTC" else ("major" if symbol in {item.upper() for item in config.major_assets} else "small_cap")

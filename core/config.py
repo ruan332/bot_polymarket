@@ -34,7 +34,7 @@ class AgentsConfig(BaseModel):
 class CryptoTierSettings(BaseModel):
     min_edge: float = 0.20
     min_confidence: float = 0.60
-    min_volume_24h: float = 10000.0
+    min_volume_24h: float = 5000.0
     min_news_sources: int = 1
     min_news_support_score: float = 0.50
     max_news_conflict_score: float = 0.35
@@ -60,7 +60,7 @@ class CryptoSettings(BaseModel):
         default_factory=lambda: CryptoTierSettings(
             min_edge=0.20,
             min_confidence=0.60,
-            min_volume_24h=50000.0,
+            min_volume_24h=5000.0,
             min_news_sources=1,
             min_news_support_score=0.45,
             max_news_conflict_score=0.45,
@@ -72,7 +72,7 @@ class CryptoSettings(BaseModel):
         default_factory=lambda: CryptoTierSettings(
             min_edge=0.23,
             min_confidence=0.64,
-            min_volume_24h=30000.0,
+            min_volume_24h=10000.0,
             min_news_sources=2,
             min_news_support_score=0.60,
             max_news_conflict_score=0.30,
@@ -84,7 +84,7 @@ class CryptoSettings(BaseModel):
         default_factory=lambda: CryptoTierSettings(
             min_edge=0.28,
             min_confidence=0.72,
-            min_volume_24h=75000.0,
+            min_volume_24h=20000.0,
             min_news_sources=3,
             min_news_support_score=0.72,
             max_news_conflict_score=0.20,
@@ -111,7 +111,7 @@ class RiskSettings(BaseModel):
     max_single_position_usd: float = 100.0
     max_total_exposure_usd: float = 250.0
     max_daily_spend_usd: float = 5.0
-    min_market_volume_24h: float = 10000.0
+    min_market_volume_24h: float = 5000.0
     max_order_price: float = 0.90
     max_spread_bps: int = 250
     max_slippage_bps: int = 150

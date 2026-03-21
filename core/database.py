@@ -95,6 +95,14 @@ CREATE TABLE IF NOT EXISTS risk_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS pipeline_telemetry (
+    id UUID PRIMARY KEY,
+    agent TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS equity_snapshots (
     id UUID PRIMARY KEY,
     available_balance DOUBLE PRECISION NOT NULL,
@@ -151,6 +159,12 @@ ON equity_snapshots (created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_news_validations_signal_id
 ON news_validations (signal_id);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_telemetry_created_at
+ON pipeline_telemetry (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_telemetry_agent_event
+ON pipeline_telemetry (agent, event_type, created_at DESC);
 """
 
 
@@ -345,6 +359,21 @@ class TradingRepository:
             event_id,
             agent,
             reason,
+            _as_json(payload),
+        )
+
+    async def record_pipeline_telemetry(
+        self,
+        event_id: str,
+        agent: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        await self.db.execute(
+            "INSERT INTO pipeline_telemetry (id, agent, event_type, payload) VALUES ($1::uuid, $2, $3, $4::jsonb)",
+            event_id,
+            agent,
+            event_type,
             _as_json(payload),
         )
 
@@ -553,6 +582,18 @@ class TradingRepository:
         rows = await self.db.fetch("SELECT payload, created_at FROM risk_events ORDER BY created_at DESC LIMIT $1", limit)
         return [self._decode_record(row) for row in rows]
 
+    async def get_recent_pipeline_telemetry(self, limit: int = 30) -> list[dict[str, Any]]:
+        rows = await self.db.fetch(
+            """
+            SELECT agent, event_type, payload, created_at
+            FROM pipeline_telemetry
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+        return [self._decode_pipeline_record(row) for row in rows]
+
     async def get_agent_status(self) -> list[dict[str, Any]]:
         rows = await self.db.fetch("SELECT agent, model, running, config_version, last_seen, meta FROM agent_heartbeats ORDER BY agent")
         return [
@@ -572,13 +613,28 @@ class TradingRepository:
         decisions = await self.db.fetchrow("SELECT COUNT(*) AS count FROM agent_decisions")
         orders = await self.db.fetchrow("SELECT COUNT(*) AS count FROM paper_orders")
         risk_events = await self.db.fetchrow("SELECT COUNT(*) AS count FROM risk_events")
+        pipeline_rows = await self.db.fetch(
+            """
+            SELECT agent, event_type, payload, created_at
+            FROM pipeline_telemetry
+            WHERE created_at >= $1
+            ORDER BY created_at ASC
+            """,
+            datetime.now(UTC) - timedelta(minutes=15),
+        )
+        pipeline_events = [self._decode_pipeline_record(row) for row in pipeline_rows]
         portfolio = await self.get_portfolio_summary()
+        flow_summary = self._summarize_pipeline_events(pipeline_events, window_minutes=15)
         return {
             "signals": int(signals["count"] or 0),
             "decisions": int(decisions["count"] or 0),
             "orders": int(orders["count"] or 0),
             "risk_events": int(risk_events["count"] or 0),
             "portfolio": portfolio.model_dump(),
+            "flow_summary": flow_summary,
+            "latest_scan_telemetry": self._latest_pipeline_event(pipeline_events, "scanner.scan_cycle"),
+            "latest_review_telemetry": self._latest_pipeline_event(pipeline_events, "reviewer.review_cycle"),
+            "latest_execution_telemetry": self._latest_pipeline_event(pipeline_events, "executor.execute_cycle"),
         }
 
     async def get_performance_report(
@@ -1350,3 +1406,52 @@ class TradingRepository:
             payload = json.loads(payload)
         payload["created_at"] = row["created_at"]
         return payload
+
+    @staticmethod
+    def _decode_pipeline_record(row: asyncpg.Record) -> dict[str, Any]:
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        return {
+            "agent": row["agent"],
+            "event_type": row["event_type"],
+            "created_at": row["created_at"],
+            **payload,
+        }
+
+    @staticmethod
+    def _latest_pipeline_event(events: list[dict[str, Any]], event_type: str) -> dict[str, Any] | None:
+        for event in reversed(events):
+            if str(event.get("event_type") or "") == event_type:
+                return event
+        return None
+
+    @staticmethod
+    def _sum_pipeline_field(events: list[dict[str, Any]], event_type: str, field: str) -> int:
+        return sum(
+            int(event.get(field) or 0)
+            for event in events
+            if str(event.get("event_type") or "") == event_type
+        )
+
+    @classmethod
+    def _summarize_pipeline_events(cls, events: list[dict[str, Any]], *, window_minutes: int) -> dict[str, Any]:
+        return {
+            "window_minutes": window_minutes,
+            "gamma_markets_fetched": cls._sum_pipeline_field(events, "scanner.scan_cycle", "gamma_markets_fetched"),
+            "crypto_classified": cls._sum_pipeline_field(events, "scanner.scan_cycle", "crypto_classified"),
+            "selected_for_scan": cls._sum_pipeline_field(events, "scanner.scan_cycle", "selected_for_scan"),
+            "strategy_candidates": cls._sum_pipeline_field(events, "scanner.scan_cycle", "strategy_candidates"),
+            "reached_risk_engine": cls._sum_pipeline_field(events, "scanner.scan_cycle", "reached_risk_engine"),
+            "risk_passed": cls._sum_pipeline_field(events, "scanner.scan_cycle", "risk_passed"),
+            "risk_blocked": cls._sum_pipeline_field(events, "scanner.scan_cycle", "risk_blocked"),
+            "duplicates_blocked": cls._sum_pipeline_field(events, "scanner.scan_cycle", "duplicates_blocked"),
+            "persisted_signals": cls._sum_pipeline_field(events, "scanner.scan_cycle", "persisted_signals"),
+            "reviewer_inbox": cls._sum_pipeline_field(events, "reviewer.review_cycle", "inbox_count"),
+            "reviewer_approved": cls._sum_pipeline_field(events, "reviewer.review_cycle", "approved_count"),
+            "reviewer_rejected": cls._sum_pipeline_field(events, "reviewer.review_cycle", "rejected_count"),
+            "executor_inbox": cls._sum_pipeline_field(events, "executor.execute_cycle", "inbox_count"),
+            "executor_executed": cls._sum_pipeline_field(events, "executor.execute_cycle", "executed_count"),
+            "executor_blocked": cls._sum_pipeline_field(events, "executor.execute_cycle", "blocked_count"),
+            "exit_orders_count": cls._sum_pipeline_field(events, "executor.execute_cycle", "exit_orders_count"),
+        }

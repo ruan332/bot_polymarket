@@ -24,11 +24,16 @@ class CodexAgent(BaseAgent):
             block_ms=250,
             count=1,
         )
+        approved_count = 0
+        rejected_count = 0
+        reviewed_assets: list[str] = []
         for event_id, payload in events:
             signal = SignalPayload.model_validate(payload)
+            reviewed_assets.append(signal.asset_symbol)
             try:
                 review = await self.review_signal(signal)
                 if review.approved:
+                    approved_count += 1
                     await self.context.repository.record_decision(
                         str(uuid4()),
                         signal.signal_id,
@@ -37,6 +42,7 @@ class CodexAgent(BaseAgent):
                     )
                     await self.context.bus.publish_event("signals:reviewed", review.model_dump(mode="json"))
                 else:
+                    rejected_count += 1
                     await self.risk.record_block(
                         self.name,
                         review.notes or "review rejected signal",
@@ -49,6 +55,18 @@ class CodexAgent(BaseAgent):
                     )
             finally:
                 await self.context.bus.ack("signals:validated", "codex_reviewers", event_id)
+        if events:
+            await self.context.repository.record_pipeline_telemetry(
+                str(uuid4()),
+                self.name,
+                "reviewer.review_cycle",
+                {
+                    "inbox_count": len(events),
+                    "approved_count": approved_count,
+                    "rejected_count": rejected_count,
+                    "reviewed_assets": reviewed_assets[:6],
+                },
+            )
 
     async def review_signal(self, signal: SignalPayload) -> ReviewPayload:
         try:

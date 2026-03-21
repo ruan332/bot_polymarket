@@ -13,7 +13,7 @@ from py_clob_client.order_builder.constants import BUY
 if TYPE_CHECKING:
     from core.app_context import AppContext
 
-from core.crypto import classify_crypto_market
+from core.crypto import classify_crypto_market_with_reason
 
 
 class MarketConnector:
@@ -21,6 +21,7 @@ class MarketConnector:
         self.context = context
         self.session: aiohttp.ClientSession | None = None
         self.clob_client: ClobClient | None = None
+        self.last_scan_stats: dict[str, Any] = {}
 
     async def close(self) -> None:
         if self.session and not self.session.closed:
@@ -45,6 +46,8 @@ class MarketConnector:
 
         markets = data if isinstance(data, list) else data.get("data", [])
         normalized: list[dict[str, Any]] = []
+        rejection_breakdown: dict[str, int] = {}
+        crypto_classified = 0
         for market in markets:
             prices = self._coerce_sequence(market.get("outcomePrices"))
             if not prices:
@@ -57,7 +60,13 @@ class MarketConnector:
             market_id = str(market.get("id") or market.get("conditionId") or (clob_token_ids[0] if clob_token_ids else ""))
             question = str(market.get("question", "Unknown market"))
             description = str(market.get("description", ""))
-            candidate = classify_crypto_market(question, description, self.context.crypto_config)
+            classification = classify_crypto_market_with_reason(question, description, self.context.crypto_config)
+            candidate = classification.candidate
+            if candidate is not None:
+                crypto_classified += 1
+            elif crypto_only:
+                reason = classification.rejection_reason or "unclassified"
+                rejection_breakdown[reason] = rejection_breakdown.get(reason, 0) + 1
             if crypto_only and candidate is None:
                 continue
             token_id_yes = str(clob_token_ids[0]) if len(clob_token_ids) > 0 else str(market_id)
@@ -100,6 +109,24 @@ class MarketConnector:
                 continue
             market["orderbook_summary_yes"] = await self.get_orderbook_summary(str(market["token_id_yes"]))
             market["orderbook_summary_no"] = await self.get_orderbook_summary(str(market["token_id_no"]))
+        self.last_scan_stats = {
+            "requested_limit": limit,
+            "upstream_limit": upstream_limit,
+            "gamma_markets_fetched": len(markets),
+            "crypto_classified": crypto_classified,
+            "rejection_breakdown": rejection_breakdown,
+            "selected_for_scan": len(selected),
+            "selected_markets": [
+                {
+                    "market_id": str(item.get("id") or ""),
+                    "asset_symbol": str(item.get("asset_symbol") or ""),
+                    "crypto_tier": str(item.get("crypto_tier") or ""),
+                    "volume_24h": float(item.get("volume_24h") or 0.0),
+                    "question": str(item.get("question") or ""),
+                }
+                for item in selected[:6]
+            ],
+        }
         return selected
 
     async def get_orderbook(self, token_id: str) -> dict[str, Any]:

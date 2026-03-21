@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from uuid import uuid4
 
 from agents.base import BaseAgent
@@ -53,16 +54,26 @@ class ClaudeAgent(BaseAgent):
             ]
         )
         await self.context.repository.record_equity_snapshot(source="scan_cycle")
+        strategy_candidates = 0
+        risk_passed = 0
+        risk_blocked = 0
+        duplicates_blocked = 0
+        persisted_signals = 0
+        risk_block_reasons: dict[str, int] = {}
         for market in markets:
             signal = await self.calc_edge(market)
             if signal is None:
                 continue
+            strategy_candidates += 1
             try:
                 await self.risk.validate_signal(signal)
             except RiskBlockedError as exc:
+                risk_blocked += 1
+                reason = str(exc)
+                risk_block_reasons[reason] = risk_block_reasons.get(reason, 0) + 1
                 await self.risk.record_block(
                     self.name,
-                    str(exc),
+                    reason,
                     {
                         "signal_id": signal.signal_id,
                         "market_id": signal.market_id,
@@ -71,6 +82,7 @@ class ClaudeAgent(BaseAgent):
                     },
                 )
                 continue
+            risk_passed += 1
 
             cooldown_minutes = self.context.crypto_config.tier(signal.crypto_tier).cooldown_minutes
             is_duplicate = await self.context.repository.has_recent_signal_duplicate(
@@ -92,11 +104,33 @@ class ClaudeAgent(BaseAgent):
                 )
                 continue
 
+            persisted_signals += 1
             await self.context.repository.record_signal(signal.signal_id, signal.event_type, signal.model_dump(mode="json"))
             target_stream = (
                 "signals:candidates" if self.context.settings.news_validation_enabled else "signals:validated"
             )
             await self.context.bus.publish_event(target_stream, signal.model_dump(mode="json"))
+
+        scan_stats = deepcopy(getattr(self.connector, "last_scan_stats", {}))
+        rejection_breakdown = dict(scan_stats.get("rejection_breakdown") or {})
+        await self.context.repository.record_pipeline_telemetry(
+            str(uuid4()),
+            self.name,
+            "scanner.scan_cycle",
+            {
+                **scan_stats,
+                "rejection_breakdown": rejection_breakdown,
+                "selected_for_scan": len(markets),
+                "strategy_candidates": strategy_candidates,
+                "reached_risk_engine": strategy_candidates,
+                "risk_passed": risk_passed,
+                "risk_blocked": risk_blocked,
+                "duplicates_blocked": duplicates_blocked,
+                "persisted_signals": persisted_signals,
+                "risk_block_reasons": risk_block_reasons,
+                "news_validation_enabled": bool(self.context.settings.news_validation_enabled),
+            },
+        )
 
     async def calc_edge(self, market: dict) -> SignalPayload | None:
         decision = await self.strategy.analyze_market(market)

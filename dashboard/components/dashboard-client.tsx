@@ -90,6 +90,71 @@ type RiskEvent = {
   created_at: string;
 };
 
+type PipelineTelemetryEvent = {
+  agent: string;
+  event_type: "scanner.scan_cycle" | "reviewer.review_cycle" | "executor.execute_cycle";
+  created_at: string;
+  requested_limit?: number;
+  upstream_limit?: number;
+  gamma_markets_fetched?: number;
+  crypto_classified?: number;
+  rejection_breakdown?: Record<string, number>;
+  selected_for_scan?: number;
+  selected_markets?: Array<{
+    market_id: string;
+    asset_symbol: string;
+    crypto_tier: string;
+    volume_24h: number;
+    question: string;
+  }>;
+  strategy_candidates?: number;
+  reached_risk_engine?: number;
+  risk_passed?: number;
+  risk_blocked?: number;
+  duplicates_blocked?: number;
+  persisted_signals?: number;
+  risk_block_reasons?: Record<string, number>;
+  inbox_count?: number;
+  approved_count?: number;
+  rejected_count?: number;
+  reviewed_assets?: string[];
+  executed_count?: number;
+  blocked_count?: number;
+  exit_orders_count?: number;
+  open_positions_seen?: number;
+  exit_actions?: string[];
+};
+
+type MetricsOverview = {
+  signals: number;
+  decisions: number;
+  orders: number;
+  risk_events: number;
+  portfolio: PortfolioSummary;
+  flow_summary?: {
+    window_minutes: number;
+    gamma_markets_fetched: number;
+    crypto_classified: number;
+    selected_for_scan: number;
+    strategy_candidates: number;
+    reached_risk_engine: number;
+    risk_passed: number;
+    risk_blocked: number;
+    duplicates_blocked: number;
+    persisted_signals: number;
+    reviewer_inbox: number;
+    reviewer_approved: number;
+    reviewer_rejected: number;
+    executor_inbox: number;
+    executor_executed: number;
+    executor_blocked: number;
+    exit_orders_count: number;
+  };
+  latest_scan_telemetry?: PipelineTelemetryEvent | null;
+  latest_review_telemetry?: PipelineTelemetryEvent | null;
+  latest_execution_telemetry?: PipelineTelemetryEvent | null;
+};
+
 type PortfolioSummary = {
   available_balance: number;
   total_exposure: number;
@@ -210,7 +275,7 @@ type PerformanceReport = {
 type LogEntry = {
   id: string;
   time: string;
-  type: "signal" | "decision" | "order" | "risk";
+  type: "signal" | "decision" | "order" | "risk" | "flow";
   message: string;
   raw_time: string;
 };
@@ -222,6 +287,8 @@ type DashboardState = {
   decisions: Decision[];
   orders: Order[];
   riskEvents: RiskEvent[];
+  overview: MetricsOverview | null;
+  pipelineEvents: PipelineTelemetryEvent[];
   portfolio: PortfolioSummary | null;
   positions: Position[];
   performance: PerformanceReport | null;
@@ -271,6 +338,36 @@ function labelRegime(value?: string) {
   return value.replaceAll("_", " ");
 }
 
+function normalizeBreakdownMap(value?: Record<string, number>) {
+  if (!value) return [];
+  return Object.entries(value)
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+}
+
+function compactReason(value?: string) {
+  if (!value) return "unknown";
+  return value.replaceAll("_", " ");
+}
+
+function summarizePipelineEvent(event: PipelineTelemetryEvent) {
+  if (event.event_type === "scanner.scan_cycle") {
+    return `SCAN: gamma ${event.gamma_markets_fetched ?? 0} | crypto ${event.crypto_classified ?? 0} | selected ${event.selected_for_scan ?? 0} | risk ${event.reached_risk_engine ?? 0} | signals ${event.persisted_signals ?? 0}`;
+  }
+  if (event.event_type === "reviewer.review_cycle") {
+    return `REVIEW: inbox ${event.inbox_count ?? 0} | approved ${event.approved_count ?? 0} | rejected ${event.rejected_count ?? 0}`;
+  }
+  return `EXEC: inbox ${event.inbox_count ?? 0} | filled ${event.executed_count ?? 0} | blocked ${event.blocked_count ?? 0} | exits ${event.exit_orders_count ?? 0}`;
+}
+
+function relativeAge(value?: string | null) {
+  if (!value) return "—";
+  const delta = Math.max(Math.floor((Date.now() - new Date(value).getTime()) / 1000), 0);
+  if (delta < 60) return `${delta}s`;
+  if (delta < 3600) return `${Math.floor(delta / 60)}m`;
+  return `${Math.floor(delta / 3600)}h`;
+}
+
 function Icon({ name, className }: { name: string; className?: string }) {
   return <span className={`material-symbols-outlined ${className ?? ""}`}>{name}</span>;
 }
@@ -283,6 +380,8 @@ export function DashboardClient() {
     decisions: [],
     orders: [],
     riskEvents: [],
+    overview: null,
+    pipelineEvents: [],
     portfolio: null,
     positions: [],
     performance: null,
@@ -296,7 +395,7 @@ export function DashboardClient() {
 
     async function load() {
       try {
-        const [statuses, costs, signals, decisions, orders, riskEvents, portfolio, positions, performance] =
+        const [statuses, costs, signals, decisions, orders, riskEvents, overview, pipelineEvents, portfolio, positions, performance] =
           await Promise.all([
             getJson<Record<string, AgentStatus>>("/agents/status"),
             getJson<CostSummary[]>("/costs/daily"),
@@ -304,6 +403,8 @@ export function DashboardClient() {
             getJson<Decision[]>("/decisions/recent"),
             getJson<Order[]>("/orders/recent"),
             getJson<RiskEvent[]>("/risk-events/recent"),
+            getJson<MetricsOverview>("/metrics/overview"),
+            getJson<PipelineTelemetryEvent[]>("/metrics/pipeline/recent"),
             getJson<PortfolioSummary>("/portfolio/summary"),
             getJson<Position[]>("/portfolio/positions"),
             getJson<PerformanceReport>("/metrics/performance?hours=24"),
@@ -340,9 +441,29 @@ export function DashboardClient() {
           message: `RISK BLOCK: [${r.agent}] ${r.reason}`,
           raw_time: r.created_at
         }));
+        pipelineEvents.forEach(event => newLogs.push({
+          id: `flow-${event.event_type}-${event.created_at}`,
+          time: new Date(event.created_at).toLocaleTimeString(),
+          type: "flow",
+          message: summarizePipelineEvent(event),
+          raw_time: event.created_at,
+        }));
         newLogs.sort((a, b) => b.raw_time.localeCompare(a.raw_time));
 
-        setState({ statuses, costs, signals, decisions, orders, riskEvents, portfolio, positions, performance, logs: newLogs.slice(0, 100) });
+        setState({
+          statuses,
+          costs,
+          signals,
+          decisions,
+          orders,
+          riskEvents,
+          overview,
+          pipelineEvents,
+          portfolio,
+          positions,
+          performance,
+          logs: newLogs.slice(0, 120),
+        });
         setError(null);
         setLastUpdated(new Date().toLocaleTimeString());
       } catch (loadError) {
@@ -366,6 +487,13 @@ export function DashboardClient() {
   const drawdown = equity > 0 ? ((state.portfolio?.total_exposure ?? 0) / equity * 100) : 0;
   const sharpe = perf?.summary.sharpe_ratio ?? 0;
   const maxDrawdown = perf?.summary.max_drawdown ?? 0;
+  const overview = state.overview;
+  const flow = overview?.flow_summary;
+  const latestScan = overview?.latest_scan_telemetry ?? null;
+  const latestReview = overview?.latest_review_telemetry ?? null;
+  const latestExecution = overview?.latest_execution_telemetry ?? null;
+  const scanRejects = normalizeBreakdownMap(latestScan?.rejection_breakdown);
+  const scanRiskRejects = normalizeBreakdownMap(latestScan?.risk_block_reasons);
 
   return (
     <>
@@ -481,7 +609,127 @@ export function DashboardClient() {
           </div>
         </section>
 
-        {/* ══════ ROW 3: Pipeline + LLM Cost + Risk Breakdown ══════ */}
+        {/* ══════ ROW 3: Scanner + Visual Flow ══════ */}
+        <section className="col-span-5 border border-poly-border bg-poly-black flex flex-col min-h-[240px]">
+          <PanelHead title="Scanner_Prefilter_Live" badge={<span>{flow?.window_minutes ?? 15}m window</span>} />
+          <div className="flex-1 p-3 grid grid-cols-3 gap-3">
+            <KpiCard label="Gamma_Fetched" value={`${latestScan?.gamma_markets_fetched ?? 0}`} icon="hub" color="text-poly-cyan" />
+            <KpiCard label="Crypto_Classified" value={`${latestScan?.crypto_classified ?? 0}`} icon="token" color="text-poly-green" />
+            <KpiCard label="Selected_For_Scan" value={`${latestScan?.selected_for_scan ?? 0}`} icon="filter_alt" color="text-poly-amber" />
+            <KpiCard label="RiskEngine_In" value={`${latestScan?.reached_risk_engine ?? 0}`} icon="stream" color="text-poly-cyan" />
+            <KpiCard label="Risk_Passed" value={`${latestScan?.risk_passed ?? 0}`} icon="verified" color="text-poly-green" />
+            <KpiCard label="Signals_Out" value={`${latestScan?.persisted_signals ?? 0}`} icon="outbound" color="text-poly-amber" />
+          </div>
+          <div className="grid grid-cols-2 gap-3 px-3 pb-3">
+            <div className="border border-poly-border p-3">
+              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Reject_Prefilter</div>
+              <BreakdownMiniBar data={scanRejects.map((item) => ({ label: compactReason(item.label), count: item.count }))} color="#ff3131" />
+            </div>
+            <div className="border border-poly-border p-3">
+              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Reject_RiskEngine</div>
+              <BreakdownMiniBar data={scanRiskRejects.map((item) => ({ label: compactReason(item.label), count: item.count }))} color="#fbbf24" />
+            </div>
+          </div>
+          <div className="px-3 pb-3">
+            <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Latest_Selected_Markets</div>
+            <div className="space-y-1.5">
+              {(latestScan?.selected_markets ?? []).slice(0, 4).map((market) => (
+                <div key={`${market.market_id}-${market.asset_symbol}`} className="flex items-center justify-between font-mono text-[9px] bg-poly-surface-container/30 px-2 py-1">
+                  <span className="truncate max-w-[72%] text-poly-cyan" title={market.question}>
+                    {market.asset_symbol || "?"} [{market.crypto_tier || "—"}] {market.question}
+                  </span>
+                  <span className="text-poly-dim">{asCurrency(market.volume_24h ?? 0)}</span>
+                </div>
+              ))}
+              {(latestScan?.selected_markets ?? []).length === 0 && <div className="font-mono text-[9px] text-poly-dim text-center py-2">NO_SELECTED_MARKETS</div>}
+            </div>
+          </div>
+        </section>
+
+        <section className="col-span-7 border border-poly-border bg-poly-black flex flex-col min-h-[240px]">
+          <PanelHead title="Agent_Flow_Live" badge={<span className="text-poly-cyan">{state.pipelineEvents.length} events</span>} />
+          <div className="p-3 grid grid-cols-4 gap-3 items-start">
+            <FlowStageCard
+              title="Gamma"
+              accent="text-poly-cyan"
+              primary={`${flow?.gamma_markets_fetched ?? 0}`}
+              secondary={`upstream ${latestScan?.upstream_limit ?? 0}`}
+              age={relativeAge(latestScan?.created_at)}
+            />
+            <FlowStageCard
+              title="Claude"
+              accent="text-poly-green"
+              primary={`${flow?.reached_risk_engine ?? 0}`}
+              secondary={`signals ${flow?.persisted_signals ?? 0}`}
+              age={relativeAge(latestScan?.created_at)}
+            />
+            <FlowStageCard
+              title="Codex"
+              accent="text-poly-amber"
+              primary={`${flow?.reviewer_inbox ?? 0}`}
+              secondary={`ok ${flow?.reviewer_approved ?? 0} / rej ${flow?.reviewer_rejected ?? 0}`}
+              age={relativeAge(latestReview?.created_at)}
+            />
+            <FlowStageCard
+              title="Claw"
+              accent="text-poly-red"
+              primary={`${flow?.executor_inbox ?? 0}`}
+              secondary={`exec ${flow?.executor_executed ?? 0} / blk ${flow?.executor_blocked ?? 0}`}
+              age={relativeAge(latestExecution?.created_at)}
+            />
+          </div>
+          <div className="px-3 pb-3">
+            <div className="grid grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr] gap-2 items-center font-mono text-[9px]">
+              <FlowLink label={`classified ${flow?.crypto_classified ?? 0}`} />
+              <span className="text-poly-dim text-center">→</span>
+              <FlowLink label={`risk pass ${flow?.risk_passed ?? 0}`} />
+              <span className="text-poly-dim text-center">→</span>
+              <FlowLink label={`approved ${flow?.reviewer_approved ?? 0}`} />
+              <span className="text-poly-dim text-center">→</span>
+              <FlowLink label={`orders ${flow?.executor_executed ?? 0}`} />
+            </div>
+          </div>
+          <div className="flex-1 px-3 pb-3 grid grid-cols-2 gap-3">
+            <div className="border border-poly-border p-3">
+              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Recent_Pipeline_Events</div>
+              <div className="space-y-1.5 max-h-[120px] overflow-y-auto custom-scrollbar">
+                {state.pipelineEvents.slice(0, 8).map((event) => (
+                  <div key={`${event.event_type}-${event.created_at}`} className="font-mono text-[9px] bg-poly-surface-container/30 px-2 py-1">
+                    <div className="flex justify-between gap-2">
+                      <span className="text-poly-muted uppercase">{event.agent} / {event.event_type.split(".")[0]}</span>
+                      <span className="text-poly-dim">{relativeAge(event.created_at)}</span>
+                    </div>
+                    <div className="text-poly-text/80">{summarizePipelineEvent(event)}</div>
+                  </div>
+                ))}
+                {state.pipelineEvents.length === 0 && <div className="font-mono text-[9px] text-poly-dim text-center py-2">NO_PIPELINE_EVENTS</div>}
+              </div>
+            </div>
+            <div className="border border-poly-border p-3">
+              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Latest_Agent_Intake</div>
+              <div className="space-y-2 font-mono text-[9px]">
+                <div className="flex justify-between bg-poly-surface-container/30 px-2 py-1">
+                  <span className="text-poly-green">Claude assets</span>
+                  <span className="text-poly-dim">{(latestScan?.selected_markets ?? []).map((item) => item.asset_symbol).filter(Boolean).join(", ") || "—"}</span>
+                </div>
+                <div className="flex justify-between bg-poly-surface-container/30 px-2 py-1">
+                  <span className="text-poly-amber">Codex inbox</span>
+                  <span className="text-poly-dim">{(latestReview?.reviewed_assets ?? []).join(", ") || "—"}</span>
+                </div>
+                <div className="flex justify-between bg-poly-surface-container/30 px-2 py-1">
+                  <span className="text-poly-red">Claw inbox</span>
+                  <span className="text-poly-dim">{(latestExecution?.reviewed_assets ?? []).join(", ") || "—"}</span>
+                </div>
+                <div className="flex justify-between bg-poly-surface-container/30 px-2 py-1">
+                  <span className="text-poly-cyan">Exit actions</span>
+                  <span className="text-poly-dim">{(latestExecution?.exit_actions ?? []).join(", ") || "—"}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ══════ ROW 4: Pipeline + LLM Cost + Risk Breakdown ══════ */}
         <section className="col-span-4 border border-poly-border bg-poly-black flex flex-col min-h-[200px]">
           <PanelHead title="Pipeline_Activity_24h" badge={<Legend items={[{c:"#00ff41",l:"SIG"},{c:"#00f3ff",l:"DEC"},{c:"#fbbf24",l:"ORD"},{c:"#ff3131",l:"RSK"}]} />} />
           <div className="flex-1 p-1">
@@ -503,7 +751,7 @@ export function DashboardClient() {
           </div>
         </section>
 
-        {/* ══════ ROW 4: Orders Table + Agents + Top Markets ══════ */}
+        {/* ══════ ROW 5: Orders Table + Agents + Top Markets ══════ */}
         <section className="col-span-6 border border-poly-border bg-poly-black flex flex-col max-h-[280px]">
           <PanelHead title="Recent_Executions" badge={<span>{summary?.orders ?? state.orders.length} total</span>} />
           <div className="flex-1 overflow-y-auto custom-scrollbar">
@@ -588,7 +836,7 @@ export function DashboardClient() {
           </div>
         </section>
 
-        {/* ══════ ROW 5: Asset / Strategy / Regime Breakdowns ══════ */}
+        {/* ══════ ROW 6: Asset / Strategy / Regime Breakdowns ══════ */}
         <section className="col-span-4 border border-poly-border bg-poly-black flex flex-col">
           <PanelHead title="Asset_Distribution" badge={<span>{perf?.asset_breakdown?.length ?? 0} assets</span>} />
           <div className="flex-1 p-3">
@@ -616,7 +864,7 @@ export function DashboardClient() {
           </div>
         </section>
 
-        {/* ══════ ROW 6: Tier / News / Exits ══════ */}
+        {/* ══════ ROW 7: Tier / News / Exits ══════ */}
         <section className="col-span-4 border border-poly-border bg-poly-black flex flex-col">
           <PanelHead title="Tier_Distribution" badge={<span>{perf?.tier_breakdown?.length ?? 0} tiers</span>} />
           <div className="flex-1 p-3">
@@ -658,7 +906,7 @@ export function DashboardClient() {
           </div>
         </section>
 
-        {/* ══════ ROW 7: Positions ══════ */}
+        {/* ══════ ROW 8: Positions ══════ */}
         <section className="col-span-12 border border-poly-border bg-poly-black flex flex-col">
           <PanelHead title="Open_Positions" badge={<span>{state.positions.length} ACTIVE</span>} />
           <div className="flex-1 overflow-y-auto custom-scrollbar">
@@ -700,7 +948,7 @@ export function DashboardClient() {
           </div>
         </section>
 
-        {/* ══════ ROW 8: Log Terminal ══════ */}
+        {/* ══════ ROW 9: Log Terminal ══════ */}
         <section className="col-span-12 border border-poly-border bg-poly-black flex flex-col max-h-[300px]">
           <PanelHead title="System_Log_Terminal" badge={<span className="text-poly-cyan animate-pulse-dot">LIVE</span>} />
           <LogTerminal logs={state.logs} />
@@ -755,6 +1003,39 @@ function KpiCard({ label, value, icon, color }: { label: string; value: string; 
   );
 }
 
+function FlowStageCard({
+  title,
+  accent,
+  primary,
+  secondary,
+  age,
+}: {
+  title: string;
+  accent: string;
+  primary: string;
+  secondary: string;
+  age: string;
+}) {
+  return (
+    <div className="border border-poly-border bg-poly-surface-dim/20 p-3 min-h-[96px]">
+      <div className="flex items-center justify-between font-mono text-[8px] uppercase text-poly-dim">
+        <span>{title}</span>
+        <span>{age}</span>
+      </div>
+      <div className={`mt-2 text-2xl font-bold font-mono ${accent}`}>{primary}</div>
+      <div className="mt-2 font-mono text-[9px] text-poly-muted">{secondary}</div>
+    </div>
+  );
+}
+
+function FlowLink({ label }: { label: string }) {
+  return (
+    <div className="border border-poly-border bg-poly-surface-container/30 px-2 py-2 font-mono text-[9px] text-center text-poly-dim">
+      {label}
+    </div>
+  );
+}
+
 function PanelHead({ title, badge }: { title: string; badge?: React.ReactNode }) {
   return (
     <div className="p-2.5 border-b border-poly-border font-mono text-[10px] text-poly-dim uppercase flex justify-between items-center">
@@ -791,6 +1072,7 @@ function LogTerminal({ logs }: { logs: LogEntry[] }) {
     decision: "text-poly-amber border-poly-amber",
     order: "text-poly-green border-poly-green",
     risk: "text-poly-red border-poly-red",
+    flow: "text-poly-muted border-poly-border",
   };
 
   return (

@@ -112,6 +112,12 @@ class CryptoMarketCandidate:
     thesis_hash: str
 
 
+@dataclass
+class CryptoClassificationResult:
+    candidate: CryptoMarketCandidate | None
+    rejection_reason: str | None = None
+
+
 def detect_asset_symbol(question: str, description: str = "") -> str | None:
     text = f"{question} {description}".lower()
     matches: list[str] = []
@@ -127,32 +133,42 @@ def detect_asset_symbol(question: str, description: str = "") -> str | None:
 
 
 def classify_crypto_market(question: str, description: str, config: CryptoSettings) -> CryptoMarketCandidate | None:
+    return classify_crypto_market_with_reason(question, description, config).candidate
+
+
+def classify_crypto_market_with_reason(
+    question: str,
+    description: str,
+    config: CryptoSettings,
+) -> CryptoClassificationResult:
     symbol = detect_asset_symbol(question, description)
     if symbol is None:
-        return None
+        return CryptoClassificationResult(candidate=None, rejection_reason="asset_not_detected")
 
     text = f"{question} {description}".lower()
     if config.direct_coin_only and any(keyword in text for keyword in INDIRECT_KEYWORDS):
-        return None
+        return CryptoClassificationResult(candidate=None, rejection_reason="indirect_keyword")
     if not any(keyword in text for keyword in DIRECT_MARKET_KEYWORDS):
-        return None
+        return CryptoClassificationResult(candidate=None, rejection_reason="missing_direct_trigger")
     if any(keyword in text for keyword in THEMATIC_EVENT_KEYWORDS):
-        return None
+        return CryptoClassificationResult(candidate=None, rejection_reason="thematic_horizon")
     if "before" in text and not CALENDAR_MARKER_PATTERN.search(text):
-        return None
+        return CryptoClassificationResult(candidate=None, rejection_reason="thematic_horizon")
 
     tier = "btc" if symbol == "BTC" else ("major" if symbol in {item.upper() for item in config.major_assets} else "small_cap")
     question_type = classify_question_type(question, description)
     thesis_tags = [symbol.lower(), tier, question_type]
     thesis_hash = stable_hash(f"{symbol}|{sanitize_text(question, 160)}|{question_type}", length=16)
-    return CryptoMarketCandidate(
-        asset_symbol=symbol,
-        asset_name=ASSET_NAMES.get(symbol, symbol),
-        crypto_tier=tier,
-        market_kind="direct_coin",
-        question_type=question_type,
-        thesis_tags=thesis_tags,
-        thesis_hash=thesis_hash,
+    return CryptoClassificationResult(
+        candidate=CryptoMarketCandidate(
+            asset_symbol=symbol,
+            asset_name=ASSET_NAMES.get(symbol, symbol),
+            crypto_tier=tier,
+            market_kind="direct_coin",
+            question_type=question_type,
+            thesis_tags=thesis_tags,
+            thesis_hash=thesis_hash,
+        )
     )
 
 

@@ -19,7 +19,7 @@ class ClawAgent(BaseAgent):
         self.consumer = f"claw-{uuid4().hex[:8]}"
 
     async def tick(self) -> None:
-        await self.process_exit_cycle()
+        exit_stats = await self.process_exit_cycle()
         await self.context.bus.ensure_group("signals:reviewed", "claw_executors")
         events = await self.context.bus.read_group(
             "signals:reviewed",
@@ -28,15 +28,35 @@ class ClawAgent(BaseAgent):
             block_ms=250,
             count=1,
         )
+        executed_count = 0
+        blocked_count = 0
+        reviewed_assets: list[str] = []
         for event_id, payload in events:
             review = ReviewPayload.model_validate(payload)
             try:
+                reviewed_assets.append(review.asset_symbol)
                 if review.approved:
-                    await self.execute(review)
+                    if await self.execute(review):
+                        executed_count += 1
+                    else:
+                        blocked_count += 1
             finally:
                 await self.context.bus.ack("signals:reviewed", "claw_executors", event_id)
+        if events or exit_stats["exit_orders_count"] > 0:
+            await self.context.repository.record_pipeline_telemetry(
+                str(uuid4()),
+                self.name,
+                "executor.execute_cycle",
+                {
+                    "inbox_count": len(events),
+                    "executed_count": executed_count,
+                    "blocked_count": blocked_count,
+                    "reviewed_assets": reviewed_assets[:6],
+                    **exit_stats,
+                },
+            )
 
-    async def execute(self, review: ReviewPayload) -> None:
+    async def execute(self, review: ReviewPayload) -> bool:
         try:
             guard = await self.risk.build_execution_guard(review)
         except RiskBlockedError as exc:
@@ -49,7 +69,7 @@ class ClawAgent(BaseAgent):
                     "crypto_tier": review.crypto_tier,
                 },
             )
-            return
+            return False
 
         signal = review.original_signal
         positions = await self.context.repository.get_open_positions()
@@ -103,11 +123,14 @@ class ClawAgent(BaseAgent):
             paper_order.model_dump(mode="json"),
         )
         await self.context.bus.publish_event("orders:paper", paper_order.model_dump(mode="json"))
+        return True
 
-    async def process_exit_cycle(self) -> None:
+    async def process_exit_cycle(self) -> dict[str, object]:
         if not hasattr(self.context.repository, "get_open_positions"):
-            return
+            return {"exit_orders_count": 0, "open_positions_seen": 0, "exit_actions": []}
         positions = await self.context.repository.get_open_positions()
+        exit_orders_count = 0
+        exit_actions: list[str] = []
         for position in positions:
             decision = self._exit_decision(position)
             if decision is None:
@@ -159,6 +182,13 @@ class ClawAgent(BaseAgent):
                 payload.model_dump(mode="json"),
             )
             await self.context.bus.publish_event("orders:paper", payload.model_dump(mode="json"))
+            exit_orders_count += 1
+            exit_actions.append(str(decision["reason"]))
+        return {
+            "exit_orders_count": exit_orders_count,
+            "open_positions_seen": len(positions),
+            "exit_actions": exit_actions[:6],
+        }
 
     def _exit_decision(self, position: dict[str, object]) -> dict[str, object] | None:
         size = int(position.get("size") or 0)

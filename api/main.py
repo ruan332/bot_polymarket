@@ -150,6 +150,11 @@ async def recent_risk_events(limit: int = 20) -> list[dict[str, object]]:
     return await get_context().repository.get_recent_risk_events(limit=limit)
 
 
+@app.get("/metrics/pipeline/recent")
+async def recent_pipeline_telemetry(limit: int = 30) -> list[dict[str, object]]:
+    return await get_context().repository.get_recent_pipeline_telemetry(limit=limit)
+
+
 @app.get("/decisions/recent")
 async def recent_decisions(
     limit: int = 20,

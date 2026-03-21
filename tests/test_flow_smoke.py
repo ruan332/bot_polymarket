@@ -92,6 +92,7 @@ class FakeRepository:
         self.market_snapshots: list[dict] = []
         self.equity_history: list[dict] = []
         self.news_validations: list[dict] = []
+        self.pipeline_events: list[dict] = []
 
     async def record_signal(self, signal_id: str, event_type: str, payload: dict) -> None:
         self.signals.append(payload)
@@ -186,6 +187,9 @@ class FakeRepository:
     async def record_risk_event(self, event_id: str, agent: str, reason: str, payload: dict) -> None:
         self.risk_events.append({"agent": agent, "reason": reason, **payload})
 
+    async def record_pipeline_telemetry(self, event_id: str, agent: str, event_type: str, payload: dict) -> None:
+        self.pipeline_events.append({"agent": agent, "event_type": event_type, **payload, "created_at": "2026-03-18T12:00:00Z"})
+
     async def upsert_heartbeat(self, heartbeat) -> None:
         self.heartbeats[heartbeat.agent] = heartbeat.model_dump()
 
@@ -232,6 +236,9 @@ class FakeRepository:
     async def get_recent_risk_events(self, limit: int = 20):
         return list(reversed(self.risk_events[-limit:]))
 
+    async def get_recent_pipeline_telemetry(self, limit: int = 30):
+        return list(reversed(self.pipeline_events[-limit:]))
+
     async def get_recent_decisions(self, limit: int = 20, asset: str | None = None, tier: str | None = None, strategy: str | None = None):
         items = [item for item in self.decisions if self._matches(item, asset, tier, strategy)]
         return list(reversed(items[-limit:]))
@@ -274,12 +281,37 @@ class FakeRepository:
         return list(self.heartbeats.values())
 
     async def metrics_overview(self):
+        latest_scan = next((item for item in reversed(self.pipeline_events) if item["event_type"] == "scanner.scan_cycle"), None)
+        latest_review = next((item for item in reversed(self.pipeline_events) if item["event_type"] == "reviewer.review_cycle"), None)
+        latest_execution = next((item for item in reversed(self.pipeline_events) if item["event_type"] == "executor.execute_cycle"), None)
         return {
             "signals": len(self.signals),
             "decisions": len(self.decisions),
             "orders": len(self.orders),
             "risk_events": len(self.risk_events),
             "portfolio": (await self.get_portfolio_summary()).model_dump(),
+            "flow_summary": {
+                "window_minutes": 15,
+                "gamma_markets_fetched": sum(int(item.get("gamma_markets_fetched") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
+                "crypto_classified": sum(int(item.get("crypto_classified") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
+                "selected_for_scan": sum(int(item.get("selected_for_scan") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
+                "strategy_candidates": sum(int(item.get("strategy_candidates") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
+                "reached_risk_engine": sum(int(item.get("reached_risk_engine") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
+                "risk_passed": sum(int(item.get("risk_passed") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
+                "risk_blocked": sum(int(item.get("risk_blocked") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
+                "duplicates_blocked": sum(int(item.get("duplicates_blocked") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
+                "persisted_signals": sum(int(item.get("persisted_signals") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
+                "reviewer_inbox": sum(int(item.get("inbox_count") or 0) for item in self.pipeline_events if item["event_type"] == "reviewer.review_cycle"),
+                "reviewer_approved": sum(int(item.get("approved_count") or 0) for item in self.pipeline_events if item["event_type"] == "reviewer.review_cycle"),
+                "reviewer_rejected": sum(int(item.get("rejected_count") or 0) for item in self.pipeline_events if item["event_type"] == "reviewer.review_cycle"),
+                "executor_inbox": sum(int(item.get("inbox_count") or 0) for item in self.pipeline_events if item["event_type"] == "executor.execute_cycle"),
+                "executor_executed": sum(int(item.get("executed_count") or 0) for item in self.pipeline_events if item["event_type"] == "executor.execute_cycle"),
+                "executor_blocked": sum(int(item.get("blocked_count") or 0) for item in self.pipeline_events if item["event_type"] == "executor.execute_cycle"),
+                "exit_orders_count": sum(int(item.get("exit_orders_count") or 0) for item in self.pipeline_events if item["event_type"] == "executor.execute_cycle"),
+            },
+            "latest_scan_telemetry": latest_scan,
+            "latest_review_telemetry": latest_review,
+            "latest_execution_telemetry": latest_execution,
         }
 
     async def get_performance_report(
@@ -482,6 +514,7 @@ async def test_signal_news_review_execute_flow_smoke(monkeypatch) -> None:
     await claude.tick()
     assert len(context.repository.signals) == 1
     assert len(context.repository.market_snapshots) == 1
+    assert any(event["event_type"] == "scanner.scan_cycle" for event in context.repository.pipeline_events)
     assert len(context.bus.streams["signals:candidates"]) == 1
 
     await news_validator.tick()
@@ -493,10 +526,12 @@ async def test_signal_news_review_execute_flow_smoke(monkeypatch) -> None:
 
     await codex.tick()
     assert len(context.repository.decisions) == 1
+    assert any(event["event_type"] == "reviewer.review_cycle" for event in context.repository.pipeline_events)
     assert len(context.bus.streams["signals:reviewed"]) == 1
 
     await claw.tick()
     assert len(context.repository.orders) == 1
+    assert any(event["event_type"] == "executor.execute_cycle" for event in context.repository.pipeline_events)
     assert context.repository.orders[0]["status"] == "simulated"
     assert context.repository.orders[0]["token_id"] == "token-yes-1"
     assert context.repository.orders[0]["asset_symbol"] == "BTC"
@@ -669,6 +704,7 @@ def test_api_smoke(monkeypatch) -> None:
         assert client.get("/portfolio/equity-history").status_code == 200
         assert client.get("/portfolio/positions").status_code == 200
         assert client.get("/metrics/overview").json()["signals"] == 1
+        assert client.get("/metrics/pipeline/recent").status_code == 200
         performance = client.get("/metrics/performance?hours=24&asset=BTC&tier=btc").json()
         assert performance["summary"]["signals"] == 1
         assert performance["asset_filter"] == "BTC"

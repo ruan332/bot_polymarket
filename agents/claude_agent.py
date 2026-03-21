@@ -8,14 +8,7 @@ from core.exceptions import InvalidModelResponseError, RiskBlockedError
 from core.market_connector import MarketConnector
 from core.risk_engine import RiskEngine
 from core.schemas import MarketSnapshotPayload, SignalPayload
-from core.utils import parse_json_object, sanitize_text
-
-
-SYSTEM_PROMPT = """
-Você analisa mercados de predição de criptomoedas na Polymarket.
-Responda APENAS com JSON válido:
-{"edge": 0.23, "direction": "YES", "confidence": 0.8, "reasoning": "..."}
-"""
+from core.strategy_engine import StrategyEngine
 
 
 class ClaudeAgent(BaseAgent):
@@ -23,6 +16,7 @@ class ClaudeAgent(BaseAgent):
         super().__init__("claude", context)
         self.connector = MarketConnector(context)
         self.risk = RiskEngine(context)
+        self.strategy = StrategyEngine(context)
 
     async def tick(self) -> None:
         agent_cfg = self.context.agents_config.agents[self.name]
@@ -50,6 +44,7 @@ class ClaudeAgent(BaseAgent):
                         "source": "gamma",
                         "clob_token_ids": market.get("clob_token_ids", []),
                         "thesis_hash": market.get("thesis_hash", ""),
+                        "end_date": market.get("end_date") or market.get("endDate") or market.get("closeTime"),
                         "orderbook_summary_yes": market.get("orderbook_summary_yes", {}),
                         "orderbook_summary_no": market.get("orderbook_summary_no", {}),
                     },
@@ -104,23 +99,11 @@ class ClaudeAgent(BaseAgent):
             await self.context.bus.publish_event(target_stream, signal.model_dump(mode="json"))
 
     async def calc_edge(self, market: dict) -> SignalPayload | None:
-        prompt = f"""
-Ativo: {sanitize_text(market.get('asset_symbol', ''), 20)} ({sanitize_text(market.get('asset_name', ''), 40)})
-Tier: {sanitize_text(market.get('crypto_tier', ''), 20)}
-Mercado: {sanitize_text(market['question'], 200)}
-Preco YES: {market['price_yes']:.4f}
-Preco NO: {market['price_no']:.4f}
-Volume 24h: {market['volume_24h']:.2f}
-Orderbook YES: {market.get('orderbook_summary_yes', {})}
-Orderbook NO: {market.get('orderbook_summary_no', {})}
-Contexto: {sanitize_text(market.get('description', ''), 300)}
-"""
-        response = await self.provider.call(prompt=prompt, system=SYSTEM_PROMPT)
-        await self.cost_tracker.record(response, prompt_type="scan_market")
-
+        decision = await self.strategy.analyze_market(market)
+        if decision is None:
+            return None
         try:
-            payload = parse_json_object(response.content)
-            direction = payload["direction"]
+            direction = decision.direction
             liquidity_summary = market["orderbook_summary_yes"] if direction == "YES" else market["orderbook_summary_no"]
             return SignalPayload(
                 signal_id=str(uuid4()),
@@ -128,8 +111,8 @@ Contexto: {sanitize_text(market.get('description', ''), 300)}
                 token_id=str(market["token_id_yes"] if direction == "YES" else market["token_id_no"]),
                 market_question=market["question"],
                 direction=direction,
-                edge=float(payload["edge"]),
-                confidence=float(payload["confidence"]),
+                edge=float(decision.edge),
+                confidence=float(decision.confidence),
                 price=float(market[f"price_{direction.lower()}"]),
                 price_yes=float(market["price_yes"]),
                 price_no=float(market["price_no"]),
@@ -139,17 +122,26 @@ Contexto: {sanitize_text(market.get('description', ''), 300)}
                 crypto_tier=str(market["crypto_tier"]),
                 market_kind=str(market["market_kind"]),
                 question_type=str(market["question_type"]),
+                strategy_id=decision.strategy_id,
+                strategy_version=decision.strategy_version,
+                model_probability=decision.model_probability,
+                market_probability=decision.market_probability,
+                regime=decision.regime,
+                expected_slippage_bps=decision.expected_slippage_bps,
+                expected_holding_minutes=decision.expected_holding_minutes,
                 thesis_tags=[str(item) for item in market.get("thesis_tags", [])],
                 thesis_hash=str(market.get("thesis_hash", "")),
-                reasoning=sanitize_text(payload.get("reasoning", ""), 300),
+                reasoning=decision.reasoning,
+                features_summary=decision.features_summary,
                 liquidity_summary=liquidity_summary,
                 metadata={
                     "source": "claude_agent",
                     "clob_token_ids": market.get("clob_token_ids", []),
+                    "end_date": market.get("end_date") or market.get("endDate") or market.get("closeTime"),
                 },
             )
         except Exception as exc:
-            raise InvalidModelResponseError(f"claude returned invalid JSON: {exc}") from exc
+            raise InvalidModelResponseError(f"strategy engine returned invalid signal: {exc}") from exc
 
     async def close(self) -> None:
         await super().close()

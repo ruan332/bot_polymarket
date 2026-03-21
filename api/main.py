@@ -96,13 +96,23 @@ async def daily_costs() -> list[dict[str, object]]:
 
 
 @app.get("/signals/recent")
-async def recent_signals(limit: int = 20, asset: str | None = None, tier: str | None = None) -> list[dict[str, object]]:
-    return await get_context().repository.get_recent_signals(limit=limit, asset=asset, tier=tier)
+async def recent_signals(
+    limit: int = 20,
+    asset: str | None = None,
+    tier: str | None = None,
+    strategy: str | None = None,
+) -> list[dict[str, object]]:
+    return await get_context().repository.get_recent_signals(limit=limit, asset=asset, tier=tier, strategy=strategy)
 
 
 @app.get("/orders/recent")
-async def recent_orders(limit: int = 20, asset: str | None = None, tier: str | None = None) -> list[dict[str, object]]:
-    return await get_context().repository.get_recent_orders(limit=limit, asset=asset, tier=tier)
+async def recent_orders(
+    limit: int = 20,
+    asset: str | None = None,
+    tier: str | None = None,
+    strategy: str | None = None,
+) -> list[dict[str, object]]:
+    return await get_context().repository.get_recent_orders(limit=limit, asset=asset, tier=tier, strategy=strategy)
 
 
 @app.get("/portfolio/summary")
@@ -130,8 +140,9 @@ async def performance_report(
     hours: int = 24,
     asset: str | None = None,
     tier: str | None = None,
+    strategy: str | None = None,
 ) -> dict[str, object]:
-    return await get_context().repository.get_performance_report(hours=hours, asset=asset, tier=tier)
+    return await get_context().repository.get_performance_report(hours=hours, asset=asset, tier=tier, strategy=strategy)
 
 
 @app.get("/risk-events/recent")
@@ -140,5 +151,10 @@ async def recent_risk_events(limit: int = 20) -> list[dict[str, object]]:
 
 
 @app.get("/decisions/recent")
-async def recent_decisions(limit: int = 20, asset: str | None = None, tier: str | None = None) -> list[dict[str, object]]:
-    return await get_context().repository.get_recent_decisions(limit=limit, asset=asset, tier=tier)
+async def recent_decisions(
+    limit: int = 20,
+    asset: str | None = None,
+    tier: str | None = None,
+    strategy: str | None = None,
+) -> list[dict[str, object]]:
+    return await get_context().repository.get_recent_decisions(limit=limit, asset=asset, tier=tier, strategy=strategy)

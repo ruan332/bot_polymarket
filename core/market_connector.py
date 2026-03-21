@@ -79,6 +79,13 @@ class MarketConnector:
                     "question_type": candidate.question_type if candidate else "",
                     "thesis_tags": candidate.thesis_tags if candidate else [],
                     "thesis_hash": candidate.thesis_hash if candidate else "",
+                    "end_date": (
+                        market.get("endDate")
+                        or market.get("end_date")
+                        or market.get("closeTime")
+                        or market.get("end_date_iso")
+                        or ""
+                    ),
                     "orderbook_summary_yes": orderbook_yes,
                     "orderbook_summary_no": orderbook_no,
                 }

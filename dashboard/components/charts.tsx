@@ -6,7 +6,6 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -15,157 +14,151 @@ import {
   YAxis,
 } from "recharts";
 
-type CostPoint = { agent: string; cost_usd: number; calls: number };
-type PipelinePoint = { bucket: string; signals: number; decisions: number; orders: number; risk_events: number };
 type EquityPoint = { created_at: string; total_equity: number; total_pnl: number; unrealized_pnl: number };
+type PipelinePoint = { bucket: string; signals: number; decisions: number; orders: number; risk_events: number };
+type CostPoint = { agent: string; cost_usd: number; calls: number };
 type BreakdownPoint = { label: string; count: number };
 
-type Props = {
-  costs: CostPoint[];
-  pipeline: PipelinePoint[];
-  equity: EquityPoint[];
-  riskBreakdown: BreakdownPoint[];
+const C = {
+  green: "#00ff41",
+  cyan: "#00f3ff",
+  amber: "#fbbf24",
+  red: "#ff3131",
+  dim: "#52525b",
+  border: "#27272a",
+  muted: "#a1a1aa",
 };
 
-export function OperationsCharts({ costs, pipeline, equity, riskBreakdown }: Props) {
-  // Theme colors from CSS variables
-  const colors = {
-    green: "#4ade80",
-    cyan: "#38bdf8",
-    amber: "#fbbf24",
-    red: "#f87171",
-    slate: "#94a3b8",
-    bg: "#02040a",
-    line: "rgba(56, 189, 248, 0.15)",
-  };
+const tipStyle = {
+  backgroundColor: "rgba(0,0,0,0.95)",
+  border: `1px solid ${C.border}`,
+  borderRadius: "0px",
+  color: "#e2e2e2",
+  fontFamily: "'JetBrains Mono', monospace",
+  fontSize: "10px",
+};
 
-  const tooltipStyle = {
-    backgroundColor: "rgba(2, 4, 10, 0.95)",
-    border: `1px solid ${colors.line}`,
-    borderRadius: "4px",
-    color: "#e0f2fe",
-    fontFamily: "var(--font-mono), monospace",
-    fontSize: "0.85rem",
-  };
+const axisProps = {
+  stroke: C.dim,
+  tick: { fontSize: 9, fontFamily: "'JetBrains Mono', monospace", fill: C.dim },
+  axisLine: { stroke: C.border },
+  tickLine: { stroke: C.border },
+};
 
+export function EquityChart({ equity }: { equity: EquityPoint[] }) {
   return (
-    <>
-      <article className="panel chart-panel span-8">
-        <div className="panel-head">
-          <h3>Equity Curve</h3>
-          <span className="terminal-pill">mark-to-market</span>
-        </div>
-        <div className="chart-wrap chart-xl">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={equity}>
-              <defs>
-                <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={colors.green} stopOpacity={0.3} />
-                  <stop offset="95%" stopColor={colors.green} stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid stroke={colors.line} strokeDasharray="3 3" vertical={false} />
-              <XAxis
-                dataKey="created_at"
-                stroke={colors.slate}
-                tick={{ fontSize: 10 }}
-                tickFormatter={(value: string) => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                minTickGap={32}
-              />
-              <YAxis stroke={colors.slate} tick={{ fontSize: 10 }} />
-              <Tooltip
-                labelFormatter={(value: string) => new Date(value).toLocaleString()}
-                formatter={(value: number, name: string) => [`$${value.toFixed(2)}`, name]}
-                contentStyle={tooltipStyle}
-              />
-              <Legend iconType="circle" wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
-              <Area type="monotone" dataKey="total_equity" stroke={colors.green} fill="url(#equityFill)" strokeWidth={2} />
-              <Line type="monotone" dataKey="total_pnl" stroke={colors.cyan} strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="unrealized_pnl" stroke={colors.amber} strokeWidth={2} dot={false} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-      </article>
+    <div className="chart-wrap-xl">
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={equity} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+          <defs>
+            <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={C.green} stopOpacity={0.25} />
+              <stop offset="95%" stopColor={C.green} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid stroke={C.border} strokeDasharray="3 3" vertical={false} />
+          <XAxis
+            dataKey="created_at"
+            {...axisProps}
+            tickFormatter={(v: string) => new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            minTickGap={40}
+          />
+          <YAxis {...axisProps} />
+          <Tooltip
+            labelFormatter={(v: string) => new Date(v).toLocaleString()}
+            formatter={(value: number, name: string) => [`$${value.toFixed(2)}`, name]}
+            contentStyle={tipStyle}
+          />
+          <Area type="monotone" dataKey="total_equity" stroke={C.green} fill="url(#equityFill)" strokeWidth={2} dot={false} />
+          <Line type="monotone" dataKey="total_pnl" stroke={C.cyan} strokeWidth={1.5} dot={false} />
+          <Line type="monotone" dataKey="unrealized_pnl" stroke={C.amber} strokeWidth={1.5} dot={false} />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
 
-      <article className="panel chart-panel span-4">
-        <div className="panel-head">
-          <h3>LLM Cost</h3>
-          <span className="terminal-pill">daily</span>
-        </div>
-        <div className="chart-wrap">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={costs}>
-              <CartesianGrid stroke={colors.line} strokeDasharray="3 3" vertical={false} />
-              <XAxis dataKey="agent" stroke={colors.slate} tick={{ fontSize: 10 }} />
-              <YAxis stroke={colors.slate} tick={{ fontSize: 10 }} />
-              <Tooltip
-                contentStyle={tooltipStyle}
-                formatter={(value: number) => [`$${value.toFixed(4)}`, "Cost"]}
-              />
-              <Bar dataKey="cost_usd" fill={colors.cyan} radius={[2, 2, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </article>
+export function PipelineChart({ data }: { data: PipelinePoint[] }) {
+  return (
+    <div className="chart-wrap-xl">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+          <CartesianGrid stroke={C.border} strokeDasharray="3 3" vertical={false} />
+          <XAxis
+            dataKey="bucket"
+            {...axisProps}
+            tickFormatter={(v: string) => new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            minTickGap={30}
+          />
+          <YAxis {...axisProps} allowDecimals={false} width={28} />
+          <Tooltip
+            labelFormatter={(v: string) => new Date(v).toLocaleString()}
+            contentStyle={tipStyle}
+          />
+          <Line type="monotone" dataKey="signals" stroke={C.green} strokeWidth={2} dot={false} />
+          <Line type="monotone" dataKey="decisions" stroke={C.cyan} strokeWidth={2} dot={false} />
+          <Line type="monotone" dataKey="orders" stroke={C.amber} strokeWidth={2} dot={false} />
+          <Line type="monotone" dataKey="risk_events" stroke={C.red} strokeWidth={2} dot={false} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
 
-      <article className="panel chart-panel span-7">
-        <div className="panel-head">
-          <h3>Pipeline Rhythm</h3>
-          <span className="terminal-pill">hour buckets</span>
-        </div>
-        <div className="chart-wrap">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={pipeline}>
-              <CartesianGrid stroke={colors.line} strokeDasharray="3 3" vertical={false} />
-              <XAxis
-                dataKey="bucket"
-                stroke={colors.slate}
-                tick={{ fontSize: 10 }}
-                tickFormatter={(value: string) =>
-                  new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-                }
-                minTickGap={26}
-              />
-              <YAxis stroke={colors.slate} tick={{ fontSize: 10 }} allowDecimals={false} />
-              <Tooltip
-                labelFormatter={(value: string) => new Date(value).toLocaleString()}
-                contentStyle={tooltipStyle}
-              />
-              <Legend iconType="circle" wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
-              <Line type="monotone" dataKey="signals" stroke={colors.green} strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="decisions" stroke={colors.cyan} strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="orders" stroke={colors.amber} strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="risk_events" stroke={colors.red} strokeWidth={2} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </article>
+export function CostBarChart({ data }: { data: CostPoint[] }) {
+  return (
+    <div className="chart-wrap-xl">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+          <CartesianGrid stroke={C.border} strokeDasharray="3 3" vertical={false} />
+          <XAxis dataKey="agent" {...axisProps} />
+          <YAxis {...axisProps} width={36} tickFormatter={(v: number) => `$${v.toFixed(2)}`} />
+          <Tooltip contentStyle={tipStyle} formatter={(v: number) => [`$${v.toFixed(4)}`, "Cost"]} />
+          <Bar dataKey="cost_usd" fill={C.cyan} radius={[2, 2, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
 
-      <article className="panel chart-panel span-5">
-        <div className="panel-head">
-          <h3>Risk Breakdown</h3>
-          <span className="terminal-pill">top blockers</span>
+export function RiskBreakdownChart({ data }: { data: BreakdownPoint[] }) {
+  return (
+    <div className="chart-wrap-xl">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} layout="vertical" margin={{ top: 4, right: 8, bottom: 4, left: 4 }}>
+          <CartesianGrid stroke={C.border} strokeDasharray="3 3" horizontal={false} />
+          <XAxis type="number" {...axisProps} allowDecimals={false} />
+          <YAxis
+            dataKey="label"
+            type="category"
+            {...axisProps}
+            width={90}
+            tick={{ fontSize: 8, fontFamily: "'JetBrains Mono', monospace", fill: C.dim }}
+            tickFormatter={(v: string) => (v.length > 14 ? `${v.slice(0, 14)}…` : v)}
+          />
+          <Tooltip contentStyle={tipStyle} />
+          <Bar dataKey="count" fill={C.red} radius={[0, 2, 2, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+export function BreakdownMiniBar({ data, color }: { data: BreakdownPoint[]; color: string }) {
+  const max = Math.max(...data.map(d => d.count), 1);
+  return (
+    <div className="space-y-1.5">
+      {data.slice(0, 6).map(d => (
+        <div key={d.label} className="flex items-center gap-2 font-mono text-[9px]">
+          <span className="text-poly-muted w-20 truncate text-right" title={d.label}>{d.label}</span>
+          <div className="flex-1 h-3 bg-poly-surface-container/40 relative">
+            <div className="h-full" style={{ width: `${(d.count / max) * 100}%`, backgroundColor: color }} />
+          </div>
+          <span className="text-poly-dim w-6 text-right">{d.count}</span>
         </div>
-        <div className="chart-wrap">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={riskBreakdown} layout="vertical" margin={{ left: 12, right: 8 }}>
-              <CartesianGrid stroke={colors.line} strokeDasharray="3 3" horizontal={false} />
-              <XAxis type="number" stroke={colors.slate} tick={{ fontSize: 10 }} allowDecimals={false} />
-              <YAxis
-                dataKey="label"
-                type="category"
-                stroke={colors.slate}
-                width={120}
-                tick={{ fontSize: 9 }}
-                tickFormatter={(value: string) => (value.length > 15 ? `${value.slice(0, 15)}...` : value)}
-              />
-              <Tooltip contentStyle={tooltipStyle} />
-              <Bar dataKey="count" fill={colors.red} radius={[0, 2, 2, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </article>
-    </>
+      ))}
+      {data.length === 0 && <div className="text-poly-dim font-mono text-[9px] text-center py-2">NO_DATA</div>}
+    </div>
   );
 }
 

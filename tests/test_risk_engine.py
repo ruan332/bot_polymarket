@@ -29,20 +29,41 @@ def make_context():
         async def get_portfolio_summary(self) -> PortfolioSummary:
             return self.summary
 
+        async def get_open_positions(self) -> list[dict[str, object]]:
+            return []
+
+        async def get_execution_risk_state(self, hours: int = 24) -> dict[str, object]:
+            return {
+                "daily_spend_usd": 0.0,
+                "realized_pnl_usd": 0.0,
+                "consecutive_losses": 0,
+                "last_loss_at": None,
+            }
+
     return SimpleNamespace(
+        settings=SimpleNamespace(paper_bankroll_usd=1000.0),
         risk_config=SimpleNamespace(
             min_edge=0.19,
             min_confidence=0.55,
             max_kelly_fraction=0.25,
             max_single_exposure_fraction=0.10,
+            max_asset_exposure_fraction=0.18,
+            max_strategy_exposure_fraction=0.25,
             max_single_position_usd=100.0,
             max_total_exposure_usd=250.0,
             min_market_volume_24h=10000.0,
+            max_daily_spend_usd=100.0,
             max_spread_bps=250,
             max_slippage_bps=150,
             max_order_price=0.90,
             max_open_positions=5,
             default_limit_buffer_bps=50,
+            circuit_breaker_loss_threshold_usd=100.0,
+            circuit_breaker_cooldown_seconds=300,
+            daily_drawdown_limit_fraction=0.08,
+            loss_streak_size_discount=0.15,
+            min_risk_fraction_after_losses=0.35,
+            exit_scale_out_fraction=0.5,
         ),
         crypto_config=crypto_config,
         repository=Repository(),
@@ -67,9 +88,17 @@ def make_signal(*, symbol: str, tier: str, edge: float, confidence: float, price
         crypto_tier=tier,  # type: ignore[arg-type]
         market_kind="direct_coin",
         question_type="direction",
+        strategy_id="trend_follow_bayes",
+        strategy_version="v1",
+        model_probability=round(price + edge, 4),
+        market_probability=price,
+        regime="trend",
+        expected_slippage_bps=50.0,
+        expected_holding_minutes=180,
         thesis_tags=[symbol.lower(), tier],
         thesis_hash=f"{symbol.lower()}-{tier}",
         reasoning="test",
+        features_summary={"momentum_short": 0.04},
         liquidity_summary={"spread_bps": 100.0, "ask_depth": 500.0},
     )
 
@@ -81,6 +110,7 @@ def make_review(signal: SignalPayload) -> ReviewPayload:
         crypto_tier=signal.crypto_tier,
         approved=True,
         kelly_size=0,
+        risk_fraction=0.1,
         notes="test",
         original_signal=signal,
     )
@@ -120,8 +150,9 @@ async def test_build_execution_guard_blocks_small_caps_more_aggressively() -> No
     guard = await risk.build_execution_guard(make_review(btc_signal))
     assert guard.size == 250
     assert guard.notional_usd == pytest.approx(100.0)
-    with pytest.raises(RiskBlockedError):
-        await risk.build_execution_guard(make_review(small_cap_signal))
+    small_cap_guard = await risk.build_execution_guard(make_review(small_cap_signal))
+    assert small_cap_guard.notional_usd == pytest.approx(34.8)
+    assert small_cap_guard.size < guard.size
 
 
 @pytest.mark.asyncio

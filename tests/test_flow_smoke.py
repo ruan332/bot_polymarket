@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -125,18 +126,59 @@ class FakeRepository:
         self.orders.append(payload)
         if status == "simulated":
             position_key = f"{market_id}:{payload['direction']}"
-            self.positions[position_key] = {
-                "market_id": market_id,
-                "position_key": position_key,
-                "token_id": payload["token_id"],
-                "market_question": payload.get("market_question", ""),
-                "asset_symbol": payload.get("asset_symbol", ""),
-                "crypto_tier": payload.get("crypto_tier", ""),
-                "direction": payload["direction"],
-                "size": payload["size"],
-                "average_price": payload["price_limit"],
-                "exposure_usd": payload["notional_usd"],
-            }
+            action = payload.get("action", "entry")
+            existing = self.positions.get(position_key)
+            if action in {"entry", "scale_in"}:
+                if existing is None:
+                    self.positions[position_key] = {
+                        "market_id": market_id,
+                        "position_key": position_key,
+                        "token_id": payload["token_id"],
+                        "market_question": payload.get("market_question", ""),
+                        "asset_symbol": payload.get("asset_symbol", ""),
+                        "crypto_tier": payload.get("crypto_tier", ""),
+                        "strategy_id": payload.get("strategy_id", ""),
+                        "regime": payload.get("regime", ""),
+                        "direction": payload["direction"],
+                        "size": payload["size"],
+                        "average_price": payload["price_limit"],
+                        "current_price": payload["price_limit"],
+                        "cost_basis_usd": payload["notional_usd"],
+                        "current_value_usd": payload["notional_usd"],
+                        "unrealized_pnl": 0.0,
+                        "take_profit_price": payload.get("take_profit_price"),
+                        "stop_loss_price": payload.get("stop_loss_price"),
+                        "time_stop_minutes": payload.get("time_stop_minutes"),
+                        "opened_at": payload.get("created_at", "2026-03-18T12:00:00Z"),
+                        "scaled_out_count": 0,
+                        "latest_spread_bps": 40.0,
+                    }
+                else:
+                    total_size = existing["size"] + payload["size"]
+                    weighted_price = (
+                        ((existing["average_price"] * existing["size"]) + (payload["price_limit"] * payload["size"])) / total_size
+                        if total_size
+                        else payload["price_limit"]
+                    )
+                    existing["size"] = total_size
+                    existing["average_price"] = weighted_price
+                    existing["cost_basis_usd"] += payload["notional_usd"]
+                    existing["current_price"] = payload["price_limit"]
+                    existing["current_value_usd"] = existing["current_price"] * existing["size"]
+                    existing["unrealized_pnl"] = existing["current_value_usd"] - existing["cost_basis_usd"]
+            else:
+                if existing is None:
+                    return
+                remaining_size = max(existing["size"] - payload["size"], 0)
+                if remaining_size == 0:
+                    self.positions.pop(position_key, None)
+                else:
+                    existing["size"] = remaining_size
+                    existing["cost_basis_usd"] = existing["average_price"] * remaining_size
+                    existing["current_value_usd"] = existing["current_price"] * remaining_size
+                    existing["unrealized_pnl"] = existing["current_value_usd"] - existing["cost_basis_usd"]
+                    if action == "scale_out":
+                        existing["scaled_out_count"] += 1
 
     async def record_llm_call(self, **payload) -> None:
         self.llm_calls.append(payload)
@@ -155,40 +197,43 @@ class FakeRepository:
         self.market_snapshots.extend(snapshot.model_dump(mode="json") for snapshot in snapshots)
 
     async def get_portfolio_summary(self) -> PortfolioSummary:
-        total_exposure = sum(position["exposure_usd"] for position in self.positions.values())
-        current_market_value = total_exposure
+        total_exposure = sum(position["cost_basis_usd"] for position in self.positions.values())
+        current_market_value = sum(position["current_value_usd"] for position in self.positions.values())
+        realized_pnl = sum(float(item.get("realized_pnl_usd") or 0.0) for item in self.orders)
         return PortfolioSummary(
-            available_balance=max(self.bankroll - total_exposure, 0.0),
+            available_balance=max(self.bankroll - total_exposure + realized_pnl, 0.0),
             total_exposure=total_exposure,
             current_market_value=current_market_value,
-            total_equity=max(self.bankroll - total_exposure, 0.0) + current_market_value,
-            total_pnl=current_market_value - total_exposure,
+            total_equity=max(self.bankroll - total_exposure + realized_pnl, 0.0) + current_market_value,
+            total_pnl=realized_pnl + current_market_value - total_exposure,
             open_positions=len(self.positions),
-            realized_pnl=0.0,
+            realized_pnl=realized_pnl,
             unrealized_pnl=current_market_value - total_exposure,
         )
 
     @staticmethod
-    def _matches(payload: dict, asset: str | None = None, tier: str | None = None) -> bool:
+    def _matches(payload: dict, asset: str | None = None, tier: str | None = None, strategy: str | None = None) -> bool:
         if asset and str(payload.get("asset_symbol", "")).upper() != asset.upper():
             return False
         if tier and str(payload.get("crypto_tier", "")).lower() != tier.lower():
             return False
+        if strategy and str(payload.get("strategy_id", "")) != strategy:
+            return False
         return True
 
-    async def get_recent_signals(self, limit: int = 20, asset: str | None = None, tier: str | None = None):
-        items = [item for item in self.signals if self._matches(item, asset, tier)]
+    async def get_recent_signals(self, limit: int = 20, asset: str | None = None, tier: str | None = None, strategy: str | None = None):
+        items = [item for item in self.signals if self._matches(item, asset, tier, strategy)]
         return list(reversed(items[-limit:]))
 
-    async def get_recent_orders(self, limit: int = 20, asset: str | None = None, tier: str | None = None):
-        items = [item for item in self.orders if self._matches(item, asset, tier)]
+    async def get_recent_orders(self, limit: int = 20, asset: str | None = None, tier: str | None = None, strategy: str | None = None):
+        items = [item for item in self.orders if self._matches(item, asset, tier, strategy)]
         return list(reversed(items[-limit:]))
 
     async def get_recent_risk_events(self, limit: int = 20):
         return list(reversed(self.risk_events[-limit:]))
 
-    async def get_recent_decisions(self, limit: int = 20, asset: str | None = None, tier: str | None = None):
-        items = [item for item in self.decisions if self._matches(item, asset, tier)]
+    async def get_recent_decisions(self, limit: int = 20, asset: str | None = None, tier: str | None = None, strategy: str | None = None):
+        items = [item for item in self.decisions if self._matches(item, asset, tier, strategy)]
         return list(reversed(items[-limit:]))
 
     async def get_equity_history(self, limit: int = 100):
@@ -196,6 +241,34 @@ class FakeRepository:
 
     async def get_open_positions(self):
         return list(self.positions.values())
+
+    async def get_market_snapshots(self, market_id: str | None = None, limit: int = 5000, **_: object):
+        items = self.market_snapshots
+        if market_id:
+            items = [item for item in items if item["market_id"] == market_id]
+        return items[-limit:]
+
+    async def get_execution_risk_state(self, hours: int = 24) -> dict[str, object]:
+        consecutive_losses = 0
+        last_loss_at = None
+        for item in reversed(self.orders):
+            pnl = float(item.get("realized_pnl_usd") or 0.0)
+            if pnl < 0:
+                consecutive_losses += 1
+                if last_loss_at is None:
+                    last_loss_at = item.get("created_at")
+            elif pnl > 0:
+                break
+        return {
+            "daily_spend_usd": sum(
+                float(item.get("notional_usd") or 0.0)
+                for item in self.orders
+                if str(item.get("action") or "entry") in {"entry", "scale_in"}
+            ),
+            "realized_pnl_usd": sum(float(item.get("realized_pnl_usd") or 0.0) for item in self.orders),
+            "consecutive_losses": consecutive_losses,
+            "last_loss_at": last_loss_at,
+        }
 
     async def get_agent_status(self):
         return list(self.heartbeats.values())
@@ -209,16 +282,23 @@ class FakeRepository:
             "portfolio": (await self.get_portfolio_summary()).model_dump(),
         }
 
-    async def get_performance_report(self, hours: int = 24, asset: str | None = None, tier: str | None = None):
-        signals = [item for item in self.signals if self._matches(item, asset, tier)]
-        decisions = [item for item in self.decisions if self._matches(item, asset, tier)]
-        orders = [item for item in self.orders if self._matches(item, asset, tier)]
-        open_positions = [item for item in self.positions.values() if self._matches(item, asset, tier)]
+    async def get_performance_report(
+        self,
+        hours: int = 24,
+        asset: str | None = None,
+        tier: str | None = None,
+        strategy: str | None = None,
+    ):
+        signals = [item for item in self.signals if self._matches(item, asset, tier, strategy)]
+        decisions = [item for item in self.decisions if self._matches(item, asset, tier, strategy)]
+        orders = [item for item in self.orders if self._matches(item, asset, tier, strategy)]
+        open_positions = [item for item in self.positions.values() if self._matches(item, asset, tier, strategy)]
         return {
             "generated_at": "2026-03-18T12:05:00Z",
             "window_hours": hours,
             "asset_filter": asset or "",
             "tier_filter": tier or "",
+            "strategy_filter": strategy or "",
             "summary": {
                 "signals": len(signals),
                 "decisions": len(decisions),
@@ -227,10 +307,15 @@ class FakeRepository:
                 "approval_rate": 1.0 if signals else 0.0,
                 "execution_rate": 1.0 if decisions else 0.0,
                 "positive_position_rate": 0.0,
+                "win_rate": 1.0 if orders else 0.0,
                 "avg_edge": 0.22,
                 "avg_confidence": 0.77,
                 "total_order_notional": 44.0,
                 "avg_order_notional": 44.0,
+                "daily_spend_usd": 44.0,
+                "realized_pnl_window": 0.0,
+                "sharpe_ratio": 0.0,
+                "max_drawdown": 0.0,
                 "llm_cost_usd": 0.01,
                 **(await self.get_portfolio_summary()).model_dump(),
             },
@@ -238,6 +323,9 @@ class FakeRepository:
             "risk_breakdown": [{"label": "review rejected signal", "count": 1}],
             "asset_breakdown": [{"label": "BTC", "count": len(signals)}],
             "tier_breakdown": [{"label": "btc", "count": len(signals)}],
+            "strategy_breakdown": [{"label": "trend_follow_bayes", "signals": len(signals), "orders": len(orders), "realized_pnl_usd": 0.0}],
+            "regime_breakdown": [{"label": "trend", "count": len(signals)}],
+            "exit_reason_breakdown": [],
             "news_breakdown": [{"label": "validated", "count": len(signals)}],
             "news_provider_breakdown": [{"label": "smoke", "count": len(signals)}],
             "news_fallback_breakdown": [
@@ -270,6 +358,7 @@ class FakeRepository:
                 }
             ],
             "open_positions": open_positions,
+            "mae_mfe": {"avg_mae": 0.0, "avg_mfe": 0.0},
             "time_series": {"pipeline": [], "equity": []},
         }
 
@@ -343,8 +432,8 @@ async def test_signal_news_review_execute_flow_smoke(monkeypatch) -> None:
         "question_type": "upside_target",
         "thesis_tags": ["btc", "btc", "upside_target"],
         "thesis_hash": "btc-btc",
-        "orderbook_summary_yes": {"best_bid": 0.39, "best_ask": 0.41, "spread_bps": 50.0, "bid_depth": 100.0, "ask_depth": 200.0},
-        "orderbook_summary_no": {"best_bid": 0.59, "best_ask": 0.61, "spread_bps": 50.0, "bid_depth": 100.0, "ask_depth": 200.0},
+        "orderbook_summary_yes": {"best_bid": 0.39, "best_ask": 0.41, "spread_bps": 40.0, "bid_depth": 520.0, "ask_depth": 160.0},
+        "orderbook_summary_no": {"best_bid": 0.59, "best_ask": 0.61, "spread_bps": 40.0, "bid_depth": 20.0, "ask_depth": 430.0},
     }
 
     claude = ClaudeAgent(context)
@@ -440,8 +529,8 @@ async def test_signal_review_execute_flow_without_news_validation(monkeypatch) -
         "question_type": "upside_target",
         "thesis_tags": ["btc", "btc", "upside_target"],
         "thesis_hash": "btc-btc",
-        "orderbook_summary_yes": {"best_bid": 0.39, "best_ask": 0.41, "spread_bps": 50.0, "bid_depth": 100.0, "ask_depth": 200.0},
-        "orderbook_summary_no": {"best_bid": 0.59, "best_ask": 0.61, "spread_bps": 50.0, "bid_depth": 100.0, "ask_depth": 200.0},
+        "orderbook_summary_yes": {"best_bid": 0.39, "best_ask": 0.41, "spread_bps": 40.0, "bid_depth": 520.0, "ask_depth": 160.0},
+        "orderbook_summary_no": {"best_bid": 0.59, "best_ask": 0.61, "spread_bps": 40.0, "bid_depth": 20.0, "ask_depth": 430.0},
     }
 
     claude = ClaudeAgent(context)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from typing import Any
 
@@ -33,3 +34,20 @@ def extract_first_float(raw: str, patterns: list[str], default: float | None = N
 
 def stable_hash(raw: str, length: int = 12) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:length]
+
+
+def clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(value, upper))
+
+
+def sigmoid(value: float) -> float:
+    if value >= 0:
+        exp = math.exp(-value)
+        return 1 / (1 + exp)
+    exp = math.exp(value)
+    return exp / (1 + exp)
+
+
+def logit(probability: float, epsilon: float = 1e-6) -> float:
+    bounded = clamp(probability, epsilon, 1 - epsilon)
+    return math.log(bounded / (1 - bounded))

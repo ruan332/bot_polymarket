@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -43,10 +44,17 @@ CREATE TABLE IF NOT EXISTS positions (
     market_question TEXT NOT NULL DEFAULT '',
     asset_symbol TEXT NOT NULL DEFAULT '',
     crypto_tier TEXT NOT NULL DEFAULT '',
+    strategy_id TEXT NOT NULL DEFAULT '',
+    regime TEXT NOT NULL DEFAULT '',
     direction TEXT NOT NULL,
     size INTEGER NOT NULL,
     average_price DOUBLE PRECISION NOT NULL,
     exposure_usd DOUBLE PRECISION NOT NULL,
+    take_profit_price DOUBLE PRECISION,
+    stop_loss_price DOUBLE PRECISION,
+    time_stop_minutes INTEGER,
+    opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    scaled_out_count INTEGER NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -55,6 +63,13 @@ ALTER TABLE positions ADD COLUMN IF NOT EXISTS market_question TEXT NOT NULL DEF
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS position_key TEXT;
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS asset_symbol TEXT NOT NULL DEFAULT '';
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS crypto_tier TEXT NOT NULL DEFAULT '';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS strategy_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS regime TEXT NOT NULL DEFAULT '';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS take_profit_price DOUBLE PRECISION;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS stop_loss_price DOUBLE PRECISION;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS time_stop_minutes INTEGER;
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS scaled_out_count INTEGER NOT NULL DEFAULT 0;
 UPDATE positions SET position_key = COALESCE(NULLIF(position_key, ''), market_id || ':' || direction);
 ALTER TABLE positions DROP CONSTRAINT IF EXISTS positions_pkey;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_position_key ON positions (position_key);
@@ -178,6 +193,18 @@ def _as_json(value: Any) -> str:
     return json.dumps(value, default=str)
 
 
+def _as_optional_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
+def _as_optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
 class TradingRepository:
     def __init__(self, db: Database, initial_bankroll: float):
         self.db = db
@@ -257,17 +284,30 @@ class TradingRepository:
             _as_json(payload),
         )
         if status == "simulated":
-            await self._upsert_position(
-                market_id=market_id,
-                token_id=str(payload.get("token_id", "")),
-                market_question=str(payload.get("market_question", "")),
-                asset_symbol=str(payload.get("asset_symbol", "")),
-                crypto_tier=str(payload.get("crypto_tier", "")),
-                direction=payload["direction"],
-                size=payload["size"],
-                average_price=payload["price_limit"],
-                exposure_usd=payload["notional_usd"],
-            )
+            action = str(payload.get("action") or "entry")
+            if action in {"entry", "scale_in"}:
+                await self._upsert_position(
+                    market_id=market_id,
+                    token_id=str(payload.get("token_id", "")),
+                    market_question=str(payload.get("market_question", "")),
+                    asset_symbol=str(payload.get("asset_symbol", "")),
+                    crypto_tier=str(payload.get("crypto_tier", "")),
+                    strategy_id=str(payload.get("strategy_id", "")),
+                    regime=str(payload.get("regime", "")),
+                    direction=str(payload["direction"]),
+                    size=int(payload["size"]),
+                    average_price=float(payload["price_limit"]),
+                    exposure_usd=float(payload["notional_usd"]),
+                    take_profit_price=_as_optional_float(payload.get("take_profit_price")),
+                    stop_loss_price=_as_optional_float(payload.get("stop_loss_price")),
+                    time_stop_minutes=_as_optional_int(payload.get("time_stop_minutes")),
+                )
+            else:
+                await self._reduce_position(
+                    position_key=str(payload.get("position_key") or f"{market_id}:{payload['direction']}"),
+                    size=int(payload["size"]),
+                    exit_action=action,
+                )
             await self.record_equity_snapshot(source="paper_order")
 
     async def record_llm_call(
@@ -364,23 +404,35 @@ class TradingRepository:
                 market_question,
                 asset_symbol,
                 crypto_tier,
+                strategy_id,
+                regime,
                 direction,
                 size,
                 average_price,
                 exposure_usd
             FROM positions
+            WHERE size > 0
             """
         )
+        realized_row = await self.db.fetchrow(
+            """
+            SELECT COALESCE(SUM((payload->>'realized_pnl_usd')::double precision), 0) AS realized_pnl
+            FROM paper_orders
+            WHERE status = 'simulated'
+            """
+        )
+        realized_pnl = float(realized_row["realized_pnl"] or 0.0) if realized_row else 0.0
         if not rows:
             return PortfolioSummary(
-                available_balance=self.initial_bankroll,
-                total_equity=self.initial_bankroll,
+                available_balance=self.initial_bankroll + realized_pnl,
+                total_equity=self.initial_bankroll + realized_pnl,
+                realized_pnl=realized_pnl,
+                total_pnl=realized_pnl,
             )
 
         latest_prices = await self._latest_market_prices([str(row["market_id"]) for row in rows])
         total_exposure = 0.0
         current_market_value = 0.0
-        realized_pnl = 0.0
         for row in rows:
             total_exposure += float(row["exposure_usd"] or 0.0)
             current_price = float(row["average_price"] or 0.0)
@@ -410,8 +462,9 @@ class TradingRepository:
         *,
         asset: str | None = None,
         tier: str | None = None,
+        strategy: str | None = None,
     ) -> list[dict[str, Any]]:
-        return await self._recent_payloads("signals", limit=limit, asset=asset, tier=tier)
+        return await self._recent_payloads("signals", limit=limit, asset=asset, tier=tier, strategy=strategy)
 
     async def get_recent_decisions(
         self,
@@ -419,8 +472,9 @@ class TradingRepository:
         *,
         asset: str | None = None,
         tier: str | None = None,
+        strategy: str | None = None,
     ) -> list[dict[str, Any]]:
-        return await self._recent_payloads("agent_decisions", limit=limit, asset=asset, tier=tier)
+        return await self._recent_payloads("agent_decisions", limit=limit, asset=asset, tier=tier, strategy=strategy)
 
     async def get_recent_orders(
         self,
@@ -428,8 +482,72 @@ class TradingRepository:
         *,
         asset: str | None = None,
         tier: str | None = None,
+        strategy: str | None = None,
     ) -> list[dict[str, Any]]:
-        return await self._recent_payloads("paper_orders", limit=limit, asset=asset, tier=tier)
+        return await self._recent_payloads("paper_orders", limit=limit, asset=asset, tier=tier, strategy=strategy)
+
+    async def get_execution_risk_state(self, hours: int = 24) -> dict[str, Any]:
+        window_start = datetime.now(UTC) - timedelta(hours=max(hours, 1))
+        rows = await self.db.fetch(
+            """
+            SELECT payload, created_at
+            FROM paper_orders
+            WHERE created_at >= $1 AND status = 'simulated'
+            ORDER BY created_at ASC
+            """,
+            window_start,
+        )
+        payloads = [self._decode_record(row) for row in rows]
+        daily_spend_usd = sum(
+            float(item.get("notional_usd") or 0.0)
+            for item in payloads
+            if str(item.get("action") or "entry") in {"entry", "scale_in"}
+        )
+        realized_pnl_usd = sum(float(item.get("realized_pnl_usd") or 0.0) for item in payloads)
+        consecutive_losses = 0
+        last_loss_at = None
+        for item in reversed(payloads):
+            pnl = float(item.get("realized_pnl_usd") or 0.0)
+            if pnl < 0:
+                consecutive_losses += 1
+                if last_loss_at is None:
+                    last_loss_at = item.get("created_at")
+            elif pnl > 0:
+                break
+        return {
+            "daily_spend_usd": round(daily_spend_usd, 4),
+            "realized_pnl_usd": round(realized_pnl_usd, 4),
+            "consecutive_losses": consecutive_losses,
+            "last_loss_at": last_loss_at,
+        }
+
+    async def get_latest_market_snapshot(self, market_id: str) -> dict[str, Any] | None:
+        row = await self.db.fetchrow(
+            """
+            SELECT market_id, question, token_id_yes, token_id_no, price_yes, price_no, volume_24h, payload, created_at
+            FROM market_snapshots
+            WHERE market_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            market_id,
+        )
+        if row is None:
+            return None
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        return {
+            "market_id": row["market_id"],
+            "question": row["question"],
+            "token_id_yes": row["token_id_yes"],
+            "token_id_no": row["token_id_no"],
+            "price_yes": float(row["price_yes"] or 0.0),
+            "price_no": float(row["price_no"] or 0.0),
+            "volume_24h": float(row["volume_24h"] or 0.0),
+            "metadata": payload,
+            "created_at": row["created_at"],
+        }
 
     async def get_recent_risk_events(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = await self.db.fetch("SELECT payload, created_at FROM risk_events ORDER BY created_at DESC LIMIT $1", limit)
@@ -469,6 +587,7 @@ class TradingRepository:
         *,
         asset: str | None = None,
         tier: str | None = None,
+        strategy: str | None = None,
     ) -> dict[str, Any]:
         window_start = datetime.now(UTC) - timedelta(hours=max(hours, 1))
         portfolio = await self.get_portfolio_summary()
@@ -511,10 +630,20 @@ class TradingRepository:
         orders_payloads = [self._decode_record(row) for row in order_rows]
         risk_payloads = [self._decode_record(row) for row in risk_event_rows]
 
-        signals_filtered = [item for item in signals_payloads if self._matches_filters(item, asset=asset, tier=tier)]
-        decisions_filtered = [item for item in decisions_payloads if self._matches_filters(item, asset=asset, tier=tier)]
-        orders_filtered = [item for item in orders_payloads if self._matches_filters(item, asset=asset, tier=tier)]
-        risk_filtered = [item for item in risk_payloads if self._matches_filters(item, asset=asset, tier=tier, allow_missing=True)]
+        signals_filtered = [
+            item for item in signals_payloads if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)
+        ]
+        decisions_filtered = [
+            item for item in decisions_payloads if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)
+        ]
+        orders_filtered = [
+            item for item in orders_payloads if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)
+        ]
+        risk_filtered = [
+            item
+            for item in risk_payloads
+            if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy, allow_missing=True)
+        ]
 
         signals = len(signals_filtered)
         decisions = len(decisions_filtered)
@@ -522,14 +651,22 @@ class TradingRepository:
         risk_events = len(risk_filtered)
         total_cost = sum(float(row["cost_usd"] or 0.0) for row in llm_cost_rows)
         open_positions = await self.get_open_positions()
-        open_positions = [item for item in open_positions if self._matches_filters(item, asset=asset, tier=tier)]
+        open_positions = [item for item in open_positions if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)]
         positive_positions = sum(1 for position in open_positions if float(position["unrealized_pnl"]) > 0)
 
         signal_edges = [float(item.get("edge") or 0.0) for item in signals_filtered]
         signal_confidences = [float(item.get("confidence") or 0.0) for item in signals_filtered]
         simulated_orders = [item for item in orders_filtered if str(item.get("status")) == "simulated"]
+        entry_orders = [item for item in simulated_orders if str(item.get("action") or "entry") in {"entry", "scale_in"}]
+        exit_orders = [item for item in simulated_orders if str(item.get("action") or "") in {"scale_out", "close"}]
         total_notional = sum(float(item.get("notional_usd") or 0.0) for item in simulated_orders)
         avg_notional = total_notional / len(simulated_orders) if simulated_orders else 0.0
+        realized_pnl = sum(float(item.get("realized_pnl_usd") or 0.0) for item in exit_orders)
+        win_rate = (
+            round(sum(1 for item in exit_orders if float(item.get("realized_pnl_usd") or 0.0) > 0) / len(exit_orders), 4)
+            if exit_orders
+            else 0.0
+        )
 
         order_count_by_market: dict[str, int] = {}
         for item in simulated_orders:
@@ -541,6 +678,9 @@ class TradingRepository:
         risk_breakdown = self._count_by_key(risk_filtered, "reason", limit=8)
         asset_breakdown = self._count_by_key(signals_filtered, "asset_symbol", limit=8)
         tier_breakdown = self._count_by_key(signals_filtered, "crypto_tier", limit=3)
+        strategy_breakdown = self._strategy_breakdown(signals_filtered, simulated_orders)
+        regime_breakdown = self._count_by_key(signals_filtered, "regime", limit=6)
+        exit_reason_breakdown = self._count_by_key(exit_orders, "exit_reason", limit=6)
         news_breakdown = self._news_breakdown(signals_filtered)
         news_provider_breakdown = self._news_provider_breakdown(signals_filtered)
         news_fallback_breakdown = self._news_fallback_breakdown(signals_filtered)
@@ -551,12 +691,16 @@ class TradingRepository:
             orders_filtered,
             risk_filtered,
         )
+        sharpe_ratio = self._sharpe_from_equity_rows(equity_rows)
+        max_drawdown = self._max_drawdown_from_equity_rows(equity_rows)
+        mae_mfe = self._estimate_mae_mfe(exit_orders, open_positions)
 
         return {
             "generated_at": datetime.now(UTC).isoformat(),
             "window_hours": hours,
             "asset_filter": asset or "",
             "tier_filter": tier or "",
+            "strategy_filter": strategy or "",
             "summary": {
                 "signals": signals,
                 "decisions": decisions,
@@ -565,10 +709,15 @@ class TradingRepository:
                 "approval_rate": round(decisions / signals, 4) if signals else 0.0,
                 "execution_rate": round(orders / decisions, 4) if decisions else 0.0,
                 "positive_position_rate": round(positive_positions / len(open_positions), 4) if open_positions else 0.0,
+                "win_rate": win_rate,
                 "avg_edge": round(sum(signal_edges) / len(signal_edges), 4) if signal_edges else 0.0,
                 "avg_confidence": round(sum(signal_confidences) / len(signal_confidences), 4) if signal_confidences else 0.0,
                 "total_order_notional": round(total_notional, 4),
                 "avg_order_notional": round(avg_notional, 4),
+                "daily_spend_usd": round(sum(float(item.get("notional_usd") or 0.0) for item in entry_orders), 4),
+                "realized_pnl_window": round(realized_pnl, 4),
+                "sharpe_ratio": sharpe_ratio,
+                "max_drawdown": max_drawdown,
                 "llm_cost_usd": round(total_cost, 4),
                 **portfolio.model_dump(),
             },
@@ -583,12 +732,16 @@ class TradingRepository:
             "risk_breakdown": risk_breakdown,
             "asset_breakdown": asset_breakdown,
             "tier_breakdown": tier_breakdown,
+            "strategy_breakdown": strategy_breakdown,
+            "regime_breakdown": regime_breakdown,
+            "exit_reason_breakdown": exit_reason_breakdown,
             "news_breakdown": news_breakdown,
             "news_provider_breakdown": news_provider_breakdown,
             "news_fallback_breakdown": news_fallback_breakdown,
             "last_news_provider": last_news_provider,
             "top_markets": top_markets,
             "open_positions": open_positions[:8],
+            "mae_mfe": mae_mfe,
             "time_series": {
                 "pipeline": time_series,
                 "equity": [
@@ -664,9 +817,11 @@ class TradingRepository:
     async def get_open_positions(self) -> list[dict[str, Any]]:
         rows = await self.db.fetch(
             """
-            SELECT market_id, token_id, market_question, direction, size, average_price, exposure_usd, updated_at
-                 , asset_symbol, crypto_tier
+            SELECT market_id, position_key, token_id, market_question, direction, size, average_price, exposure_usd, updated_at
+                 , asset_symbol, crypto_tier, strategy_id, regime, take_profit_price, stop_loss_price, time_stop_minutes
+                 , opened_at, scaled_out_count
             FROM positions
+            WHERE size > 0
             ORDER BY updated_at DESC
             """
         )
@@ -675,18 +830,25 @@ class TradingRepository:
         for row in rows:
             latest = latest_prices.get(str(row["market_id"]))
             current_price = float(row["average_price"] or 0.0)
+            latest_spread_bps = 0.0
             if latest:
                 current_price = float(latest["price_yes"] if row["direction"] == "YES" else latest["price_no"])
+                payload = latest.get("payload") or {}
+                summary_key = "orderbook_summary_yes" if row["direction"] == "YES" else "orderbook_summary_no"
+                latest_spread_bps = float(((payload.get(summary_key) or {}).get("spread_bps")) or 0.0)
             size = int(row["size"] or 0)
             cost_basis = float(row["exposure_usd"] or 0.0)
             current_value = size * current_price
             positions.append(
                 {
                     "market_id": row["market_id"],
+                    "position_key": row["position_key"],
                     "token_id": row["token_id"],
                     "market_question": row["market_question"],
                     "asset_symbol": row["asset_symbol"],
                     "crypto_tier": row["crypto_tier"],
+                    "strategy_id": row["strategy_id"],
+                    "regime": row["regime"],
                     "direction": row["direction"],
                     "size": size,
                     "average_price": float(row["average_price"] or 0.0),
@@ -694,6 +856,12 @@ class TradingRepository:
                     "cost_basis_usd": cost_basis,
                     "current_value_usd": current_value,
                     "unrealized_pnl": current_value - cost_basis,
+                    "take_profit_price": _as_optional_float(row["take_profit_price"]),
+                    "stop_loss_price": _as_optional_float(row["stop_loss_price"]),
+                    "time_stop_minutes": _as_optional_int(row["time_stop_minutes"]),
+                    "opened_at": row["opened_at"],
+                    "scaled_out_count": int(row["scaled_out_count"] or 0),
+                    "latest_spread_bps": latest_spread_bps,
                     "updated_at": row["updated_at"],
                 }
             )
@@ -786,6 +954,7 @@ class TradingRepository:
         limit: int,
         asset: str | None = None,
         tier: str | None = None,
+        strategy: str | None = None,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         args: list[Any] = []
@@ -795,6 +964,9 @@ class TradingRepository:
         if tier:
             args.append(tier)
             clauses.append(f"payload->>'crypto_tier' = ${len(args)}")
+        if strategy:
+            args.append(strategy)
+            clauses.append(f"payload->>'strategy_id' = ${len(args)}")
         args.append(limit)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         query = f"SELECT payload, created_at FROM {table} {where} ORDER BY created_at DESC LIMIT ${len(args)}"
@@ -807,6 +979,7 @@ class TradingRepository:
         *,
         asset: str | None = None,
         tier: str | None = None,
+        strategy: str | None = None,
         allow_missing: bool = False,
     ) -> bool:
         if asset:
@@ -823,6 +996,13 @@ class TradingRepository:
                     return False
             elif tier_value != tier.lower():
                 return False
+        if strategy:
+            strategy_value = str(payload.get("strategy_id") or "").strip()
+            if not strategy_value:
+                if not allow_missing:
+                    return False
+            elif strategy_value != strategy:
+                return False
         return True
 
     @staticmethod
@@ -835,6 +1015,32 @@ class TradingRepository:
             counts[value] = counts.get(value, 0) + 1
         ordered = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
         return [{"label": label, "count": count} for label, count in ordered[:limit]]
+
+    @staticmethod
+    def _strategy_breakdown(signals: list[dict[str, Any]], orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        signal_counts: dict[str, int] = {}
+        order_counts: dict[str, int] = {}
+        realized: dict[str, float] = {}
+        for item in signals:
+            key = str(item.get("strategy_id") or "").strip()
+            if key:
+                signal_counts[key] = signal_counts.get(key, 0) + 1
+        for item in orders:
+            key = str(item.get("strategy_id") or "").strip()
+            if not key:
+                continue
+            order_counts[key] = order_counts.get(key, 0) + 1
+            realized[key] = realized.get(key, 0.0) + float(item.get("realized_pnl_usd") or 0.0)
+        keys = sorted(set(signal_counts) | set(order_counts))
+        return [
+            {
+                "label": key,
+                "signals": signal_counts.get(key, 0),
+                "orders": order_counts.get(key, 0),
+                "realized_pnl_usd": round(realized.get(key, 0.0), 4),
+            }
+            for key in keys
+        ]
 
     @staticmethod
     def _news_breakdown(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -965,6 +1171,57 @@ class TradingRepository:
         touch(risk_events, "risk_events")
         return [buckets[key] for key in sorted(buckets)]
 
+    @staticmethod
+    def _sharpe_from_equity_rows(rows: list[asyncpg.Record]) -> float:
+        if len(rows) < 2:
+            return 0.0
+        returns: list[float] = []
+        previous = float(rows[0]["total_equity"] or 0.0)
+        for row in rows[1:]:
+            current = float(row["total_equity"] or 0.0)
+            if previous > 0 and current > 0:
+                returns.append(math.log(current / previous))
+            previous = current
+        if len(returns) < 2:
+            return 0.0
+        mean_return = sum(returns) / len(returns)
+        variance = sum((value - mean_return) ** 2 for value in returns) / (len(returns) - 1)
+        std = math.sqrt(variance)
+        return round(mean_return / std, 4) if std > 0 else 0.0
+
+    @staticmethod
+    def _max_drawdown_from_equity_rows(rows: list[asyncpg.Record]) -> float:
+        peak = 0.0
+        max_drawdown = 0.0
+        for row in rows:
+            equity = float(row["total_equity"] or 0.0)
+            peak = max(peak, equity)
+            if peak > 0:
+                max_drawdown = max(max_drawdown, (peak - equity) / peak)
+        return round(max_drawdown, 6)
+
+    @staticmethod
+    def _estimate_mae_mfe(exit_orders: list[dict[str, Any]], open_positions: list[dict[str, Any]]) -> dict[str, float]:
+        per_share_pnl: list[float] = []
+        for item in exit_orders:
+            size = int(item.get("size") or 0)
+            if size <= 0:
+                continue
+            per_share_pnl.append(float(item.get("realized_pnl_usd") or 0.0) / size)
+        for item in open_positions:
+            size = int(item.get("size") or 0)
+            if size <= 0:
+                continue
+            per_share_pnl.append((float(item.get("current_price") or 0.0) - float(item.get("average_price") or 0.0)))
+        if not per_share_pnl:
+            return {"avg_mae": 0.0, "avg_mfe": 0.0}
+        negatives = [value for value in per_share_pnl if value < 0]
+        positives = [value for value in per_share_pnl if value > 0]
+        return {
+            "avg_mae": round(sum(negatives) / len(negatives), 4) if negatives else 0.0,
+            "avg_mfe": round(sum(positives) / len(positives), 4) if positives else 0.0,
+        }
+
     async def _upsert_position(
         self,
         market_id: str,
@@ -972,23 +1229,31 @@ class TradingRepository:
         market_question: str,
         asset_symbol: str,
         crypto_tier: str,
+        strategy_id: str,
+        regime: str,
         direction: str,
         size: int,
         average_price: float,
         exposure_usd: float,
+        take_profit_price: float | None,
+        stop_loss_price: float | None,
+        time_stop_minutes: int | None,
     ) -> None:
         position_key = f"{market_id}:{direction}"
         await self.db.execute(
             """
             INSERT INTO positions (
-                market_id, position_key, token_id, market_question, asset_symbol, crypto_tier, direction, size, average_price, exposure_usd, updated_at
+                market_id, position_key, token_id, market_question, asset_symbol, crypto_tier, strategy_id, regime,
+                direction, size, average_price, exposure_usd, take_profit_price, stop_loss_price, time_stop_minutes, opened_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (position_key) DO UPDATE
             SET token_id = EXCLUDED.token_id,
                 market_question = EXCLUDED.market_question,
                 asset_symbol = EXCLUDED.asset_symbol,
                 crypto_tier = EXCLUDED.crypto_tier,
+                strategy_id = COALESCE(NULLIF(EXCLUDED.strategy_id, ''), positions.strategy_id),
+                regime = COALESCE(NULLIF(EXCLUDED.regime, ''), positions.regime),
                 direction = EXCLUDED.direction,
                 size = positions.size + EXCLUDED.size,
                 average_price = CASE
@@ -997,6 +1262,9 @@ class TradingRepository:
                         / (positions.size + EXCLUDED.size)
                 END,
                 exposure_usd = positions.exposure_usd + EXCLUDED.exposure_usd,
+                take_profit_price = COALESCE(EXCLUDED.take_profit_price, positions.take_profit_price),
+                stop_loss_price = COALESCE(EXCLUDED.stop_loss_price, positions.stop_loss_price),
+                time_stop_minutes = COALESCE(EXCLUDED.time_stop_minutes, positions.time_stop_minutes),
                 updated_at = EXCLUDED.updated_at
             """,
             market_id,
@@ -1005,10 +1273,47 @@ class TradingRepository:
             market_question,
             asset_symbol,
             crypto_tier,
+            strategy_id,
+            regime,
             direction,
             size,
             average_price,
             exposure_usd,
+            take_profit_price,
+            stop_loss_price,
+            time_stop_minutes,
+            datetime.now(UTC),
+            datetime.now(UTC),
+        )
+
+    async def _reduce_position(self, position_key: str, size: int, exit_action: str) -> None:
+        row = await self.db.fetchrow(
+            """
+            SELECT size, scaled_out_count
+            FROM positions
+            WHERE position_key = $1
+            """,
+            position_key,
+        )
+        if row is None:
+            return
+        remaining_size = max(int(row["size"] or 0) - size, 0)
+        if remaining_size == 0:
+            await self.db.execute("DELETE FROM positions WHERE position_key = $1", position_key)
+            return
+        scale_out_increment = 1 if exit_action == "scale_out" else 0
+        await self.db.execute(
+            """
+            UPDATE positions
+            SET size = $2,
+                exposure_usd = average_price * $2,
+                scaled_out_count = scaled_out_count + $3,
+                updated_at = $4
+            WHERE position_key = $1
+            """,
+            position_key,
+            remaining_size,
+            scale_out_increment,
             datetime.now(UTC),
         )
 
@@ -1022,6 +1327,7 @@ class TradingRepository:
                 market_id,
                 price_yes,
                 price_no,
+                payload,
                 created_at
             FROM market_snapshots
             WHERE market_id = ANY($1::text[])
@@ -1033,6 +1339,7 @@ class TradingRepository:
             str(row["market_id"]): {
                 "price_yes": float(row["price_yes"] or 0.0),
                 "price_no": float(row["price_no"] or 0.0),
+                "payload": json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"],
             }
             for row in rows
         }

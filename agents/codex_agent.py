@@ -4,17 +4,9 @@ from uuid import uuid4
 
 from agents.base import BaseAgent
 from core.app_context import AppContext
-from core.exceptions import InvalidModelResponseError, RiskBlockedError
+from core.exceptions import RiskBlockedError
 from core.risk_engine import RiskEngine
 from core.schemas import NewsValidationPayload, ReviewPayload, SignalPayload
-from core.utils import parse_json_object
-
-
-SYSTEM_PROMPT = """
-Você é um corretor operacional.
-Revise um sinal de trading e responda APENAS com JSON válido:
-{"approved": true, "notes": "...", "corrected_price_limit": 0.55}
-"""
 
 
 class CodexAgent(BaseAgent):
@@ -72,42 +64,30 @@ class CodexAgent(BaseAgent):
             )
 
         portfolio = await self.risk.portfolio_state()
+        risk_fraction = self.risk.kelly_fraction(signal.edge, signal.price)
         kelly_size = self.risk.kelly_size(signal.edge, signal.price, portfolio.available_balance)
-        prompt = f"""
-Sinal:
-- signal_id: {signal.signal_id}
-- market_id: {signal.market_id}
-- asset_symbol: {signal.asset_symbol}
-- crypto_tier: {signal.crypto_tier}
-- direction: {signal.direction}
-- edge: {signal.edge:.4f}
-- confidence: {signal.confidence:.4f}
-- preco: {signal.price:.4f}
-- volume_24h: {signal.volume_24h:.2f}
-- liquidity_summary: {signal.liquidity_summary}
-- news_validation: {signal.news_validation}
-- kelly_size: {kelly_size}
-"""
-        response = await self.provider.call(prompt=prompt, system=SYSTEM_PROMPT)
-        await self.cost_tracker.record(response, prompt_type="review_signal")
-
-        try:
-            payload = parse_json_object(response.content)
-        except Exception as exc:
-            raise InvalidModelResponseError(f"codex returned invalid JSON: {exc}") from exc
-
-        corrected_price_limit = payload.get("corrected_price_limit")
-        if corrected_price_limit is not None:
-            corrected_price_limit = float(corrected_price_limit)
+        exit_plan = self.risk.build_exit_plan(signal)
+        corrected_price_limit = min(
+            signal.price + max(signal.expected_slippage_bps / 10000, self.context.risk_config.default_limit_buffer_bps / 10000),
+            self.context.risk_config.max_order_price,
+        )
+        notes = (
+            f"{signal.strategy_id} em regime {signal.regime} com posterior {signal.model_probability:.3f} "
+            f"vs mercado {signal.market_probability:.3f}."
+        )
 
         return ReviewPayload(
             signal_id=signal.signal_id,
             asset_symbol=signal.asset_symbol,
             crypto_tier=signal.crypto_tier,
-            approved=bool(payload.get("approved", True)) and kelly_size > 0,
+            approved=kelly_size > 0,
             corrected_price_limit=corrected_price_limit,
             kelly_size=kelly_size,
-            notes=str(payload.get("notes", "")),
+            risk_fraction=round(risk_fraction, 4),
+            take_profit_price=float(exit_plan["take_profit_price"]),
+            stop_loss_price=float(exit_plan["stop_loss_price"]),
+            time_stop_minutes=int(exit_plan["time_stop_minutes"]),
+            notes=notes,
             original_signal=signal,
             news_validation=(
                 None

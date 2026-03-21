@@ -106,6 +106,8 @@ class RiskSettings(BaseModel):
     min_confidence: float = 0.55
     max_kelly_fraction: float = 0.25
     max_single_exposure_fraction: float = 0.10
+    max_asset_exposure_fraction: float = 0.18
+    max_strategy_exposure_fraction: float = 0.25
     max_single_position_usd: float = 100.0
     max_total_exposure_usd: float = 250.0
     max_daily_spend_usd: float = 5.0
@@ -118,8 +120,23 @@ class RiskSettings(BaseModel):
     circuit_breaker_loss_threshold_usd: float = 100.0
     circuit_breaker_cooldown_seconds: int = 300
     default_limit_buffer_bps: int = 50
+    daily_drawdown_limit_fraction: float = 0.08
+    loss_streak_size_discount: float = 0.15
+    min_risk_fraction_after_losses: float = 0.35
+    exit_scale_out_fraction: float = 0.50
 
-    @field_validator("min_edge", "min_confidence", "max_kelly_fraction", "max_single_exposure_fraction")
+    @field_validator(
+        "min_edge",
+        "min_confidence",
+        "max_kelly_fraction",
+        "max_single_exposure_fraction",
+        "max_asset_exposure_fraction",
+        "max_strategy_exposure_fraction",
+        "daily_drawdown_limit_fraction",
+        "loss_streak_size_discount",
+        "min_risk_fraction_after_losses",
+        "exit_scale_out_fraction",
+    )
     @classmethod
     def validate_probability(cls, value: float) -> float:
         if not 0 <= value <= 1:

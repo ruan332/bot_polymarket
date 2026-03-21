@@ -1,21 +1,14 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from agents.base import BaseAgent
 from core.app_context import AppContext
-from core.exceptions import InvalidModelResponseError, RiskBlockedError
+from core.exceptions import RiskBlockedError
 from core.market_connector import MarketConnector
 from core.risk_engine import RiskEngine
 from core.schemas import PaperOrderPayload, ReviewPayload
-from core.utils import parse_json_object
-
-
-SYSTEM_PROMPT = """
-Você é um executor em paper trading.
-Responda APENAS com JSON válido:
-{"execute": true, "size": 100, "price_limit": 0.42, "reason": "..."}
-"""
 
 
 class ClawAgent(BaseAgent):
@@ -26,6 +19,7 @@ class ClawAgent(BaseAgent):
         self.consumer = f"claw-{uuid4().hex[:8]}"
 
     async def tick(self) -> None:
+        await self.process_exit_cycle()
         await self.context.bus.ensure_group("signals:reviewed", "claw_executors")
         events = await self.context.bus.read_group(
             "signals:reviewed",
@@ -58,42 +52,18 @@ class ClawAgent(BaseAgent):
             return
 
         signal = review.original_signal
-        prompt = f"""
-Signal:
-- signal_id: {signal.signal_id}
-- market_id: {signal.market_id}
-- asset_symbol: {signal.asset_symbol}
-- crypto_tier: {signal.crypto_tier}
-- direction: {signal.direction}
-- edge: {signal.edge:.4f}
-- price: {signal.price:.4f}
-- liquidity_summary: {signal.liquidity_summary}
-- news_validation: {review.news_validation.model_dump(mode='json') if review.news_validation else {}}
-- guarded_size: {guard.size}
-- guarded_price_limit: {guard.price_limit:.4f}
-"""
-        response = await self.provider.call(prompt=prompt, system=SYSTEM_PROMPT)
-        await self.cost_tracker.record(response, prompt_type="execute_order")
-
-        try:
-            payload = parse_json_object(response.content)
-        except Exception as exc:
-            raise InvalidModelResponseError(f"claw returned invalid JSON: {exc}") from exc
-
-        if not payload.get("execute", True):
-            await self.risk.record_block(
-                self.name,
-                str(payload.get("reason", "executor declined")),
-                {
-                    "signal_id": review.signal_id,
-                    "asset_symbol": review.asset_symbol,
-                    "crypto_tier": review.crypto_tier,
-                },
-            )
-            return
-
-        size = min(int(payload.get("size", guard.size)), guard.size)
-        price_limit = min(float(payload.get("price_limit", guard.price_limit)), guard.price_limit)
+        positions = await self.context.repository.get_open_positions()
+        existing = next(
+            (
+                item
+                for item in positions
+                if str(item.get("market_id")) == signal.market_id and str(item.get("direction")) == signal.direction
+            ),
+            None,
+        )
+        action = "scale_in" if existing else "entry"
+        size = guard.size
+        price_limit = guard.price_limit
         order_result = await self.connector.place_order(
             market_id=signal.market_id,
             token_id=signal.token_id,
@@ -109,12 +79,20 @@ Signal:
             market_question=signal.market_question,
             asset_symbol=signal.asset_symbol,
             crypto_tier=signal.crypto_tier,
+            action=action,
+            position_key=f"{signal.market_id}:{signal.direction}",
+            strategy_id=signal.strategy_id,
+            regime=signal.regime,
+            take_profit_price=review.take_profit_price,
+            stop_loss_price=review.stop_loss_price,
+            time_stop_minutes=review.time_stop_minutes,
             direction=signal.direction,
             size=size,
             price_limit=price_limit,
             notional_usd=round(size * signal.price, 4),
+            realized_pnl_usd=0.0,
             status=str(order_result["status"]),
-            reason=str(payload.get("reason", "")),
+            reason=review.notes,
             news_validation=review.news_validation.model_dump(mode="json") if review.news_validation else None,
         )
         await self.context.repository.record_paper_order(
@@ -125,6 +103,116 @@ Signal:
             paper_order.model_dump(mode="json"),
         )
         await self.context.bus.publish_event("orders:paper", paper_order.model_dump(mode="json"))
+
+    async def process_exit_cycle(self) -> None:
+        if not hasattr(self.context.repository, "get_open_positions"):
+            return
+        positions = await self.context.repository.get_open_positions()
+        for position in positions:
+            decision = self._exit_decision(position)
+            if decision is None:
+                continue
+            exit_size = int(decision["size"])
+            if exit_size <= 0:
+                continue
+            order_result = await self.connector.place_order(
+                market_id=str(position["market_id"]),
+                token_id=str(position["token_id"]),
+                direction=str(position["direction"]),
+                size=exit_size,
+                price_limit=float(position["current_price"]),
+            )
+            realized = round(
+                (float(position["current_price"]) - float(position["average_price"])) * exit_size,
+                4,
+            )
+            payload = PaperOrderPayload(
+                order_id=str(uuid4()),
+                signal_id=f"exit-{position['market_id']}-{uuid4().hex[:8]}",
+                market_id=str(position["market_id"]),
+                token_id=str(position["token_id"]),
+                market_question=str(position.get("market_question") or ""),
+                asset_symbol=str(position.get("asset_symbol") or ""),
+                crypto_tier=str(position.get("crypto_tier") or ""),
+                action=str(decision["action"]),  # type: ignore[arg-type]
+                position_key=str(position.get("position_key") or f"{position['market_id']}:{position['direction']}"),
+                strategy_id=str(position.get("strategy_id") or ""),
+                regime=str(position.get("regime") or ""),
+                take_profit_price=position.get("take_profit_price"),
+                stop_loss_price=position.get("stop_loss_price"),
+                time_stop_minutes=position.get("time_stop_minutes"),
+                direction=str(position["direction"]),  # type: ignore[arg-type]
+                size=exit_size,
+                price_limit=float(position["current_price"]),
+                notional_usd=round(exit_size * float(position["current_price"]), 4),
+                realized_pnl_usd=realized,
+                exit_reason=str(decision["reason"]),
+                status=str(order_result["status"]),
+                reason=str(decision["reason"]),
+                news_validation=None,
+            )
+            await self.context.repository.record_paper_order(
+                payload.order_id,
+                payload.signal_id,
+                payload.market_id,
+                payload.status,
+                payload.model_dump(mode="json"),
+            )
+            await self.context.bus.publish_event("orders:paper", payload.model_dump(mode="json"))
+
+    def _exit_decision(self, position: dict[str, object]) -> dict[str, object] | None:
+        size = int(position.get("size") or 0)
+        if size <= 0:
+            return None
+        current_price = float(position.get("current_price") or 0.0)
+        average_price = float(position.get("average_price") or 0.0)
+        take_profit = float(position.get("take_profit_price") or 0.0)
+        stop_loss = float(position.get("stop_loss_price") or 0.0)
+        time_stop_minutes = int(position.get("time_stop_minutes") or 0)
+        scaled_out_count = int(position.get("scaled_out_count") or 0)
+        latest_spread_bps = float(position.get("latest_spread_bps") or 0.0)
+        holding_minutes = self._holding_minutes(position.get("opened_at"))
+
+        if take_profit and current_price >= take_profit:
+            return {"action": "close", "reason": "take_profit", "size": size}
+        if stop_loss and current_price <= stop_loss:
+            return {"action": "close", "reason": "stop_loss", "size": size}
+        if time_stop_minutes and holding_minutes >= time_stop_minutes:
+            return {"action": "close", "reason": "time_stop", "size": size}
+        if (
+            scaled_out_count == 0
+            and latest_spread_bps >= self.context.risk_config.max_spread_bps * 0.75
+            and current_price > average_price
+            and size >= 2
+        ):
+            return {
+                "action": "scale_out",
+                "reason": "liquidity_exit",
+                "size": max(int(size * self.context.risk_config.exit_scale_out_fraction), 1),
+            }
+        if (
+            scaled_out_count == 0
+            and time_stop_minutes
+            and holding_minutes >= int(time_stop_minutes * 0.6)
+            and current_price <= average_price
+            and size >= 2
+        ):
+            return {
+                "action": "scale_out",
+                "reason": "confidence_decay",
+                "size": max(int(size * self.context.risk_config.exit_scale_out_fraction), 1),
+            }
+        return None
+
+    @staticmethod
+    def _holding_minutes(value: object) -> int:
+        if value in (None, ""):
+            return 0
+        if isinstance(value, datetime):
+            created_at = value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+        else:
+            created_at = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
+        return max(int((datetime.now(UTC) - created_at).total_seconds() // 60), 0)
 
     async def close(self) -> None:
         await super().close()

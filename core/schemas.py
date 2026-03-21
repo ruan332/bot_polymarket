@@ -35,9 +35,17 @@ class SignalPayload(BaseModel):
     crypto_tier: Literal["btc", "major", "small_cap"]
     market_kind: str = "direct_coin"
     question_type: str = "direction"
+    strategy_id: str = "trend_follow_bayes"
+    strategy_version: str = "v1"
+    model_probability: float = 0.0
+    market_probability: float = 0.0
+    regime: Literal["trend", "mean_revert", "illiquid_choppy"] = "trend"
+    expected_slippage_bps: float = 0.0
+    expected_holding_minutes: int = 180
     thesis_tags: list[str] = Field(default_factory=list)
     thesis_hash: str = ""
     reasoning: str = ""
+    features_summary: dict[str, Any] = Field(default_factory=dict)
     liquidity_summary: dict[str, Any] = Field(default_factory=dict)
     news_validation: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -78,6 +86,11 @@ class ReviewPayload(BaseModel):
     crypto_tier: Literal["btc", "major", "small_cap"] | None = None
     corrected_price_limit: float | None = None
     kelly_size: int = 0
+    risk_fraction: float = 0.0
+    take_profit_price: float | None = None
+    stop_loss_price: float | None = None
+    time_stop_minutes: int | None = None
+    exit_reason_if_blocked: str = ""
     notes: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     original_signal: SignalPayload
@@ -94,10 +107,19 @@ class PaperOrderPayload(BaseModel):
     market_question: str = ""
     asset_symbol: str = ""
     crypto_tier: Literal["btc", "major", "small_cap"] | None = None
+    action: Literal["entry", "scale_in", "scale_out", "close"] = "entry"
+    position_key: str = ""
+    strategy_id: str = ""
+    regime: str = ""
+    take_profit_price: float | None = None
+    stop_loss_price: float | None = None
+    time_stop_minutes: int | None = None
     direction: Literal["YES", "NO"]
     size: int
     price_limit: float
     notional_usd: float
+    realized_pnl_usd: float = 0.0
+    exit_reason: str = ""
     status: Literal["simulated", "blocked"] = "simulated"
     reason: str = ""
     news_validation: dict[str, Any] | None = None

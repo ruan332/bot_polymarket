@@ -33,18 +33,10 @@ class MarketConnector:
         return self.session
 
     async def get_active_markets(self, limit: int = 20, crypto_only: bool = False) -> list[dict[str, Any]]:
-        session = await self._client()
-        upstream_limit = limit
         if crypto_only:
-            upstream_limit = min(max(limit * 8, 100), 250)
-        async with session.get(
-            f"{self.context.settings.polymarket_gamma_url}/markets",
-            params={"active": "true", "closed": "false", "limit": upstream_limit},
-        ) as response:
-            response.raise_for_status()
-            data = await response.json()
-
-        markets = data if isinstance(data, list) else data.get("data", [])
+            markets, fetch_stats = await self._fetch_active_crypto_markets(limit)
+        else:
+            markets, fetch_stats = await self._fetch_active_markets(limit)
         normalized: list[dict[str, Any]] = []
         rejection_breakdown: dict[str, int] = {}
         crypto_classified = 0
@@ -110,9 +102,8 @@ class MarketConnector:
             market["orderbook_summary_yes"] = await self.get_orderbook_summary(str(market["token_id_yes"]))
             market["orderbook_summary_no"] = await self.get_orderbook_summary(str(market["token_id_no"]))
         self.last_scan_stats = {
+            **fetch_stats,
             "requested_limit": limit,
-            "upstream_limit": upstream_limit,
-            "gamma_markets_fetched": len(markets),
             "crypto_classified": crypto_classified,
             "rejection_breakdown": rejection_breakdown,
             "selected_for_scan": len(selected),
@@ -128,6 +119,86 @@ class MarketConnector:
             ],
         }
         return selected
+
+    async def _fetch_active_markets(self, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        session = await self._client()
+        async with session.get(
+            f"{self.context.settings.polymarket_gamma_url}/markets",
+            params={"active": "true", "closed": "false", "limit": limit},
+        ) as response:
+            response.raise_for_status()
+            data = await response.json()
+        markets = data if isinstance(data, list) else data.get("data", [])
+        return markets, {
+            "discovery_source": "markets",
+            "upstream_limit": limit,
+            "gamma_events_fetched": 0,
+            "gamma_markets_fetched": len(markets),
+            "gamma_pages_fetched": 1,
+        }
+
+    async def _fetch_active_crypto_markets(self, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        session = await self._client()
+        page_size = 100
+        max_pages = 10
+        raw_markets_target = max(limit * 20, 1000)
+        markets: list[dict[str, Any]] = []
+        seen_market_ids: set[str] = set()
+        events_fetched = 0
+        pages_fetched = 0
+
+        try:
+            for page in range(max_pages):
+                offset = page * page_size
+                async with session.get(
+                    f"{self.context.settings.polymarket_gamma_url}/events",
+                    params={
+                        "active": "true",
+                        "closed": "false",
+                        "limit": page_size,
+                        "offset": offset,
+                        "order": "volume24hr",
+                        "ascending": "false",
+                    },
+                ) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                events = data if isinstance(data, list) else data.get("data", [])
+                if not events:
+                    break
+                pages_fetched += 1
+                events_fetched += len(events)
+                for event in events:
+                    event_markets = event.get("markets") or []
+                    if not isinstance(event_markets, list):
+                        continue
+                    for market in event_markets:
+                        if not isinstance(market, dict):
+                            continue
+                        market_id = str(
+                            market.get("id")
+                            or market.get("conditionId")
+                            or market.get("market_id")
+                            or ""
+                        )
+                        if not market_id or market_id in seen_market_ids:
+                            continue
+                        seen_market_ids.add(market_id)
+                        markets.append(market)
+                if len(markets) >= raw_markets_target:
+                    break
+        except Exception:
+            fallback_markets, fallback_stats = await self._fetch_active_markets(min(max(limit * 8, 100), 250))
+            fallback_stats["discovery_source"] = "markets_fallback"
+            return fallback_markets, fallback_stats
+
+        return markets, {
+            "discovery_source": "events",
+            "upstream_limit": page_size,
+            "gamma_events_fetched": events_fetched,
+            "gamma_markets_fetched": len(markets),
+            "gamma_pages_fetched": pages_fetched,
+        }
 
     async def get_orderbook(self, token_id: str) -> dict[str, Any]:
         session = await self._client()

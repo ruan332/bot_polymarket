@@ -161,6 +161,10 @@ class AppSettings(BaseSettings):
     live_trading: bool = False
     smoke_test_mode: bool = False
     news_validation_enabled: bool = True
+    review_llm_enabled: bool = False
+    execution_llm_enabled: bool = False
+    review_llm_fail_open: bool = False
+    execution_llm_fail_open: bool = True
     max_daily_spend_usd: float = 5.0
     max_single_position_usd: float = 100.0
     paper_bankroll_usd: float = 1000.0

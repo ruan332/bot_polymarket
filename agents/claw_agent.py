@@ -5,10 +5,19 @@ from uuid import uuid4
 
 from agents.base import BaseAgent
 from core.app_context import AppContext
-from core.exceptions import RiskBlockedError
+from core.exceptions import InvalidModelResponseError, RiskBlockedError
 from core.market_connector import MarketConnector
 from core.risk_engine import RiskEngine
 from core.schemas import PaperOrderPayload, ReviewPayload
+from core.utils import parse_json_object, sanitize_text
+
+
+SYSTEM_PROMPT = """
+Voce e um executor em paper trading conservador.
+Responda APENAS com JSON valido:
+{"execute": true, "size": 100, "price_limit": 0.42, "reason": "..."}
+Nunca aumente size ou price_limit acima dos limites ja calculados.
+"""
 
 
 class ClawAgent(BaseAgent):
@@ -30,13 +39,20 @@ class ClawAgent(BaseAgent):
         )
         executed_count = 0
         blocked_count = 0
+        llm_used_count = 0
+        fallback_count = 0
         reviewed_assets: list[str] = []
         for event_id, payload in events:
             review = ReviewPayload.model_validate(payload)
             try:
                 reviewed_assets.append(review.asset_symbol)
                 if review.approved:
-                    if await self.execute(review):
+                    executed, execution_mode = await self.execute(review)
+                    if execution_mode == "llm":
+                        llm_used_count += 1
+                    elif execution_mode == "llm_fallback":
+                        fallback_count += 1
+                    if executed:
                         executed_count += 1
                     else:
                         blocked_count += 1
@@ -51,12 +67,14 @@ class ClawAgent(BaseAgent):
                     "inbox_count": len(events),
                     "executed_count": executed_count,
                     "blocked_count": blocked_count,
+                    "llm_used_count": llm_used_count,
+                    "fallback_count": fallback_count,
                     "reviewed_assets": reviewed_assets[:6],
                     **exit_stats,
                 },
             )
 
-    async def execute(self, review: ReviewPayload) -> bool:
+    async def execute(self, review: ReviewPayload) -> tuple[bool, str]:
         try:
             guard = await self.risk.build_execution_guard(review)
         except RiskBlockedError as exc:
@@ -69,7 +87,7 @@ class ClawAgent(BaseAgent):
                     "crypto_tier": review.crypto_tier,
                 },
             )
-            return False
+            return False, "deterministic"
 
         signal = review.original_signal
         positions = await self.context.repository.get_open_positions()
@@ -84,6 +102,47 @@ class ClawAgent(BaseAgent):
         action = "scale_in" if existing else "entry"
         size = guard.size
         price_limit = guard.price_limit
+        reason = review.notes
+        execution_mode = "deterministic"
+
+        if self.context.settings.execution_llm_enabled:
+            try:
+                payload = await self._execute_with_llm(
+                    review=review,
+                    action=action,
+                    guard_size=guard.size,
+                    guard_price_limit=guard.price_limit,
+                )
+                if not bool(payload.get("execute", True)):
+                    await self.risk.record_block(
+                        self.name,
+                        str(payload.get("reason", "executor declined")),
+                        {
+                            "signal_id": review.signal_id,
+                            "asset_symbol": review.asset_symbol,
+                            "crypto_tier": review.crypto_tier,
+                        },
+                    )
+                    return False, "llm"
+                size = min(max(int(payload.get("size", guard.size)), 1), guard.size)
+                price_limit = min(float(payload.get("price_limit", guard.price_limit)), guard.price_limit)
+                reason = sanitize_text(str(payload.get("reason", "") or review.notes), 280)
+                execution_mode = "llm"
+            except Exception as exc:
+                if not self.context.settings.execution_llm_fail_open:
+                    await self.risk.record_block(
+                        self.name,
+                        f"execution LLM fallback: {exc}",
+                        {
+                            "signal_id": review.signal_id,
+                            "asset_symbol": review.asset_symbol,
+                            "crypto_tier": review.crypto_tier,
+                        },
+                    )
+                    return False, "llm_fallback"
+                reason = sanitize_text(f"{review.notes} | execution LLM fallback: {exc}", 280)
+                execution_mode = "llm_fallback"
+
         order_result = await self.connector.place_order(
             market_id=signal.market_id,
             token_id=signal.token_id,
@@ -111,8 +170,9 @@ class ClawAgent(BaseAgent):
             price_limit=price_limit,
             notional_usd=round(size * signal.price, 4),
             realized_pnl_usd=0.0,
+            execution_mode=execution_mode,  # type: ignore[arg-type]
             status=str(order_result["status"]),
-            reason=review.notes,
+            reason=reason,
             news_validation=review.news_validation.model_dump(mode="json") if review.news_validation else None,
         )
         await self.context.repository.record_paper_order(
@@ -123,7 +183,7 @@ class ClawAgent(BaseAgent):
             paper_order.model_dump(mode="json"),
         )
         await self.context.bus.publish_event("orders:paper", paper_order.model_dump(mode="json"))
-        return True
+        return True, execution_mode
 
     async def process_exit_cycle(self) -> dict[str, object]:
         if not hasattr(self.context.repository, "get_open_positions"):
@@ -170,6 +230,7 @@ class ClawAgent(BaseAgent):
                 notional_usd=round(exit_size * float(position["current_price"]), 4),
                 realized_pnl_usd=realized,
                 exit_reason=str(decision["reason"]),
+                execution_mode="deterministic",
                 status=str(order_result["status"]),
                 reason=str(decision["reason"]),
                 news_validation=None,
@@ -243,6 +304,43 @@ class ClawAgent(BaseAgent):
         else:
             created_at = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
         return max(int((datetime.now(UTC) - created_at).total_seconds() // 60), 0)
+
+    async def _execute_with_llm(
+        self,
+        *,
+        review: ReviewPayload,
+        action: str,
+        guard_size: int,
+        guard_price_limit: float,
+    ) -> dict:
+        signal = review.original_signal
+        prompt = f"""
+Review:
+- signal_id: {signal.signal_id}
+- market_id: {signal.market_id}
+- asset_symbol: {signal.asset_symbol}
+- crypto_tier: {signal.crypto_tier}
+- direction: {signal.direction}
+- action: {action}
+- edge: {signal.edge:.4f}
+- confidence: {signal.confidence:.4f}
+- price: {signal.price:.4f}
+- liquidity_summary: {signal.liquidity_summary}
+- features_summary: {signal.features_summary}
+- review_mode: {review.review_mode}
+- review_notes: {sanitize_text(review.notes, 240)}
+- news_validation: {review.news_validation.model_dump(mode='json') if review.news_validation else {}}
+
+Guardrails:
+- guarded_size: {guard_size}
+- guarded_price_limit: {guard_price_limit:.4f}
+"""
+        response = await self.provider.call(prompt=prompt, system=SYSTEM_PROMPT)
+        await self.cost_tracker.record(response, prompt_type="execute_order")
+        try:
+            return parse_json_object(response.content)
+        except Exception as exc:
+            raise InvalidModelResponseError(f"claw returned invalid JSON: {exc}") from exc
 
     async def close(self) -> None:
         await super().close()

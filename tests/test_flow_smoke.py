@@ -404,6 +404,10 @@ class FakeContext:
             live_trading=False,
             smoke_test_mode=True,
             news_validation_enabled=True,
+            review_llm_enabled=False,
+            execution_llm_enabled=False,
+            review_llm_fail_open=False,
+            execution_llm_fail_open=True,
             polymarket_gamma_url="https://gamma-api.polymarket.com",
             polymarket_clob_url="https://clob.polymarket.com",
             polymarket_market_ws="wss://ws-subscriptions-clob.polymarket.com/ws/market",
@@ -665,6 +669,150 @@ async def test_claw_exit_cycle_records_uuid_signal_id(monkeypatch) -> None:
     assert context.repository.orders[0]["action"] == "close"
     assert context.repository.orders[0]["exit_reason"] == "take_profit"
     UUID(context.repository.orders[0]["signal_id"])
+
+
+@pytest.mark.asyncio
+async def test_codex_and_claw_use_llm_when_flags_enabled(monkeypatch) -> None:
+    context = FakeContext()
+    context.settings.review_llm_enabled = True
+    context.settings.execution_llm_enabled = True
+    await context.bus.publish_event(
+        "signals:validated",
+        {
+            "signal_id": "sig-1",
+            "market_id": "market-1",
+            "token_id": "token-yes-1",
+            "market_question": "Will BTC be above 100k?",
+            "direction": "YES",
+            "edge": 0.22,
+            "confidence": 0.9,
+            "price": 0.4,
+            "price_yes": 0.4,
+            "price_no": 0.6,
+            "volume_24h": 50000.0,
+            "asset_symbol": "BTC",
+            "asset_name": "Bitcoin",
+            "crypto_tier": "btc",
+            "market_kind": "direct_coin",
+            "question_type": "direction",
+            "strategy_id": "mean_revert_bayes",
+            "strategy_version": "v1",
+            "model_probability": 0.66,
+            "market_probability": 0.4,
+            "regime": "mean_revert",
+            "expected_slippage_bps": 50.0,
+            "expected_holding_minutes": 90,
+            "thesis_tags": ["btc"],
+            "thesis_hash": "btc-1",
+            "reasoning": "test",
+            "features_summary": {"momentum_short": 0.01},
+            "liquidity_summary": {"spread_bps": 40.0, "ask_depth": 500.0},
+            "news_validation": None,
+            "created_at": "2026-03-18T12:00:00Z",
+            "metadata": {},
+        },
+    )
+
+    codex = CodexAgent(context)
+    claw = ClawAgent(context)
+
+    async def fake_review(*args, **kwargs):
+        return ModelResponse(
+            content='{"approved": true, "notes": "llm review", "corrected_price_limit": 0.402}',
+            input_tokens=8,
+            output_tokens=10,
+            model="test-review",
+            cost_usd=0.01,
+            provider="test",
+        )
+
+    async def fake_execute(*args, **kwargs):
+        return ModelResponse(
+            content='{"execute": true, "size": 2, "price_limit": 0.401, "reason": "llm exec"}',
+            input_tokens=7,
+            output_tokens=9,
+            model="test-exec",
+            cost_usd=0.01,
+            provider="test",
+        )
+
+    async def fake_place_order(**kwargs):
+        return {"status": "simulated", **kwargs}
+
+    monkeypatch.setattr(codex.provider, "call", fake_review)
+    monkeypatch.setattr(claw.provider, "call", fake_execute)
+    monkeypatch.setattr(claw.connector, "place_order", fake_place_order)
+
+    await codex.tick()
+    await claw.tick()
+
+    assert context.repository.decisions[0]["review_mode"] == "llm"
+    assert context.repository.decisions[0]["llm_notes"] == "llm review"
+    assert context.repository.orders[0]["execution_mode"] == "llm"
+    assert context.repository.orders[0]["reason"] == "llm exec"
+    assert len(context.repository.llm_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_codex_review_fallback_blocks_when_fail_open_disabled(monkeypatch) -> None:
+    context = FakeContext()
+    context.settings.review_llm_enabled = True
+    context.settings.review_llm_fail_open = False
+    await context.bus.publish_event(
+        "signals:validated",
+        {
+            "signal_id": "sig-1",
+            "market_id": "market-1",
+            "token_id": "token-yes-1",
+            "market_question": "Will BTC be above 100k?",
+            "direction": "YES",
+            "edge": 0.22,
+            "confidence": 0.9,
+            "price": 0.4,
+            "price_yes": 0.4,
+            "price_no": 0.6,
+            "volume_24h": 50000.0,
+            "asset_symbol": "BTC",
+            "asset_name": "Bitcoin",
+            "crypto_tier": "btc",
+            "market_kind": "direct_coin",
+            "question_type": "direction",
+            "strategy_id": "mean_revert_bayes",
+            "strategy_version": "v1",
+            "model_probability": 0.66,
+            "market_probability": 0.4,
+            "regime": "mean_revert",
+            "expected_slippage_bps": 50.0,
+            "expected_holding_minutes": 90,
+            "thesis_tags": ["btc"],
+            "thesis_hash": "btc-1",
+            "reasoning": "test",
+            "features_summary": {"momentum_short": 0.01},
+            "liquidity_summary": {"spread_bps": 40.0, "ask_depth": 500.0},
+            "news_validation": None,
+            "created_at": "2026-03-18T12:00:00Z",
+            "metadata": {},
+        },
+    )
+
+    codex = CodexAgent(context)
+
+    async def fake_review(*args, **kwargs):
+        return ModelResponse(
+            content="not-json",
+            input_tokens=8,
+            output_tokens=10,
+            model="test-review",
+            cost_usd=0.01,
+            provider="test",
+        )
+
+    monkeypatch.setattr(codex.provider, "call", fake_review)
+
+    await codex.tick()
+
+    assert len(context.repository.decisions) == 0
+    assert context.repository.risk_events[0]["reason"].startswith("review LLM fallback:")
 
 
 def test_api_smoke(monkeypatch) -> None:

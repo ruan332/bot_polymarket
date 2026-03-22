@@ -90,8 +90,10 @@ class ReviewPayload(BaseModel):
     take_profit_price: float | None = None
     stop_loss_price: float | None = None
     time_stop_minutes: int | None = None
+    review_mode: Literal["deterministic", "llm", "llm_fallback"] = "deterministic"
     exit_reason_if_blocked: str = ""
     notes: str = ""
+    llm_notes: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     original_signal: SignalPayload
     news_validation: NewsValidationPayload | None = None
@@ -120,6 +122,7 @@ class PaperOrderPayload(BaseModel):
     notional_usd: float
     realized_pnl_usd: float = 0.0
     exit_reason: str = ""
+    execution_mode: Literal["deterministic", "llm", "llm_fallback"] = "deterministic"
     status: Literal["simulated", "blocked"] = "simulated"
     reason: str = ""
     news_validation: dict[str, Any] | None = None

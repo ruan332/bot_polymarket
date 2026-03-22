@@ -55,6 +55,10 @@ class RiskEngine:
         min_edge = max(self.config.min_edge, tier.min_edge)
         min_confidence = max(self.config.min_confidence, tier.min_confidence)
         min_volume = max(self.config.min_market_volume_24h, tier.min_volume_24h)
+        if signal.market_kind == "indirect_crypto":
+            min_edge += self.crypto.indirect_min_edge_buffer
+            min_confidence = clamp(min_confidence + self.crypto.indirect_min_confidence_buffer, 0.0, 0.99)
+            min_volume *= self.crypto.indirect_min_volume_multiplier
 
         if signal.edge < min_edge:
             raise RiskBlockedError(f"edge below minimum ({signal.edge:.3f} < {min_edge:.3f})")
@@ -129,6 +133,8 @@ class RiskEngine:
             self.config.max_single_position_usd,
             tier.max_position_usd,
         )
+        if signal.market_kind == "indirect_crypto":
+            value_to_bet *= self.crypto.indirect_max_position_scale
         size = review.kelly_size or max(0, int(value_to_bet / max(signal.price, 1e-6)))
         if size <= 0:
             raise RiskBlockedError("kelly sizing returned zero")
@@ -167,7 +173,10 @@ class RiskEngine:
         asset_exposure = sum(
             float(item.get("cost_basis_usd") or 0.0) for item in positions if str(item.get("asset_symbol")) == signal.asset_symbol
         )
-        if asset_exposure + notional > total_equity * self.config.max_asset_exposure_fraction:
+        max_asset_fraction = self.config.max_asset_exposure_fraction
+        if signal.asset_symbol == "CRYPTO":
+            max_asset_fraction = min(max_asset_fraction, self.config.synthetic_asset_exposure_fraction)
+        if asset_exposure + notional > total_equity * max_asset_fraction:
             raise RiskBlockedError("asset exposure exceeds max_asset_exposure_fraction")
         strategy_exposure = sum(
             float(item.get("cost_basis_usd") or 0.0) for item in positions if str(item.get("strategy_id")) == signal.strategy_id

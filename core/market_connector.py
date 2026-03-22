@@ -93,8 +93,14 @@ class MarketConnector:
                 }
             )
         if crypto_only:
-            priority = {tier: index for index, tier in enumerate(self.context.crypto_config.scan_priority)}
-            normalized.sort(key=lambda item: (priority.get(item.get("crypto_tier", ""), 99), -(item.get("volume_24h", 0.0))))
+            tier_priority = {tier: index for index, tier in enumerate(self.context.crypto_config.scan_priority)}
+            normalized.sort(
+                key=lambda item: (
+                    tier_priority.get(item.get("crypto_tier", ""), 99),
+                    self.context.crypto_config.market_kind_rank(str(item.get("market_kind", ""))),
+                    -(item.get("volume_24h", 0.0)),
+                )
+            )
         selected = normalized[:limit]
         for market in selected:
             if not market.get("asset_symbol"):
@@ -112,6 +118,7 @@ class MarketConnector:
                     "market_id": str(item.get("id") or ""),
                     "asset_symbol": str(item.get("asset_symbol") or ""),
                     "crypto_tier": str(item.get("crypto_tier") or ""),
+                    "market_kind": str(item.get("market_kind") or ""),
                     "volume_24h": float(item.get("volume_24h") or 0.0),
                     "question": str(item.get("question") or ""),
                 }

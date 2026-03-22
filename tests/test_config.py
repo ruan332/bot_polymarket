@@ -23,7 +23,8 @@ def test_load_risk_config_reads_thresholds() -> None:
 def test_load_crypto_config_reads_tiers() -> None:
     crypto = load_crypto_config()
     assert crypto.enabled is True
-    assert crypto.direct_coin_only is True
+    assert crypto.direct_coin_only is False
+    assert crypto.market_kind_priority == ["direct_coin", "indirect_crypto"]
     assert "BTC" not in crypto.major_assets
     assert crypto.btc.min_edge <= crypto.small_cap.min_edge
 
@@ -38,15 +39,31 @@ def test_classify_crypto_market_accepts_direct_coin_markets() -> None:
     assert candidate.thesis_hash
 
 
-def test_classify_crypto_market_rejects_indirect_crypto_markets() -> None:
+def test_classify_crypto_market_accepts_indirect_crypto_markets() -> None:
     crypto = load_crypto_config()
     candidate = classify_crypto_market("Will a BTC ETF be approved?", "regulation market", crypto)
-    assert candidate is None
+    assert candidate is not None
+    assert candidate.asset_symbol == "BTC"
+    assert candidate.market_kind == "indirect_crypto"
+
+
+def test_classify_crypto_market_uses_synthetic_asset_for_broad_crypto_markets() -> None:
+    crypto = load_crypto_config()
+    candidate = classify_crypto_market("Will crypto regulation tighten this quarter?", "digital assets policy market", crypto)
+    assert candidate is not None
+    assert candidate.asset_symbol == "CRYPTO"
+    assert candidate.market_kind == "indirect_crypto"
 
 
 def test_classify_crypto_market_rejects_thematic_long_horizon_markets() -> None:
     crypto = load_crypto_config()
     candidate = classify_crypto_market("Will bitcoin hit $1m before GTA VI?", "long horizon theme market", crypto)
+    assert candidate is None
+
+
+def test_classify_crypto_market_rejects_weak_incidental_crypto_mentions() -> None:
+    crypto = load_crypto_config()
+    candidate = classify_crypto_market("Will Tesla stock rise if crypto stays volatile?", "equity market", crypto)
     assert candidate is None
 
 

@@ -153,7 +153,7 @@ async def test_get_active_markets_parses_json_encoded_arrays(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_get_active_markets_filters_indirect_crypto_markets(monkeypatch) -> None:
+async def test_get_active_markets_includes_indirect_crypto_markets(monkeypatch) -> None:
     payload = [
         {
             "id": "event-1",
@@ -212,9 +212,12 @@ async def test_get_active_markets_filters_indirect_crypto_markets(monkeypatch) -
 
     markets = await connector.get_active_markets(limit=2, crypto_only=True)
 
-    assert len(markets) == 1
+    assert len(markets) == 2
     assert markets[0]["id"] == "market-1"
-    assert markets[0]["asset_symbol"] == "BTC"
+    assert markets[0]["market_kind"] == "direct_coin"
+    assert markets[1]["id"] == "market-2"
+    assert markets[1]["asset_symbol"] == "BTC"
+    assert markets[1]["market_kind"] == "indirect_crypto"
     assert connector.last_scan_stats["discovery_source"] == "events"
 
 
@@ -296,6 +299,71 @@ async def test_get_active_markets_expands_upstream_fetch_for_crypto_only(monkeyp
     assert captured["params"]["limit"] == 100
     assert captured["params"]["order"] == "volume24hr"
     assert [item["id"] for item in markets] == ["market-btc", "market-eth"]
+
+
+@pytest.mark.asyncio
+async def test_get_active_markets_assigns_synthetic_crypto_asset_and_keeps_directs_first(monkeypatch) -> None:
+    payload = [
+        {
+            "id": "event-1",
+            "markets": [
+                {
+                    "id": "market-indirect",
+                    "question": "Will crypto regulation tighten this quarter?",
+                    "description": "digital assets regulation market",
+                    "outcomePrices": "[\"0.20\", \"0.80\"]",
+                    "clobTokenIds": "[\"token-yes-indirect\", \"token-no-indirect\"]",
+                    "volume24hr": "50000.00",
+                },
+                {
+                    "id": "market-direct",
+                    "question": "Will ETH be above 5k this month?",
+                    "description": "test",
+                    "outcomePrices": "[\"0.31\", \"0.69\"]",
+                    "clobTokenIds": "[\"token-yes-eth\", \"token-no-eth\"]",
+                    "volume24hr": "50000.00",
+                },
+            ],
+        }
+    ]
+
+    class FakeResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return payload
+
+    class FakeSession:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+        @property
+        def closed(self):
+            return False
+
+    connector = MarketConnector(FakeContext(live_trading=False))
+
+    async def fake_client():
+        return FakeSession()
+
+    async def fake_orderbook_summary(token_id: str):
+        return {"best_bid": 0.4, "best_ask": 0.41, "spread_bps": 25.0, "bid_depth": 1000.0, "ask_depth": 1000.0}
+
+    monkeypatch.setattr(connector, "_client", fake_client)
+    monkeypatch.setattr(connector, "get_orderbook_summary", fake_orderbook_summary)
+
+    markets = await connector.get_active_markets(limit=2, crypto_only=True)
+
+    assert [item["id"] for item in markets] == ["market-direct", "market-indirect"]
+    assert markets[1]["asset_symbol"] == "CRYPTO"
+    assert markets[1]["market_kind"] == "indirect_crypto"
 
 
 @pytest.mark.asyncio

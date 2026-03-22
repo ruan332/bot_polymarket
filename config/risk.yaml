@@ -21,3 +21,4 @@ risk:
   loss_streak_size_discount: 0.15
   min_risk_fraction_after_losses: 0.35
   exit_scale_out_fraction: 0.50
+  synthetic_asset_exposure_fraction: 0.10

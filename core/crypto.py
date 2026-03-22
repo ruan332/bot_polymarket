@@ -67,6 +67,36 @@ INDIRECT_KEYWORDS = {
     "treasury",
     "reserve",
 }
+CRYPTO_BROAD_KEYWORDS = {
+    "crypto",
+    "cryptocurrency",
+    "cryptocurrencies",
+    "digital asset",
+    "digital assets",
+    "blockchain",
+    "defi",
+    "stablecoin",
+    "stablecoins",
+    "altcoin",
+    "altcoins",
+    "memecoin",
+    "memecoins",
+    "token",
+    "tokens",
+    "web3",
+}
+WEAK_CONTEXT_KEYWORDS = {
+    "stock",
+    "stocks",
+    "tesla",
+    "trump",
+    "president",
+    "fed",
+    "cpi",
+    "movie",
+    "game",
+    "sports",
+}
 THEMATIC_EVENT_KEYWORDS = {
     "gta",
     "grand theft auto",
@@ -78,6 +108,8 @@ THEMATIC_EVENT_KEYWORDS = {
     "inauguration",
     "wwdc",
 }
+SYNTHETIC_ASSET_SYMBOL = "CRYPTO"
+SYNTHETIC_ASSET_NAME = "Crypto"
 DIRECT_MARKET_KEYWORDS = {
     "above",
     "below",
@@ -118,7 +150,7 @@ class CryptoClassificationResult:
     rejection_reason: str | None = None
 
 
-def detect_asset_symbol(question: str, description: str = "") -> str | None:
+def detect_asset_symbols(question: str, description: str = "") -> list[str]:
     text = f"{question} {description}".lower()
     matches: list[str] = []
     for symbol, aliases in ASSET_ALIASES.items():
@@ -126,10 +158,14 @@ def detect_asset_symbol(question: str, description: str = "") -> str | None:
             if re.search(rf"\b{re.escape(alias.lower())}\b", text):
                 matches.append(symbol)
                 break
-    unique = sorted(set(matches))
-    if len(unique) != 1:
-        return None
-    return unique[0]
+    return sorted(set(matches))
+
+
+def detect_asset_symbol(question: str, description: str = "") -> str | None:
+    unique = detect_asset_symbols(question, description)
+    if len(unique) == 1:
+        return unique[0]
+    return None
 
 
 def classify_crypto_market(question: str, description: str, config: CryptoSettings) -> CryptoMarketCandidate | None:
@@ -141,30 +177,51 @@ def classify_crypto_market_with_reason(
     description: str,
     config: CryptoSettings,
 ) -> CryptoClassificationResult:
-    symbol = detect_asset_symbol(question, description)
-    if symbol is None:
-        return CryptoClassificationResult(candidate=None, rejection_reason="asset_not_detected")
-
+    symbols = detect_asset_symbols(question, description)
     text = f"{question} {description}".lower()
-    if config.direct_coin_only and any(keyword in text for keyword in INDIRECT_KEYWORDS):
-        return CryptoClassificationResult(candidate=None, rejection_reason="indirect_keyword")
-    if not any(keyword in text for keyword in DIRECT_MARKET_KEYWORDS):
-        return CryptoClassificationResult(candidate=None, rejection_reason="missing_direct_trigger")
     if any(keyword in text for keyword in THEMATIC_EVENT_KEYWORDS):
         return CryptoClassificationResult(candidate=None, rejection_reason="thematic_horizon")
     if "before" in text and not CALENDAR_MARKER_PATTERN.search(text):
         return CryptoClassificationResult(candidate=None, rejection_reason="thematic_horizon")
+    has_direct_trigger = any(keyword in text for keyword in DIRECT_MARKET_KEYWORDS)
+    has_indirect_trigger = any(keyword in text for keyword in INDIRECT_KEYWORDS)
+    has_broad_crypto_keyword = any(keyword in text for keyword in CRYPTO_BROAD_KEYWORDS)
+    has_crypto_anchor = bool(symbols) or has_broad_crypto_keyword
+    if not has_crypto_anchor:
+        return CryptoClassificationResult(candidate=None, rejection_reason="missing_crypto_anchor")
+    if not has_direct_trigger and not has_indirect_trigger and not has_broad_crypto_keyword:
+        return CryptoClassificationResult(candidate=None, rejection_reason="weak_crypto_signal")
+
+    symbol: str
+    asset_name: str
+    market_kind: str
+    if len(symbols) == 1 and has_direct_trigger and not has_indirect_trigger:
+        symbol = symbols[0]
+        asset_name = ASSET_NAMES.get(symbol, symbol)
+        market_kind = "direct_coin"
+    else:
+        if not has_indirect_trigger and len(symbols) <= 1 and any(keyword in text for keyword in WEAK_CONTEXT_KEYWORDS):
+            return CryptoClassificationResult(candidate=None, rejection_reason="weak_crypto_signal")
+        market_kind = "indirect_crypto"
+        if config.direct_coin_only:
+            return CryptoClassificationResult(candidate=None, rejection_reason="indirect_market_disabled")
+        if len(symbols) == 1:
+            symbol = symbols[0]
+            asset_name = ASSET_NAMES.get(symbol, symbol)
+        else:
+            symbol = SYNTHETIC_ASSET_SYMBOL
+            asset_name = SYNTHETIC_ASSET_NAME
 
     tier = "btc" if symbol == "BTC" else ("major" if symbol in {item.upper() for item in config.major_assets} else "small_cap")
     question_type = classify_question_type(question, description)
-    thesis_tags = [symbol.lower(), tier, question_type]
-    thesis_hash = stable_hash(f"{symbol}|{sanitize_text(question, 160)}|{question_type}", length=16)
+    thesis_tags = [symbol.lower(), tier, question_type, market_kind]
+    thesis_hash = stable_hash(f"{symbol}|{market_kind}|{sanitize_text(question, 160)}|{question_type}", length=16)
     return CryptoClassificationResult(
         candidate=CryptoMarketCandidate(
             asset_symbol=symbol,
-            asset_name=ASSET_NAMES.get(symbol, symbol),
+            asset_name=asset_name,
             crypto_tier=tier,
-            market_kind="direct_coin",
+            market_kind=market_kind,
             question_type=question_type,
             thesis_tags=thesis_tags,
             thesis_hash=thesis_hash,

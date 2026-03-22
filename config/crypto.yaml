@@ -1,6 +1,6 @@
 crypto:
   enabled: true
-  direct_coin_only: true
+  direct_coin_only: false
   major_assets:
     - ETH
     - SOL
@@ -13,6 +13,13 @@ crypto:
     - btc
     - major
     - small_cap
+  market_kind_priority:
+    - direct_coin
+    - indirect_crypto
+  indirect_min_edge_buffer: 0.06
+  indirect_min_confidence_buffer: 0.05
+  indirect_min_volume_multiplier: 1.5
+  indirect_max_position_scale: 0.65
   btc:
     min_edge: 0.12
     min_confidence: 0.60

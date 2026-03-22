@@ -65,13 +65,23 @@ def make_context(*, positions: list[dict[str, object]] | None = None):
             loss_streak_size_discount=0.15,
             min_risk_fraction_after_losses=0.35,
             exit_scale_out_fraction=0.5,
+            synthetic_asset_exposure_fraction=0.10,
         ),
         crypto_config=crypto_config,
         repository=Repository(),
     )
 
 
-def make_signal(*, symbol: str, tier: str, edge: float, confidence: float, price: float, volume_24h: float) -> SignalPayload:
+def make_signal(
+    *,
+    symbol: str,
+    tier: str,
+    edge: float,
+    confidence: float,
+    price: float,
+    volume_24h: float,
+    market_kind: str = "direct_coin",
+) -> SignalPayload:
     return SignalPayload(
         signal_id=f"signal-{symbol.lower()}",
         market_id=f"market-{symbol.lower()}",
@@ -87,7 +97,7 @@ def make_signal(*, symbol: str, tier: str, edge: float, confidence: float, price
         asset_symbol=symbol,
         asset_name=symbol,
         crypto_tier=tier,  # type: ignore[arg-type]
-        market_kind="direct_coin",
+        market_kind=market_kind,
         question_type="direction",
         strategy_id="trend_follow_bayes",
         strategy_version="v1",
@@ -157,6 +167,44 @@ async def test_build_execution_guard_blocks_small_caps_more_aggressively() -> No
 
 
 @pytest.mark.asyncio
+async def test_validate_signal_requires_stronger_thresholds_for_indirect_crypto() -> None:
+    risk = RiskEngine(make_context())
+    indirect_signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.15,
+        confidence=0.63,
+        price=0.40,
+        volume_24h=6000.0,
+        market_kind="indirect_crypto",
+    )
+
+    with pytest.raises(RiskBlockedError, match="edge below minimum"):
+        await risk.validate_signal(indirect_signal)
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_scales_down_indirect_crypto_positions() -> None:
+    risk = RiskEngine(make_context())
+    direct_signal = make_signal(symbol="BTC", tier="btc", edge=0.40, confidence=0.80, price=0.40, volume_24h=100000.0)
+    indirect_signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.40,
+        confidence=0.80,
+        price=0.40,
+        volume_24h=100000.0,
+        market_kind="indirect_crypto",
+    )
+
+    direct_guard = await risk.build_execution_guard(make_review(direct_signal))
+    indirect_guard = await risk.build_execution_guard(make_review(indirect_signal))
+
+    assert indirect_guard.notional_usd < direct_guard.notional_usd
+    assert indirect_guard.size < direct_guard.size
+
+
+@pytest.mark.asyncio
 async def test_build_execution_guard_allows_missing_news_validation() -> None:
     risk = RiskEngine(make_context())
     signal = make_signal(symbol="BTC", tier="btc", edge=0.40, confidence=0.80, price=0.40, volume_24h=100000.0)
@@ -203,4 +251,33 @@ async def test_build_execution_guard_blocks_opposite_position_same_market() -> N
     )
 
     with pytest.raises(RiskBlockedError, match="opposite position already open for this market"):
+        await risk.build_execution_guard(make_review(incoming_signal))
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_uses_tighter_exposure_cap_for_synthetic_crypto_asset() -> None:
+    risk = RiskEngine(
+        make_context(
+            positions=[
+                {
+                    "market_id": "market-crypto-existing",
+                    "direction": "YES",
+                    "asset_symbol": "CRYPTO",
+                    "strategy_id": "trend_follow_bayes",
+                    "cost_basis_usd": 90.0,
+                }
+            ]
+        )
+    )
+    incoming_signal = make_signal(
+        symbol="CRYPTO",
+        tier="small_cap",
+        edge=0.40,
+        confidence=0.85,
+        price=0.40,
+        volume_24h=100000.0,
+        market_kind="indirect_crypto",
+    )
+
+    with pytest.raises(RiskBlockedError, match="asset exposure exceeds max_asset_exposure_fraction"):
         await risk.build_execution_guard(make_review(incoming_signal))

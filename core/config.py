@@ -51,11 +51,18 @@ class CryptoTierSettings(BaseModel):
 
 class CryptoSettings(BaseModel):
     enabled: bool = True
-    direct_coin_only: bool = True
+    direct_coin_only: bool = False
     major_assets: list[str] = Field(default_factory=lambda: ["ETH", "SOL", "XRP", "DOGE"])
     scan_priority: list[Literal["btc", "major", "small_cap"]] = Field(
         default_factory=lambda: ["btc", "major", "small_cap"]
     )
+    market_kind_priority: list[Literal["direct_coin", "indirect_crypto"]] = Field(
+        default_factory=lambda: ["direct_coin", "indirect_crypto"]
+    )
+    indirect_min_edge_buffer: float = 0.06
+    indirect_min_confidence_buffer: float = 0.05
+    indirect_min_volume_multiplier: float = 1.5
+    indirect_max_position_scale: float = 0.65
     btc: CryptoTierSettings = Field(
         default_factory=lambda: CryptoTierSettings(
             min_edge=0.20,
@@ -100,6 +107,12 @@ class CryptoSettings(BaseModel):
             return self.major
         return self.small_cap
 
+    def market_kind_rank(self, market_kind: str) -> int:
+        try:
+            return self.market_kind_priority.index(market_kind)  # type: ignore[arg-type]
+        except ValueError:
+            return len(self.market_kind_priority)
+
 
 class RiskSettings(BaseModel):
     min_edge: float = 0.19
@@ -124,6 +137,7 @@ class RiskSettings(BaseModel):
     loss_streak_size_discount: float = 0.15
     min_risk_fraction_after_losses: float = 0.35
     exit_scale_out_fraction: float = 0.50
+    synthetic_asset_exposure_fraction: float = 0.10
 
     @field_validator(
         "min_edge",
@@ -136,6 +150,7 @@ class RiskSettings(BaseModel):
         "loss_streak_size_discount",
         "min_risk_fraction_after_losses",
         "exit_scale_out_fraction",
+        "synthetic_asset_exposure_fraction",
     )
     @classmethod
     def validate_probability(cls, value: float) -> float:

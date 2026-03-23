@@ -7,7 +7,9 @@ from fastapi import FastAPI, HTTPException
 from core.app_context import AppContext
 from core.config import get_enabled_agent_names, update_agent_model
 from core.cost_tracker import CostTracker
+from core.market_connector import MarketConnector
 from core.schemas import ModelSwapRequest
+from core.settlement import SettlementService
 
 
 @asynccontextmanager
@@ -101,8 +103,15 @@ async def recent_signals(
     asset: str | None = None,
     tier: str | None = None,
     strategy: str | None = None,
+    cutoff_name: str | None = None,
 ) -> list[dict[str, object]]:
-    return await get_context().repository.get_recent_signals(limit=limit, asset=asset, tier=tier, strategy=strategy)
+    return await get_context().repository.get_recent_signals(
+        limit=limit,
+        asset=asset,
+        tier=tier,
+        strategy=strategy,
+        cutoff_name=cutoff_name,
+    )
 
 
 @app.get("/orders/recent")
@@ -111,8 +120,15 @@ async def recent_orders(
     asset: str | None = None,
     tier: str | None = None,
     strategy: str | None = None,
+    cutoff_name: str | None = None,
 ) -> list[dict[str, object]]:
-    return await get_context().repository.get_recent_orders(limit=limit, asset=asset, tier=tier, strategy=strategy)
+    return await get_context().repository.get_recent_orders(
+        limit=limit,
+        asset=asset,
+        tier=tier,
+        strategy=strategy,
+        cutoff_name=cutoff_name,
+    )
 
 
 @app.get("/portfolio/summary")
@@ -131,8 +147,8 @@ async def portfolio_equity_history(limit: int = 100) -> list[dict[str, object]]:
 
 
 @app.get("/metrics/overview")
-async def metrics_overview() -> dict[str, object]:
-    return await get_context().repository.metrics_overview()
+async def metrics_overview(cutoff_name: str | None = None) -> dict[str, object]:
+    return await get_context().repository.metrics_overview_since(cutoff_name=cutoff_name)
 
 
 @app.get("/metrics/performance")
@@ -141,18 +157,25 @@ async def performance_report(
     asset: str | None = None,
     tier: str | None = None,
     strategy: str | None = None,
+    cutoff_name: str | None = None,
 ) -> dict[str, object]:
-    return await get_context().repository.get_performance_report(hours=hours, asset=asset, tier=tier, strategy=strategy)
+    return await get_context().repository.get_performance_report(
+        hours=hours,
+        asset=asset,
+        tier=tier,
+        strategy=strategy,
+        cutoff_name=cutoff_name,
+    )
 
 
 @app.get("/risk-events/recent")
-async def recent_risk_events(limit: int = 20) -> list[dict[str, object]]:
-    return await get_context().repository.get_recent_risk_events(limit=limit)
+async def recent_risk_events(limit: int = 20, cutoff_name: str | None = None) -> list[dict[str, object]]:
+    return await get_context().repository.get_recent_risk_events(limit=limit, cutoff_name=cutoff_name)
 
 
 @app.get("/metrics/pipeline/recent")
-async def recent_pipeline_telemetry(limit: int = 30) -> list[dict[str, object]]:
-    return await get_context().repository.get_recent_pipeline_telemetry(limit=limit)
+async def recent_pipeline_telemetry(limit: int = 30, cutoff_name: str | None = None) -> list[dict[str, object]]:
+    return await get_context().repository.get_recent_pipeline_telemetry(limit=limit, cutoff_name=cutoff_name)
 
 
 @app.get("/decisions/recent")
@@ -161,5 +184,76 @@ async def recent_decisions(
     asset: str | None = None,
     tier: str | None = None,
     strategy: str | None = None,
+    cutoff_name: str | None = None,
 ) -> list[dict[str, object]]:
-    return await get_context().repository.get_recent_decisions(limit=limit, asset=asset, tier=tier, strategy=strategy)
+    return await get_context().repository.get_recent_decisions(
+        limit=limit,
+        asset=asset,
+        tier=tier,
+        strategy=strategy,
+        cutoff_name=cutoff_name,
+    )
+
+
+@app.get("/live/bootstrap-status")
+async def live_bootstrap_status(refresh: bool = False, sync_allowance: bool | None = None) -> dict[str, object]:
+    context = get_context()
+    should_sync_allowance = (
+        context.settings.polymarket_sync_balance_allowance_on_startup
+        if sync_allowance is None
+        else sync_allowance
+    )
+    if refresh or not context.live_bootstrap_status:
+        from core.market_connector import MarketConnector
+
+        runtime_connector = MarketConnector(context)
+        try:
+            context.live_bootstrap_status = await runtime_connector.get_live_bootstrap_status(
+                sync_allowance=should_sync_allowance,
+            )
+        finally:
+            await runtime_connector.close()
+    return context.live_bootstrap_status
+
+
+@app.get("/analysis/cutoffs")
+async def analysis_cutoffs() -> list[dict[str, object]]:
+    return await get_context().repository.get_analysis_cutoffs()
+
+
+@app.post("/analysis/cutoffs/{cutoff_name}")
+async def create_analysis_cutoff(cutoff_name: str) -> dict[str, object]:
+    result = await get_context().repository.create_analysis_cutoff(
+        cutoff_name,
+        metadata={"source": "api"},
+    )
+    return {
+        "cutoff_name": result["cutoff_name"],
+        "created_at": result["created_at"].isoformat(),
+        "metadata": result["metadata"],
+    }
+
+
+@app.get("/settlement/redeemables")
+async def settlement_redeemables(limit: int = 20) -> list[dict[str, object]]:
+    context = get_context()
+    connector = MarketConnector(context)
+    try:
+        return await SettlementService(context, connector).preview_redeemable_positions(limit=limit)
+    finally:
+        await connector.close()
+
+
+@app.post("/settlement/process")
+async def settlement_process(dry_run: bool | None = None, limit: int = 20) -> dict[str, object]:
+    context = get_context()
+    connector = MarketConnector(context)
+    try:
+        return await SettlementService(context, connector).process_redeem_cycle(dry_run=dry_run, limit=limit)
+    finally:
+        await connector.close()
+
+
+@app.get("/settlement/events/recent")
+async def settlement_events_recent(limit: int = 20) -> list[dict[str, object]]:
+    return await get_context().repository.get_recent_settlement_events(limit=limit)

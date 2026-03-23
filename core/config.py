@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -191,6 +191,10 @@ class AppSettings(BaseSettings):
     polymarket_funder: str = ""
     polymarket_signature_type: int = 0
     polymarket_chain_id: int = 137
+    polymarket_live_min_usdc_balance: float = 5.0
+    polymarket_sync_balance_allowance_on_startup: bool = False
+    startup_max_retries: int = 10
+    startup_retry_delay_seconds: float = 2.0
     polymarket_gamma_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_url: str = "https://clob.polymarket.com"
     polymarket_market_ws: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -209,6 +213,42 @@ class AppSettings(BaseSettings):
     alphavantage_api_key: str = ""
     alphavantage_base_url: str = "https://www.alphavantage.co/query"
     alphavantage_news_limit: int = 50
+    copytrade_markets: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    copytrade_shares: int = 2
+    copytrade_max_buy_counts_per_side: int = 1
+    copytrade_wait_for_next_market_start: bool = False
+    copytrade_price_buffer: float = 0.01
+    copytrade_second_leg_base_price: float = 0.98
+    copytrade_signal_confidence_threshold: float = 0.50
+    copytrade_noise_threshold: float = 0.02
+    copytrade_min_history_points: int = 6
+
+    @field_validator("copytrade_markets", mode="before")
+    @classmethod
+    def parse_copytrade_markets(cls, value: Any) -> list[str]:
+        if value in (None, "", []):
+            return []
+        if isinstance(value, str):
+            return [item.strip().upper() for item in value.split(",") if item.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip().upper() for item in value if str(item).strip()]
+        return [str(value).strip().upper()]
+
+    @field_validator(
+        "copytrade_price_buffer",
+        "copytrade_second_leg_base_price",
+        "copytrade_signal_confidence_threshold",
+        "copytrade_noise_threshold",
+    )
+    @classmethod
+    def validate_copytrade_probability(cls, value: float) -> float:
+        if not 0 <= value <= 1:
+            raise ValueError("value must be between 0 and 1")
+        return value
+
+    @property
+    def copytrade_enabled(self) -> bool:
+        return bool(self.copytrade_markets)
 
 
 def get_enabled_agent_names(settings: AppSettings, agents_config: AgentsConfig) -> list[str]:

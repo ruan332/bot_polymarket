@@ -7,6 +7,7 @@ from agents.base import BaseAgent
 from core.app_context import AppContext
 from core.exceptions import InvalidModelResponseError, RiskBlockedError
 from core.market_connector import MarketConnector
+from core.pair_strategy import PairTradingEngine
 from core.risk_engine import RiskEngine
 from core.schemas import MarketSnapshotPayload, SignalPayload
 from core.strategy_engine import StrategyEngine
@@ -18,8 +19,13 @@ class ClaudeAgent(BaseAgent):
         self.connector = MarketConnector(context)
         self.risk = RiskEngine(context)
         self.strategy = StrategyEngine(context)
+        self.pair_engine = PairTradingEngine(context, self.connector)
 
     async def tick(self) -> None:
+        if self.context.settings.copytrade_enabled:
+            await self.context.repository.record_equity_snapshot(source="scan_cycle")
+            await self.pair_engine.tick()
+            return
         agent_cfg = self.context.agents_config.agents[self.name]
         markets = await self.connector.get_active_markets(
             limit=agent_cfg.scan_limit or 20,
@@ -92,6 +98,7 @@ class ClaudeAgent(BaseAgent):
                 cooldown_minutes=cooldown_minutes,
             )
             if is_duplicate:
+                duplicates_blocked += 1
                 await self.risk.record_block(
                     self.name,
                     "duplicate signal inside cooldown window",
@@ -179,4 +186,5 @@ class ClaudeAgent(BaseAgent):
 
     async def close(self) -> None:
         await super().close()
+        await self.pair_engine.close()
         await self.connector.close()

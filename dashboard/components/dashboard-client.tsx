@@ -23,16 +23,25 @@ type Signal = {
   market_question: string;
   asset_symbol: string;
   crypto_tier: "btc" | "major" | "small_cap";
-  direction: "YES" | "NO";
+  direction?: "YES" | "NO";
   strategy_id: string;
   strategy_version: string;
-  regime: "trend" | "mean_revert" | "illiquid_choppy";
-  model_probability: number;
-  market_probability: number;
-  edge: number;
-  confidence: number;
-  price: number;
-  volume_24h: number;
+  regime?: "trend" | "mean_revert" | "illiquid_choppy" | string;
+  model_probability?: number;
+  market_probability?: number;
+  edge?: number;
+  confidence?: number;
+  price?: number;
+  volume_24h?: number;
+  predictor_confidence?: number;
+  predictor_signal?: string;
+  predictor_direction?: string;
+  reasoning?: string;
+  primary_leg?: {
+    direction?: "YES" | "NO";
+    reference_price?: number;
+    target_price?: number;
+  } | null;
   expected_slippage_bps?: number;
   expected_holding_minutes?: number;
   news_validation?: {
@@ -54,8 +63,8 @@ type Decision = {
   crypto_tier: "btc" | "major" | "small_cap" | null;
   approved: boolean;
   corrected_price_limit: number | null;
-  kelly_size: number;
-  risk_fraction: number;
+  kelly_size?: number;
+  risk_fraction?: number;
   take_profit_price?: number | null;
   stop_loss_price?: number | null;
   time_stop_minutes?: number | null;
@@ -350,6 +359,22 @@ function compactReason(value?: string) {
   return value.replaceAll("_", " ");
 }
 
+function numberOr(value: unknown, fallback = 0) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function signalDirection(signal: Signal) {
+  return signal.direction ?? signal.primary_leg?.direction ?? "—";
+}
+
+function signalConfidence(signal: Signal) {
+  return numberOr(signal.confidence, numberOr(signal.predictor_confidence, 0));
+}
+
+function signalEdge(signal: Signal) {
+  return numberOr(signal.edge, 0);
+}
+
 function summarizePipelineEvent(event: PipelineTelemetryEvent) {
   if (event.event_type === "scanner.scan_cycle") {
     return `SCAN: gamma ${event.gamma_markets_fetched ?? 0} | crypto ${event.crypto_classified ?? 0} | selected ${event.selected_for_scan ?? 0} | risk ${event.reached_risk_engine ?? 0} | signals ${event.persisted_signals ?? 0}`;
@@ -389,42 +414,79 @@ export function DashboardClient() {
   });
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string>("booting");
+  const [clock, setClock] = useState<string>("--:--:--");
+  const stateRef = useRef(state);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    setClock(new Date().toLocaleTimeString());
+    const interval = window.setInterval(() => setClock(new Date().toLocaleTimeString()), 1000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     let active = true;
 
     async function load() {
-      try {
-        const [statuses, costs, signals, decisions, orders, riskEvents, overview, pipelineEvents, portfolio, positions, performance] =
-          await Promise.all([
-            getJson<Record<string, AgentStatus>>("/agents/status"),
-            getJson<CostSummary[]>("/costs/daily"),
-            getJson<Signal[]>("/signals/recent"),
-            getJson<Decision[]>("/decisions/recent"),
-            getJson<Order[]>("/orders/recent"),
-            getJson<RiskEvent[]>("/risk-events/recent"),
-            getJson<MetricsOverview>("/metrics/overview"),
-            getJson<PipelineTelemetryEvent[]>("/metrics/pipeline/recent"),
-            getJson<PortfolioSummary>("/portfolio/summary"),
-            getJson<Position[]>("/portfolio/positions"),
-            getJson<PerformanceReport>("/metrics/performance?hours=24"),
-          ]);
+      const currentState = stateRef.current;
+      const requests = [
+        { key: "statuses", path: "/agents/status", fallback: currentState.statuses as Record<string, AgentStatus> },
+        { key: "costs", path: "/costs/daily", fallback: currentState.costs as CostSummary[] },
+        { key: "signals", path: "/signals/recent", fallback: currentState.signals as Signal[] },
+        { key: "decisions", path: "/decisions/recent", fallback: currentState.decisions as Decision[] },
+        { key: "orders", path: "/orders/recent", fallback: currentState.orders as Order[] },
+        { key: "riskEvents", path: "/risk-events/recent", fallback: currentState.riskEvents as RiskEvent[] },
+        { key: "overview", path: "/metrics/overview", fallback: currentState.overview as MetricsOverview | null },
+        { key: "pipelineEvents", path: "/metrics/pipeline/recent", fallback: currentState.pipelineEvents as PipelineTelemetryEvent[] },
+        { key: "portfolio", path: "/portfolio/summary", fallback: currentState.portfolio as PortfolioSummary | null },
+        { key: "positions", path: "/portfolio/positions", fallback: currentState.positions as Position[] },
+        { key: "performance", path: "/metrics/performance?hours=24", fallback: currentState.performance as PerformanceReport | null },
+      ] as const;
 
-        if (!active) return;
+      const results = await Promise.allSettled(requests.map((request) => getJson(request.path)));
+      if (!active) return;
+
+      const failures: string[] = [];
+      const nextData = new Map<string, unknown>();
+      results.forEach((result, index) => {
+        const request = requests[index];
+        if (result.status === "fulfilled") {
+          nextData.set(request.key, result.value);
+          return;
+        }
+        nextData.set(request.key, request.fallback);
+        failures.push(request.path);
+      });
+
+      try {
+        const statuses = (nextData.get("statuses") ?? {}) as Record<string, AgentStatus>;
+        const costs = (nextData.get("costs") ?? []) as CostSummary[];
+        const signals = (nextData.get("signals") ?? []) as Signal[];
+        const decisions = (nextData.get("decisions") ?? []) as Decision[];
+        const orders = (nextData.get("orders") ?? []) as Order[];
+        const riskEvents = (nextData.get("riskEvents") ?? []) as RiskEvent[];
+        const overview = (nextData.get("overview") ?? null) as MetricsOverview | null;
+        const pipelineEvents = (nextData.get("pipelineEvents") ?? []) as PipelineTelemetryEvent[];
+        const portfolio = (nextData.get("portfolio") ?? null) as PortfolioSummary | null;
+        const positions = (nextData.get("positions") ?? []) as Position[];
+        const performance = (nextData.get("performance") ?? null) as PerformanceReport | null;
 
         const newLogs: LogEntry[] = [];
         signals.forEach(s => newLogs.push({
           id: `sig-${s.signal_id}`,
           time: new Date(s.created_at).toLocaleTimeString(),
           type: "signal",
-          message: `NEW SIGNAL: ${s.asset_symbol} ${s.direction} | ${s.strategy_id}/${s.regime} | Edge: ${s.edge.toFixed(3)} | Model ${asPercent(s.model_probability)} vs Mkt ${asPercent(s.market_probability)}`,
+          message: `NEW SIGNAL: ${s.asset_symbol} ${signalDirection(s)} | ${s.strategy_id}/${labelRegime(s.regime)} | Edge: ${signalEdge(s).toFixed(3)} | Conf ${asPercent(signalConfidence(s))}`,
           raw_time: s.created_at
         }));
         decisions.forEach(d => newLogs.push({
           id: `dec-${d.signal_id}-${d.created_at}`,
           time: new Date(d.created_at).toLocaleTimeString(),
           type: "decision",
-          message: `DECISION: ${d.asset_symbol} ${d.approved ? "APPROVED" : "REJECTED"} | Kelly: ${d.kelly_size.toFixed(0)} | Risk: ${asPercent(d.risk_fraction ?? 0)} | ${d.notes}`,
+          message: `DECISION: ${d.asset_symbol} ${d.approved ? "APPROVED" : "REJECTED"} | Kelly: ${numberOr(d.kelly_size).toFixed(0)} | Risk: ${asPercent(numberOr(d.risk_fraction))} | ${d.notes}`,
           raw_time: d.created_at
         }));
         orders.forEach(o => newLogs.push({
@@ -464,10 +526,9 @@ export function DashboardClient() {
           performance,
           logs: newLogs.slice(0, 120),
         });
-        setError(null);
+        setError(failures.length > 0 ? `Failed: ${failures.join(", ")}` : null);
         setLastUpdated(new Date().toLocaleTimeString());
       } catch (loadError) {
-        if (!active) return;
         setError(loadError instanceof Error ? loadError.message : "Unknown error");
       }
     }
@@ -581,8 +642,8 @@ export function DashboardClient() {
             <div className="space-y-0.5 p-2">
                 {state.signals.slice(0, 5).map(s => (
                   <div key={s.signal_id} className="flex justify-between text-poly-cyan/80 bg-poly-cyan/5 px-1">
-                    <span className="truncate max-w-[68%]">{s.asset_symbol} {s.direction} [{labelRegime(s.regime)}]</span>
-                    <span>E:{s.edge.toFixed(3)}</span>
+                    <span className="truncate max-w-[68%]">{s.asset_symbol} {signalDirection(s)} [{labelRegime(s.regime)}]</span>
+                    <span>E:{signalEdge(s).toFixed(3)}</span>
                   </div>
                 ))}
               {state.signals.length === 0 && <div className="text-poly-dim text-center py-2">NO_SIGNALS</div>}
@@ -594,7 +655,7 @@ export function DashboardClient() {
               {state.decisions.slice(0, 5).map(d => (
                 <div key={`${d.signal_id}-${d.created_at}`} className={`flex justify-between px-1 ${d.approved ? "text-poly-green/80 bg-poly-green/5" : "text-poly-red/80 bg-poly-red/5"}`}>
                   <span className="truncate max-w-[60%]">{d.asset_symbol} {d.approved ? "OK" : "REJ"}</span>
-                  <span>K:{d.kelly_size.toFixed(0)}</span>
+                  <span>K:{numberOr(d.kelly_size).toFixed(0)}</span>
                 </div>
               ))}
               {state.decisions.length === 0 && <div className="text-poly-dim text-center py-2">NO_DECISIONS</div>}
@@ -927,7 +988,7 @@ export function DashboardClient() {
               </thead>
               <tbody className="divide-y divide-poly-border-dim">
                 {state.positions.map(pos => (
-                  <tr key={`${pos.market_id}-${pos.direction}`} className="hover:bg-poly-surface-container/40">
+                  <tr key={pos.position_key ?? `${pos.market_id}-${pos.direction}-${pos.opened_at ?? "open"}`} className="hover:bg-poly-surface-container/40">
                     <td className="p-2 text-poly-cyan truncate max-w-[300px]" title={pos.market_question}>{pos.asset_symbol ?? "?"} <span className="text-poly-dim">{pos.market_question}</span></td>
                     <td className="p-2 text-poly-muted">{labelStrategy(pos.strategy_id)}</td>
                     <td className="p-2 text-poly-amber">{labelRegime(pos.regime)}</td>
@@ -975,7 +1036,7 @@ export function DashboardClient() {
           {state.riskEvents.length > 0 && (
             <div className="bg-poly-red text-white px-2 animate-pulse font-bold text-[8px]">RISK:{state.riskEvents.length}</div>
           )}
-          <span className="text-poly-muted">{new Date().toLocaleTimeString()}</span>
+          <span className="text-poly-muted">{clock}</span>
         </div>
       </footer>
     </>

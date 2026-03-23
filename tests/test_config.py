@@ -142,3 +142,50 @@ def test_app_settings_news_provider_env_overrides(monkeypatch: pytest.MonkeyPatc
     assert settings.marketaux_api_key == "marketaux-key"
     assert settings.alphavantage_api_key == "alpha-key"
     assert settings.news_lookback_hours == 12
+
+
+def test_app_settings_copytrade_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in (
+        "COPYTRADE_MARKETS",
+        "COPYTRADE_SHARES",
+        "COPYTRADE_MAX_BUY_COUNTS_PER_SIDE",
+        "COPYTRADE_WAIT_FOR_NEXT_MARKET_START",
+        "COPYTRADE_PRICE_BUFFER",
+        "COPYTRADE_SECOND_LEG_BASE_PRICE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = AppSettings(_env_file=None)
+
+    assert settings.copytrade_markets == []
+    assert settings.copytrade_enabled is False
+    assert settings.copytrade_shares == 2
+    assert settings.copytrade_price_buffer == pytest.approx(0.01)
+    assert settings.copytrade_second_leg_base_price == pytest.approx(0.98)
+
+
+def test_app_settings_copytrade_env_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COPYTRADE_MARKETS", "btc, eth ")
+    monkeypatch.setenv("COPYTRADE_SHARES", "3")
+    monkeypatch.setenv("COPYTRADE_MAX_BUY_COUNTS_PER_SIDE", "2")
+    monkeypatch.setenv("COPYTRADE_WAIT_FOR_NEXT_MARKET_START", "true")
+    monkeypatch.setenv("COPYTRADE_PRICE_BUFFER", "0.015")
+
+    settings = AppSettings(_env_file=None)
+
+    assert settings.copytrade_markets == ["BTC", "ETH"]
+    assert settings.copytrade_enabled is True
+    assert settings.copytrade_shares == 3
+    assert settings.copytrade_max_buy_counts_per_side == 2
+    assert settings.copytrade_wait_for_next_market_start is True
+    assert settings.copytrade_price_buffer == pytest.approx(0.015)
+
+
+def test_app_settings_live_bootstrap_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ("POLYMARKET_LIVE_MIN_USDC_BALANCE", "POLYMARKET_SYNC_BALANCE_ALLOWANCE_ON_STARTUP"):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = AppSettings(_env_file=None)
+
+    assert settings.polymarket_live_min_usdc_balance == pytest.approx(5.0)
+    assert settings.polymarket_sync_balance_allowance_on_startup is False

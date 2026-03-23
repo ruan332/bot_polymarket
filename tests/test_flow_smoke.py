@@ -14,7 +14,7 @@ from agents.codex_agent import CodexAgent
 from agents.news_validator_agent import NewsValidatorAgent
 from api import main as api_main
 from core.config import infer_provider_from_model, load_agents_config, load_crypto_config, load_risk_config
-from core.schemas import ModelResponse, PortfolioSummary
+from core.schemas import MarketSnapshotPayload, ModelResponse, PortfolioSummary
 
 
 class FakeBus:
@@ -94,6 +94,9 @@ class FakeRepository:
         self.equity_history: list[dict] = []
         self.news_validations: list[dict] = []
         self.pipeline_events: list[dict] = []
+        self.pair_cycles: dict[str, dict] = {}
+        self.pending_pair_orders: dict[str, dict] = {}
+        self.settlement_events: list[dict] = []
 
     async def record_signal(self, signal_id: str, event_type: str, payload: dict) -> None:
         self.signals.append(payload)
@@ -126,8 +129,8 @@ class FakeRepository:
 
     async def record_paper_order(self, order_id: str, signal_id: str, market_id: str, status: str, payload: dict) -> None:
         self.orders.append(payload)
-        if status == "simulated":
-            position_key = f"{market_id}:{payload['direction']}"
+        if status in {"simulated", "live_filled"}:
+            position_key = str(payload.get("position_key") or f"{market_id}:{payload['direction']}")
             action = payload.get("action", "entry")
             existing = self.positions.get(position_key)
             if action in {"entry", "scale_in"}:
@@ -141,6 +144,9 @@ class FakeRepository:
                         "crypto_tier": payload.get("crypto_tier", ""),
                         "strategy_id": payload.get("strategy_id", ""),
                         "regime": payload.get("regime", ""),
+                        "trade_group_id": payload.get("trade_group_id", ""),
+                        "cycle_slug": payload.get("cycle_slug", ""),
+                        "leg_role": payload.get("leg_role", ""),
                         "direction": payload["direction"],
                         "size": payload["size"],
                         "average_price": payload["price_limit"],
@@ -191,6 +197,24 @@ class FakeRepository:
     async def record_pipeline_telemetry(self, event_id: str, agent: str, event_type: str, payload: dict) -> None:
         self.pipeline_events.append({"agent": agent, "event_type": event_type, **payload, "created_at": "2026-03-18T12:00:00Z"})
 
+    async def record_settlement_event(
+        self,
+        settlement_id: str,
+        position_key: str,
+        market_id: str,
+        status: str,
+        payload: dict,
+    ) -> None:
+        self.settlement_events.append(
+            {
+                "settlement_id": settlement_id,
+                "position_key": position_key,
+                "market_id": market_id,
+                "status": status,
+                **payload,
+            }
+        )
+
     async def upsert_heartbeat(self, heartbeat) -> None:
         self.heartbeats[heartbeat.agent] = heartbeat.model_dump()
 
@@ -200,6 +224,27 @@ class FakeRepository:
 
     async def record_market_snapshots(self, snapshots) -> None:
         self.market_snapshots.extend(snapshot.model_dump(mode="json") for snapshot in snapshots)
+
+    async def upsert_pair_cycle(self, state) -> None:
+        self.pair_cycles[state.asset_symbol] = state.model_dump(mode="json")
+
+    async def get_pair_cycle(self, asset_symbol: str):
+        return self.pair_cycles.get(asset_symbol)
+
+    async def upsert_pending_pair_order(self, pending) -> None:
+        self.pending_pair_orders[pending.pending_order_id] = pending.model_dump(mode="json")
+
+    async def list_pending_pair_orders(self, status: str = "pending"):
+        return [item for item in self.pending_pair_orders.values() if item.get("status") == status]
+
+    async def resolve_pending_pair_order(self, pending_order_id: str, *, status: str, reason: str = "", payload: dict | None = None) -> None:
+        order = self.pending_pair_orders.get(pending_order_id)
+        if order is None:
+            return
+        order["status"] = status
+        order["reason"] = reason
+        if payload:
+            order.update(payload)
 
     async def get_portfolio_summary(self) -> PortfolioSummary:
         total_exposure = sum(position["cost_basis_usd"] for position in self.positions.values())
@@ -226,26 +271,50 @@ class FakeRepository:
             return False
         return True
 
-    async def get_recent_signals(self, limit: int = 20, asset: str | None = None, tier: str | None = None, strategy: str | None = None):
+    async def get_recent_signals(
+        self,
+        limit: int = 20,
+        asset: str | None = None,
+        tier: str | None = None,
+        strategy: str | None = None,
+        cutoff_name: str | None = None,
+    ):
         items = [item for item in self.signals if self._matches(item, asset, tier, strategy)]
         return list(reversed(items[-limit:]))
 
-    async def get_recent_orders(self, limit: int = 20, asset: str | None = None, tier: str | None = None, strategy: str | None = None):
+    async def get_recent_orders(
+        self,
+        limit: int = 20,
+        asset: str | None = None,
+        tier: str | None = None,
+        strategy: str | None = None,
+        cutoff_name: str | None = None,
+    ):
         items = [item for item in self.orders if self._matches(item, asset, tier, strategy)]
         return list(reversed(items[-limit:]))
 
-    async def get_recent_risk_events(self, limit: int = 20):
+    async def get_recent_risk_events(self, limit: int = 20, cutoff_name: str | None = None):
         return list(reversed(self.risk_events[-limit:]))
 
-    async def get_recent_pipeline_telemetry(self, limit: int = 30):
+    async def get_recent_pipeline_telemetry(self, limit: int = 30, cutoff_name: str | None = None):
         return list(reversed(self.pipeline_events[-limit:]))
 
-    async def get_recent_decisions(self, limit: int = 20, asset: str | None = None, tier: str | None = None, strategy: str | None = None):
+    async def get_recent_decisions(
+        self,
+        limit: int = 20,
+        asset: str | None = None,
+        tier: str | None = None,
+        strategy: str | None = None,
+        cutoff_name: str | None = None,
+    ):
         items = [item for item in self.decisions if self._matches(item, asset, tier, strategy)]
         return list(reversed(items[-limit:]))
 
     async def get_equity_history(self, limit: int = 100):
         return list(self.equity_history[-limit:])
+
+    async def get_recent_settlement_events(self, limit: int = 20):
+        return list(reversed(self.settlement_events[-limit:]))
 
     async def get_open_positions(self):
         return list(self.positions.values())
@@ -255,6 +324,24 @@ class FakeRepository:
         if market_id:
             items = [item for item in items if item["market_id"] == market_id]
         return items[-limit:]
+
+    async def get_latest_market_snapshot(self, market_id: str):
+        items = [item for item in self.market_snapshots if item["market_id"] == market_id]
+        if not items:
+            return None
+        latest = items[-1]
+        metadata = latest.get("metadata") or latest.get("payload") or {}
+        return {
+            "market_id": latest["market_id"],
+            "question": latest["question"],
+            "token_id_yes": latest["token_id_yes"],
+            "token_id_no": latest["token_id_no"],
+            "price_yes": latest["price_yes"],
+            "price_no": latest["price_no"],
+            "volume_24h": latest.get("volume_24h", 0.0),
+            "metadata": metadata,
+            "created_at": latest["created_at"],
+        }
 
     async def get_execution_risk_state(self, hours: int = 24) -> dict[str, object]:
         consecutive_losses = 0
@@ -281,15 +368,17 @@ class FakeRepository:
     async def get_agent_status(self):
         return list(self.heartbeats.values())
 
-    async def metrics_overview(self):
+    async def metrics_overview_since(self, cutoff_name: str | None = None):
         latest_scan = next((item for item in reversed(self.pipeline_events) if item["event_type"] == "scanner.scan_cycle"), None)
         latest_review = next((item for item in reversed(self.pipeline_events) if item["event_type"] == "reviewer.review_cycle"), None)
         latest_execution = next((item for item in reversed(self.pipeline_events) if item["event_type"] == "executor.execute_cycle"), None)
         return {
+            "analysis_cutoff": None,
             "signals": len(self.signals),
             "decisions": len(self.decisions),
             "orders": len(self.orders),
             "risk_events": len(self.risk_events),
+            "pending_pair_orders": sum(1 for item in self.pending_pair_orders.values() if item.get("status") == "pending"),
             "portfolio": (await self.get_portfolio_summary()).model_dump(),
             "flow_summary": {
                 "window_minutes": 15,
@@ -315,20 +404,36 @@ class FakeRepository:
             "latest_execution_telemetry": latest_execution,
         }
 
+    async def metrics_overview(self):
+        return await self.metrics_overview_since()
+
     async def get_performance_report(
         self,
         hours: int = 24,
         asset: str | None = None,
         tier: str | None = None,
         strategy: str | None = None,
+        cutoff_name: str | None = None,
     ):
         signals = [item for item in self.signals if self._matches(item, asset, tier, strategy)]
         decisions = [item for item in self.decisions if self._matches(item, asset, tier, strategy)]
         orders = [item for item in self.orders if self._matches(item, asset, tier, strategy)]
         open_positions = [item for item in self.positions.values() if self._matches(item, asset, tier, strategy)]
+        pending_pair_orders = [
+            item for item in self.pending_pair_orders.values() if self._matches(item, asset, tier, strategy)
+        ]
+        pair_groups: dict[str, set[str]] = {}
+        for item in orders:
+            if str(item.get("strategy_id") or "") != "pair_15m":
+                continue
+            trade_group_id = str(item.get("trade_group_id") or "")
+            if not trade_group_id:
+                continue
+            pair_groups.setdefault(trade_group_id, set()).add(str(item.get("leg_role") or ""))
         return {
             "generated_at": "2026-03-18T12:05:00Z",
             "window_hours": hours,
+            "analysis_cutoff": None,
             "asset_filter": asset or "",
             "tier_filter": tier or "",
             "strategy_filter": strategy or "",
@@ -366,6 +471,21 @@ class FakeRepository:
                 {"label": "fallback_used", "count": 0},
                 {"label": "unknown", "count": 0},
             ],
+            "pair_trade_summary": {
+                "groups": len(pair_groups),
+                "fully_hedged_groups": sum(1 for legs in pair_groups.values() if {"primary", "hedge"}.issubset(legs)),
+                "primary_only_groups": sum(1 for legs in pair_groups.values() if "primary" in legs and "hedge" not in legs),
+                "orphan_hedge_groups": sum(1 for legs in pair_groups.values() if "hedge" in legs and "primary" not in legs),
+                "pending_hedges": sum(1 for item in pending_pair_orders if item.get("status") == "pending"),
+                "primary_notional": round(
+                    sum(float(item.get("notional_usd") or 0.0) for item in orders if str(item.get("leg_role") or "") == "primary"),
+                    4,
+                ),
+                "hedge_notional": round(
+                    sum(float(item.get("notional_usd") or 0.0) for item in orders if str(item.get("leg_role") or "") == "hedge"),
+                    4,
+                ),
+            },
             "last_news_provider": (
                 {
                     "provider_used": "smoke",
@@ -393,6 +513,19 @@ class FakeRepository:
             "open_positions": open_positions,
             "mae_mfe": {"avg_mae": 0.0, "avg_mfe": 0.0},
             "time_series": {"pipeline": [], "equity": []},
+        }
+
+    async def get_analysis_cutoffs(self):
+        return []
+
+    async def get_analysis_cutoff(self, cutoff_name: str):
+        return None
+
+    async def create_analysis_cutoff(self, cutoff_name: str, *, created_at=None, metadata=None):
+        return {
+            "cutoff_name": cutoff_name,
+            "created_at": created_at or "2026-03-18T12:00:00Z",
+            "metadata": metadata or {},
         }
 
 
@@ -433,6 +566,16 @@ class FakeContext:
             alphavantage_api_key="",
             alphavantage_base_url="https://www.alphavantage.co/query",
             alphavantage_news_limit=50,
+            copytrade_enabled=False,
+            copytrade_markets=[],
+            copytrade_shares=2,
+            copytrade_max_buy_counts_per_side=1,
+            copytrade_wait_for_next_market_start=False,
+            copytrade_price_buffer=0.01,
+            copytrade_second_leg_base_price=0.98,
+            copytrade_signal_confidence_threshold=0.5,
+            copytrade_noise_threshold=0.02,
+            copytrade_min_history_points=6,
         )
         self.agents_config = load_agents_config()
         self.risk_config = load_risk_config()
@@ -627,6 +770,177 @@ async def test_signal_review_execute_flow_without_news_validation(monkeypatch) -
     await claw.tick()
     assert len(context.repository.orders) == 1
     assert context.repository.orders[0]["news_validation"] is None
+
+
+@pytest.mark.asyncio
+async def test_pair_signal_review_execute_and_fill_hedge(monkeypatch) -> None:
+    context = FakeContext()
+    context.settings.review_llm_enabled = False
+    await context.bus.publish_event(
+        "signals:validated",
+        {
+            "event_type": "pair_signal.created",
+            "signal_id": "pair-sig-1",
+            "trade_group_id": "pair-group-1",
+            "cycle_slug": "btc-updown-15m-123",
+            "cycle_start": datetime.now(UTC).isoformat(),
+            "market_id": "pair-market-1",
+            "market_question": "Will BTC be above current price in 15 minutes?",
+            "asset_symbol": "BTC",
+            "asset_name": "Bitcoin",
+            "crypto_tier": "btc",
+            "strategy_id": "pair_15m",
+            "strategy_version": "v1",
+            "predictor_direction": "up",
+            "predictor_signal": "BUY_UP",
+            "predictor_confidence": 0.72,
+            "side_count_state": {"yes": 0, "no": 0, "max_per_side": 2},
+            "primary_leg": {
+                "market_id": "pair-market-1",
+                "token_id": "token-yes-1",
+                "direction": "YES",
+                "leg_role": "primary",
+                "size": 2,
+                "target_price": 0.45,
+                "reference_price": 0.45,
+                "current_ask": 0.45,
+                "current_bid": 0.44,
+            },
+            "hedge_leg": {
+                "market_id": "pair-market-1",
+                "token_id": "token-no-1",
+                "direction": "NO",
+                "leg_role": "hedge",
+                "size": 2,
+                "target_price": 0.40,
+                "reference_price": 0.45,
+                "current_ask": 0.42,
+                "current_bid": 0.41,
+            },
+            "reasoning": "pair signal",
+            "metadata": {},
+        },
+    )
+
+    codex = CodexAgent(context)
+    claw = ClawAgent(context)
+    placements: list[dict[str, object]] = []
+
+    async def fake_place_order(**kwargs):
+        placements.append(kwargs)
+        open_position = bool(kwargs.get("open_position", True))
+        status = "simulated" if open_position else "simulated_pending"
+        return {"status": status, "exchange_order_id": f"paper-{len(placements)}", **kwargs}
+
+    monkeypatch.setattr(claw.connector, "place_order", fake_place_order)
+
+    await codex.tick()
+    await claw.tick()
+
+    assert len(context.repository.decisions) == 1
+    assert len(context.repository.orders) == 1
+    assert len(context.repository.pending_pair_orders) == 1
+    assert len(placements) == 2
+    assert context.repository.orders[0]["leg_role"] == "primary"
+    pending_order = next(iter(context.repository.pending_pair_orders.values()))
+    assert pending_order["submission_status"] == "simulated_pending"
+    assert pending_order["exchange_order_id"] == "paper-2"
+
+    await context.repository.record_market_snapshots(
+        [
+            MarketSnapshotPayload(
+                market_id="pair-market-1",
+                question="Will BTC be above current price in 15 minutes?",
+                token_id_yes="token-yes-1",
+                token_id_no="token-no-1",
+                price_yes=0.46,
+                price_no=0.39,
+                volume_24h=50000.0,
+                asset_symbol="BTC",
+                asset_name="Bitcoin",
+                crypto_tier="btc",
+                market_kind="direct_coin",
+                question_type="direction",
+                thesis_tags=["btc", "pair_15m"],
+                metadata={
+                    "orderbook_summary_yes": {"best_bid": 0.45, "best_ask": 0.46, "spread_bps": 20.0},
+                    "orderbook_summary_no": {"best_bid": 0.38, "best_ask": 0.39, "spread_bps": 20.0},
+                },
+            )
+        ]
+    )
+
+    await claw.tick()
+
+    assert len(context.repository.orders) == 2
+    assert context.repository.orders[1]["leg_role"] == "hedge"
+    assert next(iter(context.repository.pending_pair_orders.values()))["status"] == "filled"
+    assert len(placements) == 2
+
+
+@pytest.mark.asyncio
+async def test_pair_position_closes_on_cycle_rollover() -> None:
+    context = FakeContext()
+    claw = ClawAgent(context)
+    opened_at = datetime.now(UTC).isoformat()
+    context.repository.positions["pair-group-1:YES"] = {
+        "market_id": "pair-market-1",
+        "position_key": "pair-group-1:YES",
+        "token_id": "token-yes-1",
+        "market_question": "Will BTC be above current price in 15 minutes?",
+        "asset_symbol": "BTC",
+        "crypto_tier": "btc",
+        "strategy_id": "pair_15m",
+        "regime": "",
+        "trade_group_id": "pair-group-1",
+        "cycle_slug": "btc-updown-15m-older",
+        "leg_role": "primary",
+        "direction": "YES",
+        "size": 2,
+        "average_price": 0.45,
+        "current_price": 0.62,
+        "cost_basis_usd": 0.9,
+        "current_value_usd": 1.24,
+        "unrealized_pnl": 0.34,
+        "take_profit_price": None,
+        "stop_loss_price": None,
+        "time_stop_minutes": None,
+        "opened_at": opened_at,
+        "scaled_out_count": 0,
+        "latest_spread_bps": 30.0,
+    }
+    context.repository.pair_cycles["BTC"] = {
+        "asset_symbol": "BTC",
+        "asset_name": "Bitcoin",
+        "crypto_tier": "btc",
+        "cycle_slug": "btc-updown-15m-newer",
+        "cycle_start": datetime.now(UTC).isoformat(),
+        "market_id": "pair-market-2",
+        "market_question": "Will BTC be above current price in 15 minutes?",
+        "token_id_yes": "token-yes-2",
+        "token_id_no": "token-no-2",
+        "price_yes": 0.0,
+        "price_no": 0.0,
+        "status": "active",
+        "side_counts": {"yes": 0, "no": 0},
+        "max_buy_counts_per_side": 1,
+        "last_signal_direction": None,
+        "last_signal_at": None,
+        "last_quote_at": None,
+        "predictor_state": {},
+        "metadata": {},
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+    exit_stats = await claw.process_exit_cycle()
+
+    assert exit_stats["exit_orders_count"] == 1
+    assert "cycle_rollover" in exit_stats["exit_actions"]
+    assert "pair-group-1:YES" not in context.repository.positions
+    assert context.repository.orders[-1]["exit_reason"] == "cycle_rollover"
+    assert context.repository.orders[-1]["trade_group_id"] == "pair-group-1"
+    assert context.repository.orders[-1]["cycle_slug"] == "btc-updown-15m-older"
+    assert context.repository.orders[-1]["leg_role"] == "primary"
 
 
 @pytest.mark.asyncio
@@ -919,3 +1233,132 @@ def test_api_agents_status_hides_news_validator_when_disabled(monkeypatch) -> No
         costs = client.get("/costs/daily").json()
         assert "news_validator" not in status
         assert all(item["agent"] != "news_validator" for item in costs)
+
+
+@pytest.mark.asyncio
+async def test_settlement_service_closes_resolved_paper_position(monkeypatch) -> None:
+    from core.market_connector import MarketConnector
+    from core.settlement import SettlementService
+
+    context = FakeContext()
+    await context.repository.record_paper_order(
+        "ord-entry-1",
+        "sig-entry-1",
+        "market-settle-1",
+        "simulated",
+        {
+            "order_id": "ord-entry-1",
+            "signal_id": "sig-entry-1",
+            "market_id": "market-settle-1",
+            "token_id": "token-yes-1",
+            "market_question": "Will BTC finish green?",
+            "asset_symbol": "BTC",
+            "crypto_tier": "btc",
+            "strategy_id": "pair_15m",
+            "trade_group_id": "group-1",
+            "cycle_slug": "btc-updown-15m-1",
+            "leg_role": "primary",
+            "action": "entry",
+            "position_key": "group-1:primary",
+            "direction": "YES",
+            "size": 5,
+            "price_limit": 0.42,
+            "notional_usd": 2.1,
+            "realized_pnl_usd": 0.0,
+            "execution_mode": "deterministic",
+            "reason": "entry",
+        },
+    )
+
+    async def fake_resolution(self, market_id: str):
+        assert market_id == "market-settle-1"
+        return {
+            "market_id": market_id,
+            "found": True,
+            "resolved": True,
+            "winning_direction": "YES",
+            "payout_yes": 1.0,
+            "payout_no": 0.0,
+        }
+
+    monkeypatch.setattr(MarketConnector, "get_market_resolution", fake_resolution)
+
+    connector = MarketConnector(context)
+    service = SettlementService(context, connector)
+    result = await service.process_redeem_cycle(dry_run=False, limit=10)
+
+    assert result["processed_count"] == 1
+    assert result["settled_count"] == 1
+    assert result["realized_pnl_usd"] == pytest.approx(2.9)
+    assert len(await context.repository.get_open_positions()) == 0
+    assert context.repository.orders[-1]["exit_reason"] == "market_redeemed"
+    assert context.repository.orders[-1]["realized_pnl_usd"] == pytest.approx(2.9)
+    assert context.repository.settlement_events[-1]["status"] == "settled"
+    await connector.close()
+
+
+def test_api_settlement_endpoints(monkeypatch) -> None:
+    fake_context = FakeContext()
+    fake_context.repository.positions["group-2:primary"] = {
+        "market_id": "market-settle-2",
+        "position_key": "group-2:primary",
+        "token_id": "token-no-2",
+        "market_question": "Will ETH drop?",
+        "asset_symbol": "ETH",
+        "crypto_tier": "eth",
+        "strategy_id": "pair_15m",
+        "regime": "trend",
+        "trade_group_id": "group-2",
+        "cycle_slug": "eth-updown-15m-2",
+        "leg_role": "hedge",
+        "direction": "NO",
+        "size": 4,
+        "average_price": 0.25,
+        "current_price": 0.25,
+        "cost_basis_usd": 1.0,
+        "current_value_usd": 1.0,
+        "unrealized_pnl": 0.0,
+        "take_profit_price": None,
+        "stop_loss_price": None,
+        "time_stop_minutes": None,
+        "opened_at": "2026-03-18T12:00:00Z",
+        "scaled_out_count": 0,
+        "latest_spread_bps": 35.0,
+    }
+    fake_context.repository.settlement_events.append(
+        {
+            "settlement_id": "settled-1",
+            "market_id": "market-settle-2",
+            "position_key": "group-2:primary",
+            "status": "dry_run",
+            "realized_pnl_usd": 0.0,
+        }
+    )
+
+    async def fake_create():
+        return fake_context
+
+    async def fake_resolution(self, market_id: str):
+        return {
+            "market_id": market_id,
+            "found": True,
+            "resolved": True,
+            "winning_direction": "NO",
+            "payout_yes": 0.0,
+            "payout_no": 1.0,
+        }
+
+    monkeypatch.setattr(api_main.AppContext, "create", fake_create)
+    monkeypatch.setattr("core.market_connector.MarketConnector.get_market_resolution", fake_resolution)
+
+    with TestClient(api_main.app) as client:
+        redeemables = client.get("/settlement/redeemables?limit=5")
+        assert redeemables.status_code == 200
+        assert redeemables.json()[0]["eligible"] is True
+        process = client.post("/settlement/process?dry_run=true&limit=5")
+        assert process.status_code == 200
+        assert process.json()["dry_run"] is True
+        assert process.json()["processed_count"] == 1
+        recent = client.get("/settlement/events/recent?limit=5")
+        assert recent.status_code == 200
+        assert recent.json()[0]["status"] in {"dry_run", "settled"}

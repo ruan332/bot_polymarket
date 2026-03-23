@@ -23,8 +23,9 @@ async def main() -> None:
             print("  News   -> disabled")
         print(f"  Codex  -> {codex.provider.model}")
         print(f"  Claw   -> {claw.provider.model}")
+        claude_interval = 1 if context.settings.copytrade_enabled else 10
         tasks = [
-            claude.run_loop(interval_seconds=10),
+            claude.run_loop(interval_seconds=claude_interval),
             codex.run_loop(interval_seconds=2),
             claw.run_loop(interval_seconds=2),
         ]

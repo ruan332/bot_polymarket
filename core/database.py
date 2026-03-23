@@ -7,7 +7,15 @@ from typing import Any
 
 import asyncpg
 
-from core.schemas import AgentHeartbeat, EquitySnapshotPoint, MarketSnapshotPayload, NewsValidationPayload, PortfolioSummary
+from core.schemas import (
+    AgentHeartbeat,
+    EquitySnapshotPoint,
+    MarketSnapshotPayload,
+    NewsValidationPayload,
+    PairCycleStatePayload,
+    PendingPairOrderPayload,
+    PortfolioSummary,
+)
 
 
 SCHEMA_SQL = """
@@ -46,6 +54,9 @@ CREATE TABLE IF NOT EXISTS positions (
     crypto_tier TEXT NOT NULL DEFAULT '',
     strategy_id TEXT NOT NULL DEFAULT '',
     regime TEXT NOT NULL DEFAULT '',
+    trade_group_id TEXT NOT NULL DEFAULT '',
+    cycle_slug TEXT NOT NULL DEFAULT '',
+    leg_role TEXT NOT NULL DEFAULT '',
     direction TEXT NOT NULL,
     size INTEGER NOT NULL,
     average_price DOUBLE PRECISION NOT NULL,
@@ -65,6 +76,9 @@ ALTER TABLE positions ADD COLUMN IF NOT EXISTS asset_symbol TEXT NOT NULL DEFAUL
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS crypto_tier TEXT NOT NULL DEFAULT '';
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS strategy_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS regime TEXT NOT NULL DEFAULT '';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS trade_group_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS cycle_slug TEXT NOT NULL DEFAULT '';
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS leg_role TEXT NOT NULL DEFAULT '';
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS take_profit_price DOUBLE PRECISION;
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS stop_loss_price DOUBLE PRECISION;
 ALTER TABLE positions ADD COLUMN IF NOT EXISTS time_stop_minutes INTEGER;
@@ -143,6 +157,57 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS pair_cycles (
+    asset_symbol TEXT PRIMARY KEY,
+    asset_name TEXT NOT NULL DEFAULT '',
+    crypto_tier TEXT NOT NULL DEFAULT '',
+    cycle_slug TEXT NOT NULL,
+    cycle_start TIMESTAMPTZ NOT NULL,
+    market_id TEXT NOT NULL,
+    market_question TEXT NOT NULL DEFAULT '',
+    token_id_yes TEXT NOT NULL DEFAULT '',
+    token_id_no TEXT NOT NULL DEFAULT '',
+    price_yes DOUBLE PRECISION NOT NULL DEFAULT 0,
+    price_no DOUBLE PRECISION NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    side_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
+    max_buy_counts_per_side INTEGER NOT NULL DEFAULT 1,
+    last_signal_direction TEXT,
+    last_signal_at TIMESTAMPTZ,
+    last_quote_at TIMESTAMPTZ,
+    predictor_state JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS pending_pair_orders (
+    pending_order_id UUID PRIMARY KEY,
+    trade_group_id TEXT NOT NULL,
+    signal_id UUID NOT NULL,
+    cycle_slug TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    market_question TEXT NOT NULL DEFAULT '',
+    asset_symbol TEXT NOT NULL DEFAULT '',
+    crypto_tier TEXT NOT NULL DEFAULT '',
+    strategy_id TEXT NOT NULL DEFAULT 'pair_15m',
+    position_key TEXT NOT NULL DEFAULT '',
+    token_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    leg_role TEXT NOT NULL DEFAULT 'hedge',
+    size INTEGER NOT NULL,
+    target_price DOUBLE PRECISION NOT NULL,
+    reference_price DOUBLE PRECISION NOT NULL,
+    exchange_order_id TEXT NOT NULL DEFAULT '',
+    submission_status TEXT NOT NULL DEFAULT '',
+    submission_created_at TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reason TEXT NOT NULL DEFAULT '',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS news_validations (
     id UUID PRIMARY KEY,
     signal_id UUID NOT NULL UNIQUE,
@@ -151,14 +216,52 @@ CREATE TABLE IF NOT EXISTS news_validations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS analysis_cutoffs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    cutoff_name TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS settlement_events (
+    id UUID PRIMARY KEY,
+    position_key TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_market_snapshots_market_created_at
 ON market_snapshots (market_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pair_cycles_cycle_slug
+ON pair_cycles (cycle_slug, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pending_pair_orders_status
+ON pending_pair_orders (status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_pending_pair_orders_trade_group
+ON pending_pair_orders (trade_group_id, created_at DESC);
+
+ALTER TABLE pending_pair_orders ADD COLUMN IF NOT EXISTS exchange_order_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE pending_pair_orders ADD COLUMN IF NOT EXISTS submission_status TEXT NOT NULL DEFAULT '';
+ALTER TABLE pending_pair_orders ADD COLUMN IF NOT EXISTS submission_created_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_equity_snapshots_created_at
 ON equity_snapshots (created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_news_validations_signal_id
 ON news_validations (signal_id);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_cutoffs_created_at
+ON analysis_cutoffs (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_settlement_events_created_at
+ON settlement_events (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_settlement_events_market
+ON settlement_events (market_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_telemetry_created_at
 ON pipeline_telemetry (created_at DESC);
@@ -204,6 +307,10 @@ class Database:
 
 
 def _as_json(value: Any) -> str:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            return value
     return json.dumps(value, default=str)
 
 
@@ -297,17 +404,21 @@ class TradingRepository:
             status,
             _as_json(payload),
         )
-        if status == "simulated":
+        if status in {"simulated", "live_filled"}:
             action = str(payload.get("action") or "entry")
             if action in {"entry", "scale_in"}:
                 await self._upsert_position(
                     market_id=market_id,
+                    position_key=str(payload.get("position_key") or f"{market_id}:{payload['direction']}"),
                     token_id=str(payload.get("token_id", "")),
                     market_question=str(payload.get("market_question", "")),
                     asset_symbol=str(payload.get("asset_symbol", "")),
                     crypto_tier=str(payload.get("crypto_tier", "")),
                     strategy_id=str(payload.get("strategy_id", "")),
                     regime=str(payload.get("regime", "")),
+                    trade_group_id=str(payload.get("trade_group_id", "")),
+                    cycle_slug=str(payload.get("cycle_slug", "")),
+                    leg_role=str(payload.get("leg_role", "")),
                     direction=str(payload["direction"]),
                     size=int(payload["size"]),
                     average_price=float(payload["price_limit"]),
@@ -374,6 +485,23 @@ class TradingRepository:
             event_id,
             agent,
             event_type,
+            _as_json(payload),
+        )
+
+    async def record_settlement_event(
+        self,
+        settlement_id: str,
+        position_key: str,
+        market_id: str,
+        status: str,
+        payload: dict[str, Any],
+    ) -> None:
+        await self.db.execute(
+            "INSERT INTO settlement_events (id, position_key, market_id, status, payload) VALUES ($1::uuid, $2, $3, $4, $5::jsonb)",
+            settlement_id,
+            position_key,
+            market_id,
+            status,
             _as_json(payload),
         )
 
@@ -460,14 +588,16 @@ class TradingRepository:
             )
 
         latest_prices = await self._latest_market_prices([str(row["market_id"]) for row in rows])
+        pair_cycles = await self._current_pair_cycles([str(row["asset_symbol"] or "") for row in rows])
         total_exposure = 0.0
         current_market_value = 0.0
         for row in rows:
             total_exposure += float(row["exposure_usd"] or 0.0)
-            current_price = float(row["average_price"] or 0.0)
-            latest = latest_prices.get(str(row["market_id"]))
-            if latest:
-                current_price = float(latest["price_yes"] if row["direction"] == "YES" else latest["price_no"])
+            current_price, _ = self._mark_price_for_position(
+                row,
+                latest_prices.get(str(row["market_id"])),
+                pair_cycles.get(str(row["asset_symbol"] or "")),
+            )
             current_market_value += int(row["size"] or 0) * current_price
 
         unrealized_pnl = current_market_value - total_exposure
@@ -492,8 +622,16 @@ class TradingRepository:
         asset: str | None = None,
         tier: str | None = None,
         strategy: str | None = None,
+        cutoff_name: str | None = None,
     ) -> list[dict[str, Any]]:
-        return await self._recent_payloads("signals", limit=limit, asset=asset, tier=tier, strategy=strategy)
+        return await self._recent_payloads(
+            "signals",
+            limit=limit,
+            asset=asset,
+            tier=tier,
+            strategy=strategy,
+            cutoff_name=cutoff_name,
+        )
 
     async def get_recent_decisions(
         self,
@@ -502,8 +640,16 @@ class TradingRepository:
         asset: str | None = None,
         tier: str | None = None,
         strategy: str | None = None,
+        cutoff_name: str | None = None,
     ) -> list[dict[str, Any]]:
-        return await self._recent_payloads("agent_decisions", limit=limit, asset=asset, tier=tier, strategy=strategy)
+        return await self._recent_payloads(
+            "agent_decisions",
+            limit=limit,
+            asset=asset,
+            tier=tier,
+            strategy=strategy,
+            cutoff_name=cutoff_name,
+        )
 
     async def get_recent_orders(
         self,
@@ -512,8 +658,16 @@ class TradingRepository:
         asset: str | None = None,
         tier: str | None = None,
         strategy: str | None = None,
+        cutoff_name: str | None = None,
     ) -> list[dict[str, Any]]:
-        return await self._recent_payloads("paper_orders", limit=limit, asset=asset, tier=tier, strategy=strategy)
+        return await self._recent_payloads(
+            "paper_orders",
+            limit=limit,
+            asset=asset,
+            tier=tier,
+            strategy=strategy,
+            cutoff_name=cutoff_name,
+        )
 
     async def get_execution_risk_state(self, hours: int = 24) -> dict[str, Any]:
         window_start = datetime.now(UTC) - timedelta(hours=max(hours, 1))
@@ -578,21 +732,120 @@ class TradingRepository:
             "created_at": row["created_at"],
         }
 
-    async def get_recent_risk_events(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = await self.db.fetch("SELECT payload, created_at FROM risk_events ORDER BY created_at DESC LIMIT $1", limit)
+    async def create_analysis_cutoff(
+        self,
+        cutoff_name: str,
+        *,
+        created_at: datetime | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        created_at = created_at or datetime.now(UTC)
+        metadata = metadata or {}
+        row = await self.db.fetchrow(
+            """
+            INSERT INTO analysis_cutoffs (cutoff_name, created_at, metadata)
+            VALUES ($1, $2, $3::jsonb)
+            ON CONFLICT (cutoff_name) DO UPDATE
+            SET created_at = EXCLUDED.created_at,
+                metadata = EXCLUDED.metadata
+            RETURNING cutoff_name, created_at, metadata
+            """,
+            cutoff_name,
+            created_at,
+            _as_json(metadata),
+        )
+        assert row is not None
+        return {
+            "cutoff_name": str(row["cutoff_name"]),
+            "created_at": row["created_at"],
+            "metadata": self._json_value(row["metadata"]),
+        }
+
+    async def get_analysis_cutoffs(self) -> list[dict[str, Any]]:
+        rows = await self.db.fetch(
+            "SELECT cutoff_name, created_at, metadata FROM analysis_cutoffs ORDER BY created_at DESC, cutoff_name ASC"
+        )
+        return [
+            {
+                "cutoff_name": str(row["cutoff_name"]),
+                "created_at": row["created_at"],
+                "metadata": self._json_value(row["metadata"]),
+            }
+            for row in rows
+        ]
+
+    async def get_analysis_cutoff(self, cutoff_name: str) -> dict[str, Any] | None:
+        row = await self.db.fetchrow(
+            "SELECT cutoff_name, created_at, metadata FROM analysis_cutoffs WHERE cutoff_name = $1",
+            cutoff_name,
+        )
+        if row is None:
+            return None
+        return {
+            "cutoff_name": str(row["cutoff_name"]),
+            "created_at": row["created_at"],
+            "metadata": self._json_value(row["metadata"]),
+        }
+
+    async def get_recent_risk_events(
+        self,
+        limit: int = 20,
+        *,
+        cutoff_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        since = await self._cutoff_timestamp(cutoff_name)
+        if since is None:
+            rows = await self.db.fetch("SELECT payload, created_at FROM risk_events ORDER BY created_at DESC LIMIT $1", limit)
+        else:
+            rows = await self.db.fetch(
+                "SELECT payload, created_at FROM risk_events WHERE created_at >= $1 ORDER BY created_at DESC LIMIT $2",
+                since,
+                limit,
+            )
         return [self._decode_record(row) for row in rows]
 
-    async def get_recent_pipeline_telemetry(self, limit: int = 30) -> list[dict[str, Any]]:
+    async def get_recent_pipeline_telemetry(
+        self,
+        limit: int = 30,
+        *,
+        cutoff_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        since = await self._cutoff_timestamp(cutoff_name)
+        if since is None:
+            rows = await self.db.fetch(
+                """
+                SELECT agent, event_type, payload, created_at
+                FROM pipeline_telemetry
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+        else:
+            rows = await self.db.fetch(
+                """
+                SELECT agent, event_type, payload, created_at
+                FROM pipeline_telemetry
+                WHERE created_at >= $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                since,
+                limit,
+            )
+        return [self._decode_pipeline_record(row) for row in rows]
+
+    async def get_recent_settlement_events(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = await self.db.fetch(
             """
-            SELECT agent, event_type, payload, created_at
-            FROM pipeline_telemetry
+            SELECT payload, created_at
+            FROM settlement_events
             ORDER BY created_at DESC
             LIMIT $1
             """,
             limit,
         )
-        return [self._decode_pipeline_record(row) for row in rows]
+        return [self._decode_record(row) for row in rows]
 
     async def get_agent_status(self) -> list[dict[str, Any]]:
         rows = await self.db.fetch("SELECT agent, model, running, config_version, last_seen, meta FROM agent_heartbeats ORDER BY agent")
@@ -609,10 +862,18 @@ class TradingRepository:
         ]
 
     async def metrics_overview(self) -> dict[str, Any]:
-        signals = await self.db.fetchrow("SELECT COUNT(*) AS count FROM signals")
-        decisions = await self.db.fetchrow("SELECT COUNT(*) AS count FROM agent_decisions")
-        orders = await self.db.fetchrow("SELECT COUNT(*) AS count FROM paper_orders")
-        risk_events = await self.db.fetchrow("SELECT COUNT(*) AS count FROM risk_events")
+        return await self.metrics_overview_since(cutoff_name=None)
+
+    async def metrics_overview_since(self, cutoff_name: str | None = None) -> dict[str, Any]:
+        since = await self._cutoff_timestamp(cutoff_name)
+        signals = await self._count_rows_since("signals", since)
+        decisions = await self._count_rows_since("agent_decisions", since)
+        orders = await self._count_rows_since("paper_orders", since)
+        risk_events = await self._count_rows_since("risk_events", since)
+        pending_pair_orders = await self.db.fetchrow(
+            "SELECT COUNT(*) AS count FROM pending_pair_orders WHERE status = 'pending'"
+        )
+        pipeline_since = max(filter(None, [since, datetime.now(UTC) - timedelta(minutes=15)]), default=None)
         pipeline_rows = await self.db.fetch(
             """
             SELECT agent, event_type, payload, created_at
@@ -620,16 +881,18 @@ class TradingRepository:
             WHERE created_at >= $1
             ORDER BY created_at ASC
             """,
-            datetime.now(UTC) - timedelta(minutes=15),
+            pipeline_since or (datetime.now(UTC) - timedelta(minutes=15)),
         )
         pipeline_events = [self._decode_pipeline_record(row) for row in pipeline_rows]
         portfolio = await self.get_portfolio_summary()
         flow_summary = self._summarize_pipeline_events(pipeline_events, window_minutes=15)
         return {
+            "analysis_cutoff": await self.get_analysis_cutoff(cutoff_name) if cutoff_name else None,
             "signals": int(signals["count"] or 0),
             "decisions": int(decisions["count"] or 0),
             "orders": int(orders["count"] or 0),
             "risk_events": int(risk_events["count"] or 0),
+            "pending_pair_orders": int(pending_pair_orders["count"] or 0),
             "portfolio": portfolio.model_dump(),
             "flow_summary": flow_summary,
             "latest_scan_telemetry": self._latest_pipeline_event(pipeline_events, "scanner.scan_cycle"),
@@ -644,8 +907,12 @@ class TradingRepository:
         asset: str | None = None,
         tier: str | None = None,
         strategy: str | None = None,
+        cutoff_name: str | None = None,
     ) -> dict[str, Any]:
         window_start = datetime.now(UTC) - timedelta(hours=max(hours, 1))
+        cutoff = await self.get_analysis_cutoff(cutoff_name) if cutoff_name else None
+        if cutoff is not None and cutoff["created_at"] > window_start:
+            window_start = cutoff["created_at"]
         portfolio = await self.get_portfolio_summary()
         signal_rows = await self.db.fetch("SELECT payload, created_at FROM signals WHERE created_at >= $1 ORDER BY created_at ASC", window_start)
         decision_rows = await self.db.fetch(
@@ -695,6 +962,11 @@ class TradingRepository:
         orders_filtered = [
             item for item in orders_payloads if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)
         ]
+        pending_pair_orders = [
+            item
+            for item in await self.list_pending_pair_orders()
+            if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)
+        ]
         risk_filtered = [
             item
             for item in risk_payloads
@@ -741,6 +1013,10 @@ class TradingRepository:
         news_provider_breakdown = self._news_provider_breakdown(signals_filtered)
         news_fallback_breakdown = self._news_fallback_breakdown(signals_filtered)
         last_news_provider = self._last_news_provider(signals_filtered)
+        pair_trade_summary = self._pair_trade_summary(
+            simulated_orders,
+            pending_count=len(pending_pair_orders),
+        )
         time_series = self._build_pipeline_time_series(
             signals_filtered,
             decisions_filtered,
@@ -754,6 +1030,13 @@ class TradingRepository:
         return {
             "generated_at": datetime.now(UTC).isoformat(),
             "window_hours": hours,
+            "analysis_cutoff": {
+                "cutoff_name": cutoff["cutoff_name"],
+                "created_at": cutoff["created_at"].isoformat(),
+                "metadata": cutoff["metadata"],
+            }
+            if cutoff
+            else None,
             "asset_filter": asset or "",
             "tier_filter": tier or "",
             "strategy_filter": strategy or "",
@@ -795,6 +1078,7 @@ class TradingRepository:
             "news_provider_breakdown": news_provider_breakdown,
             "news_fallback_breakdown": news_fallback_breakdown,
             "last_news_provider": last_news_provider,
+            "pair_trade_summary": pair_trade_summary,
             "top_markets": top_markets,
             "open_positions": open_positions[:8],
             "mae_mfe": mae_mfe,
@@ -836,6 +1120,241 @@ class TradingRepository:
             _as_json([snapshot.model_dump(mode="json") for snapshot in snapshots]),
         )
 
+    async def upsert_pair_cycle(self, state: PairCycleStatePayload) -> None:
+        payload = state.model_dump(mode="json")
+        await self.db.execute(
+            """
+            INSERT INTO pair_cycles (
+                asset_symbol, asset_name, crypto_tier, cycle_slug, cycle_start, market_id, market_question,
+                token_id_yes, token_id_no, price_yes, price_no, status, side_counts, max_buy_counts_per_side,
+                last_signal_direction, last_signal_at, last_quote_at, predictor_state, metadata, created_at, updated_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12, $13::jsonb, $14,
+                $15, $16, $17, $18::jsonb, $19::jsonb, $20, $21
+            )
+            ON CONFLICT (asset_symbol) DO UPDATE
+            SET asset_name = EXCLUDED.asset_name,
+                crypto_tier = EXCLUDED.crypto_tier,
+                cycle_slug = EXCLUDED.cycle_slug,
+                cycle_start = EXCLUDED.cycle_start,
+                market_id = EXCLUDED.market_id,
+                market_question = EXCLUDED.market_question,
+                token_id_yes = EXCLUDED.token_id_yes,
+                token_id_no = EXCLUDED.token_id_no,
+                price_yes = EXCLUDED.price_yes,
+                price_no = EXCLUDED.price_no,
+                status = EXCLUDED.status,
+                side_counts = EXCLUDED.side_counts,
+                max_buy_counts_per_side = EXCLUDED.max_buy_counts_per_side,
+                last_signal_direction = EXCLUDED.last_signal_direction,
+                last_signal_at = EXCLUDED.last_signal_at,
+                last_quote_at = EXCLUDED.last_quote_at,
+                predictor_state = EXCLUDED.predictor_state,
+                metadata = EXCLUDED.metadata,
+                updated_at = EXCLUDED.updated_at
+            """,
+            state.asset_symbol,
+            state.asset_name,
+            state.crypto_tier,
+            state.cycle_slug,
+            state.cycle_start,
+            state.market_id,
+            state.market_question,
+            state.token_id_yes,
+            state.token_id_no,
+            state.price_yes,
+            state.price_no,
+            state.status,
+            _as_json(payload["side_counts"]),
+            state.max_buy_counts_per_side,
+            state.last_signal_direction,
+            state.last_signal_at,
+            state.last_quote_at,
+            _as_json(payload["predictor_state"]),
+            _as_json(payload["metadata"]),
+            state.updated_at,
+            state.updated_at,
+        )
+
+    async def get_pair_cycle(self, asset_symbol: str) -> dict[str, Any] | None:
+        row = await self.db.fetchrow(
+            """
+            SELECT asset_symbol, asset_name, crypto_tier, cycle_slug, cycle_start, market_id, market_question,
+                   token_id_yes, token_id_no, price_yes, price_no, status, side_counts, max_buy_counts_per_side,
+                   last_signal_direction, last_signal_at, last_quote_at, predictor_state, metadata, updated_at
+            FROM pair_cycles
+            WHERE asset_symbol = $1
+            """,
+            asset_symbol,
+        )
+        if row is None:
+            return None
+        return {
+            "asset_symbol": row["asset_symbol"],
+            "asset_name": row["asset_name"],
+            "crypto_tier": row["crypto_tier"],
+            "cycle_slug": row["cycle_slug"],
+            "cycle_start": row["cycle_start"],
+            "market_id": row["market_id"],
+            "market_question": row["market_question"],
+            "token_id_yes": row["token_id_yes"],
+            "token_id_no": row["token_id_no"],
+            "price_yes": float(row["price_yes"] or 0.0),
+            "price_no": float(row["price_no"] or 0.0),
+            "status": row["status"],
+            "side_counts": self._json_value(row["side_counts"]),
+            "max_buy_counts_per_side": int(row["max_buy_counts_per_side"] or 0),
+            "last_signal_direction": row["last_signal_direction"],
+            "last_signal_at": row["last_signal_at"],
+            "last_quote_at": row["last_quote_at"],
+            "predictor_state": self._json_value(row["predictor_state"]),
+            "metadata": self._json_value(row["metadata"]),
+            "updated_at": row["updated_at"],
+        }
+
+    async def upsert_pending_pair_order(self, pending: PendingPairOrderPayload) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO pending_pair_orders (
+                pending_order_id, trade_group_id, signal_id, cycle_slug, market_id, market_question, asset_symbol,
+                crypto_tier, strategy_id, position_key, token_id, direction, leg_role, size, target_price,
+                reference_price, exchange_order_id, submission_status, submission_created_at, status, reason, payload,
+                created_at, updated_at
+            )
+            VALUES (
+                $1::uuid, $2, $3::uuid, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12, $13, $14, $15,
+                $16, $17, $18, $19, $20, $21, $22::jsonb, $23, $24
+            )
+            ON CONFLICT (pending_order_id) DO UPDATE
+            SET trade_group_id = EXCLUDED.trade_group_id,
+                signal_id = EXCLUDED.signal_id,
+                cycle_slug = EXCLUDED.cycle_slug,
+                market_id = EXCLUDED.market_id,
+                market_question = EXCLUDED.market_question,
+                asset_symbol = EXCLUDED.asset_symbol,
+                crypto_tier = EXCLUDED.crypto_tier,
+                strategy_id = EXCLUDED.strategy_id,
+                position_key = EXCLUDED.position_key,
+                token_id = EXCLUDED.token_id,
+                direction = EXCLUDED.direction,
+                leg_role = EXCLUDED.leg_role,
+                size = EXCLUDED.size,
+                target_price = EXCLUDED.target_price,
+                reference_price = EXCLUDED.reference_price,
+                exchange_order_id = EXCLUDED.exchange_order_id,
+                submission_status = EXCLUDED.submission_status,
+                submission_created_at = EXCLUDED.submission_created_at,
+                status = EXCLUDED.status,
+                reason = EXCLUDED.reason,
+                payload = EXCLUDED.payload,
+                updated_at = EXCLUDED.updated_at
+            """,
+            pending.pending_order_id,
+            pending.trade_group_id,
+            pending.signal_id,
+            pending.cycle_slug,
+            pending.market_id,
+            pending.market_question,
+            pending.asset_symbol,
+            pending.crypto_tier,
+            pending.strategy_id,
+            pending.position_key,
+            pending.token_id,
+            pending.direction,
+            pending.leg_role,
+            pending.size,
+            pending.target_price,
+            pending.reference_price,
+            pending.exchange_order_id,
+            pending.submission_status,
+            pending.submission_created_at,
+            pending.status,
+            pending.reason,
+            _as_json(pending.model_dump(mode="json")),
+            pending.created_at,
+            pending.updated_at,
+        )
+
+    async def list_pending_pair_orders(self, status: str = "pending") -> list[dict[str, Any]]:
+        rows = await self.db.fetch(
+            """
+            SELECT pending_order_id, trade_group_id, signal_id, cycle_slug, market_id, market_question, asset_symbol,
+                   crypto_tier, strategy_id, position_key, token_id, direction, leg_role, size, target_price,
+                   reference_price, exchange_order_id, submission_status, submission_created_at, status, reason, payload,
+                   created_at, updated_at
+            FROM pending_pair_orders
+            WHERE status = $1
+            ORDER BY created_at ASC
+            """,
+            status,
+        )
+        pending_orders: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._json_value(row["payload"])
+            pending_orders.append(
+                {
+                    "pending_order_id": str(row["pending_order_id"]),
+                    "trade_group_id": row["trade_group_id"],
+                    "signal_id": str(row["signal_id"]),
+                    "cycle_slug": row["cycle_slug"],
+                    "market_id": row["market_id"],
+                    "market_question": row["market_question"],
+                    "asset_symbol": row["asset_symbol"],
+                    "crypto_tier": row["crypto_tier"],
+                    "strategy_id": row["strategy_id"],
+                    "position_key": row["position_key"],
+                    "token_id": row["token_id"],
+                    "direction": row["direction"],
+                    "leg_role": row["leg_role"],
+                    "size": int(row["size"] or 0),
+                    "target_price": float(row["target_price"] or 0.0),
+                    "reference_price": float(row["reference_price"] or 0.0),
+                    "exchange_order_id": row["exchange_order_id"],
+                    "submission_status": row["submission_status"],
+                    "submission_created_at": row["submission_created_at"],
+                    "status": row["status"],
+                    "reason": row["reason"],
+                    "payload": payload,
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return pending_orders
+
+    async def resolve_pending_pair_order(
+        self,
+        pending_order_id: str,
+        *,
+        status: str,
+        reason: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        existing = await self.db.fetchrow(
+            "SELECT payload FROM pending_pair_orders WHERE pending_order_id = $1::uuid",
+            pending_order_id,
+        )
+        merged_payload = self._json_value(existing["payload"]) if existing is not None else {}
+        if payload:
+            merged_payload.update(payload)
+        await self.db.execute(
+            """
+            UPDATE pending_pair_orders
+            SET status = $2,
+                reason = $3,
+                payload = $4::jsonb,
+                updated_at = $5
+            WHERE pending_order_id = $1::uuid
+            """,
+            pending_order_id,
+            status,
+            reason,
+            _as_json(merged_payload),
+            datetime.now(UTC),
+        )
+
     async def get_equity_history(self, limit: int = 100) -> list[dict[str, Any]]:
         rows = await self.db.fetch(
             """
@@ -874,7 +1393,8 @@ class TradingRepository:
         rows = await self.db.fetch(
             """
             SELECT market_id, position_key, token_id, market_question, direction, size, average_price, exposure_usd, updated_at
-                 , asset_symbol, crypto_tier, strategy_id, regime, take_profit_price, stop_loss_price, time_stop_minutes
+                 , asset_symbol, crypto_tier, strategy_id, regime, trade_group_id, cycle_slug, leg_role
+                 , take_profit_price, stop_loss_price, time_stop_minutes
                  , opened_at, scaled_out_count
             FROM positions
             WHERE size > 0
@@ -882,16 +1402,14 @@ class TradingRepository:
             """
         )
         latest_prices = await self._latest_market_prices([str(row["market_id"]) for row in rows])
+        pair_cycles = await self._current_pair_cycles([str(row["asset_symbol"] or "") for row in rows])
         positions: list[dict[str, Any]] = []
         for row in rows:
-            latest = latest_prices.get(str(row["market_id"]))
-            current_price = float(row["average_price"] or 0.0)
-            latest_spread_bps = 0.0
-            if latest:
-                current_price = float(latest["price_yes"] if row["direction"] == "YES" else latest["price_no"])
-                payload = latest.get("payload") or {}
-                summary_key = "orderbook_summary_yes" if row["direction"] == "YES" else "orderbook_summary_no"
-                latest_spread_bps = float(((payload.get(summary_key) or {}).get("spread_bps")) or 0.0)
+            current_price, latest_spread_bps = self._mark_price_for_position(
+                row,
+                latest_prices.get(str(row["market_id"])),
+                pair_cycles.get(str(row["asset_symbol"] or "")),
+            )
             size = int(row["size"] or 0)
             cost_basis = float(row["exposure_usd"] or 0.0)
             current_value = size * current_price
@@ -905,6 +1423,9 @@ class TradingRepository:
                     "crypto_tier": row["crypto_tier"],
                     "strategy_id": row["strategy_id"],
                     "regime": row["regime"],
+                    "trade_group_id": row["trade_group_id"],
+                    "cycle_slug": row["cycle_slug"],
+                    "leg_role": row["leg_role"],
                     "direction": row["direction"],
                     "size": size,
                     "average_price": float(row["average_price"] or 0.0),
@@ -1011,9 +1532,14 @@ class TradingRepository:
         asset: str | None = None,
         tier: str | None = None,
         strategy: str | None = None,
+        cutoff_name: str | None = None,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         args: list[Any] = []
+        since = await self._cutoff_timestamp(cutoff_name)
+        if since is not None:
+            args.append(since)
+            clauses.append(f"created_at >= ${len(args)}")
         if asset:
             args.append(asset.upper())
             clauses.append(f"payload->>'asset_symbol' = ${len(args)}")
@@ -1028,6 +1554,19 @@ class TradingRepository:
         query = f"SELECT payload, created_at FROM {table} {where} ORDER BY created_at DESC LIMIT ${len(args)}"
         rows = await self.db.fetch(query, *args)
         return [self._decode_record(row) for row in rows]
+
+    async def _cutoff_timestamp(self, cutoff_name: str | None) -> datetime | None:
+        if not cutoff_name:
+            return None
+        cutoff = await self.get_analysis_cutoff(cutoff_name)
+        if cutoff is None:
+            return None
+        return cutoff["created_at"]
+
+    async def _count_rows_since(self, table: str, since: datetime | None) -> asyncpg.Record | None:
+        if since is None:
+            return await self.db.fetchrow(f"SELECT COUNT(*) AS count FROM {table}")
+        return await self.db.fetchrow(f"SELECT COUNT(*) AS count FROM {table} WHERE created_at >= $1", since)
 
     @staticmethod
     def _matches_filters(
@@ -1097,6 +1636,44 @@ class TradingRepository:
             }
             for key in keys
         ]
+
+    @staticmethod
+    def _pair_trade_summary(orders: list[dict[str, Any]], *, pending_count: int) -> dict[str, Any]:
+        groups: dict[str, dict[str, Any]] = {}
+        for item in orders:
+            if str(item.get("strategy_id") or "") != "pair_15m":
+                continue
+            trade_group_id = str(item.get("trade_group_id") or "").strip()
+            if not trade_group_id:
+                continue
+            bucket = groups.setdefault(
+                trade_group_id,
+                {
+                    "legs": set(),
+                    "primary_notional": 0.0,
+                    "hedge_notional": 0.0,
+                },
+            )
+            leg_role = str(item.get("leg_role") or "").strip().lower()
+            if leg_role:
+                bucket["legs"].add(leg_role)
+            notional = float(item.get("notional_usd") or 0.0)
+            if leg_role == "primary":
+                bucket["primary_notional"] += notional
+            elif leg_role == "hedge":
+                bucket["hedge_notional"] += notional
+        fully_hedged = sum(1 for bucket in groups.values() if {"primary", "hedge"}.issubset(bucket["legs"]))
+        primary_only = sum(1 for bucket in groups.values() if "primary" in bucket["legs"] and "hedge" not in bucket["legs"])
+        orphan_hedges = sum(1 for bucket in groups.values() if "hedge" in bucket["legs"] and "primary" not in bucket["legs"])
+        return {
+            "groups": len(groups),
+            "fully_hedged_groups": fully_hedged,
+            "primary_only_groups": primary_only,
+            "orphan_hedge_groups": orphan_hedges,
+            "pending_hedges": pending_count,
+            "primary_notional": round(sum(float(bucket["primary_notional"]) for bucket in groups.values()), 4),
+            "hedge_notional": round(sum(float(bucket["hedge_notional"]) for bucket in groups.values()), 4),
+        }
 
     @staticmethod
     def _news_breakdown(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1281,12 +1858,16 @@ class TradingRepository:
     async def _upsert_position(
         self,
         market_id: str,
+        position_key: str,
         token_id: str,
         market_question: str,
         asset_symbol: str,
         crypto_tier: str,
         strategy_id: str,
         regime: str,
+        trade_group_id: str,
+        cycle_slug: str,
+        leg_role: str,
         direction: str,
         size: int,
         average_price: float,
@@ -1295,14 +1876,14 @@ class TradingRepository:
         stop_loss_price: float | None,
         time_stop_minutes: int | None,
     ) -> None:
-        position_key = f"{market_id}:{direction}"
         await self.db.execute(
             """
             INSERT INTO positions (
                 market_id, position_key, token_id, market_question, asset_symbol, crypto_tier, strategy_id, regime,
-                direction, size, average_price, exposure_usd, take_profit_price, stop_loss_price, time_stop_minutes, opened_at, updated_at
+                trade_group_id, cycle_slug, leg_role, direction, size, average_price, exposure_usd,
+                take_profit_price, stop_loss_price, time_stop_minutes, opened_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
             ON CONFLICT (position_key) DO UPDATE
             SET token_id = EXCLUDED.token_id,
                 market_question = EXCLUDED.market_question,
@@ -1310,6 +1891,9 @@ class TradingRepository:
                 crypto_tier = EXCLUDED.crypto_tier,
                 strategy_id = COALESCE(NULLIF(EXCLUDED.strategy_id, ''), positions.strategy_id),
                 regime = COALESCE(NULLIF(EXCLUDED.regime, ''), positions.regime),
+                trade_group_id = COALESCE(NULLIF(EXCLUDED.trade_group_id, ''), positions.trade_group_id),
+                cycle_slug = COALESCE(NULLIF(EXCLUDED.cycle_slug, ''), positions.cycle_slug),
+                leg_role = COALESCE(NULLIF(EXCLUDED.leg_role, ''), positions.leg_role),
                 direction = EXCLUDED.direction,
                 size = positions.size + EXCLUDED.size,
                 average_price = CASE
@@ -1331,6 +1915,9 @@ class TradingRepository:
             crypto_tier,
             strategy_id,
             regime,
+            trade_group_id,
+            cycle_slug,
+            leg_role,
             direction,
             size,
             average_price,
@@ -1400,24 +1987,103 @@ class TradingRepository:
             for row in rows
         }
 
+    @staticmethod
+    def _mark_price_for_position(
+        row: asyncpg.Record | dict[str, Any],
+        latest: dict[str, Any] | None,
+        pair_cycle: dict[str, Any] | None = None,
+    ) -> tuple[float, float]:
+        if isinstance(row, dict):
+            average_price = float(row.get("average_price") or 0.0)
+            direction = str(row.get("direction") or "")
+            cycle_slug = str(row.get("cycle_slug") or "")
+        else:
+            average_price = float(row["average_price"] or 0.0)
+            direction = str(row["direction"] or "")
+            cycle_slug = str(row.get("cycle_slug") or "")
+        if pair_cycle and str(pair_cycle.get("cycle_slug") or "") == cycle_slug:
+            price_yes = float(pair_cycle.get("price_yes") or 0.0)
+            price_no = float(pair_cycle.get("price_no") or 0.0)
+            pair_sum = price_yes + price_no
+            if price_yes > 0 and price_no > 0 and pair_sum <= 1.1:
+                return (price_yes if direction == "YES" else price_no), 0.0
+        if not latest:
+            return average_price, 0.0
+        payload = latest.get("payload") or {}
+        summary_key = "orderbook_summary_yes" if direction == "YES" else "orderbook_summary_no"
+        summary = payload.get(summary_key) or {}
+        best_bid = float(summary.get("best_bid") or 0.0)
+        best_ask = float(summary.get("best_ask") or 0.0)
+        spread_bps = float(summary.get("spread_bps") or 0.0)
+        if best_bid > 0:
+            return best_bid, spread_bps
+        if best_ask > 0:
+            return best_ask, spread_bps
+        price_yes = float(latest.get("price_yes") or 0.0)
+        price_no = float(latest.get("price_no") or 0.0)
+        pair_sum = price_yes + price_no
+        if price_yes > 0 and price_no > 0 and pair_sum <= 1.1:
+            return (price_yes if direction == "YES" else price_no), spread_bps
+        if price_yes > 0 and price_no > 0 and pair_sum > 1.1:
+            return average_price, spread_bps
+        if direction == "YES" and price_yes > 0 and price_yes <= 0.99:
+            return price_yes, spread_bps
+        if direction == "NO" and price_no > 0 and price_no <= 0.99:
+            return price_no, spread_bps
+        return average_price, spread_bps
+
+    async def _current_pair_cycles(self, asset_symbols: list[str]) -> dict[str, dict[str, Any]]:
+        unique_assets = [asset for asset in dict.fromkeys(asset_symbols) if asset]
+        if not unique_assets:
+            return {}
+        rows = await self.db.fetch(
+            """
+            SELECT asset_symbol, cycle_slug, price_yes, price_no, updated_at
+            FROM pair_cycles
+            WHERE asset_symbol = ANY($1::text[])
+            """,
+            unique_assets,
+        )
+        return {
+            str(row["asset_symbol"]): {
+                "cycle_slug": str(row["cycle_slug"] or ""),
+                "price_yes": float(row["price_yes"] or 0.0),
+                "price_no": float(row["price_no"] or 0.0),
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        }
+
     def _decode_record(self, row: asyncpg.Record) -> dict[str, Any]:
         payload = row["payload"]
-        if isinstance(payload, str):
-            payload = json.loads(payload)
+        payload = self._json_value(payload)
         payload["created_at"] = row["created_at"]
         return payload
 
-    @staticmethod
-    def _decode_pipeline_record(row: asyncpg.Record) -> dict[str, Any]:
-        payload = row["payload"]
-        if isinstance(payload, str):
-            payload = json.loads(payload)
+    @classmethod
+    def _decode_pipeline_record(cls, row: asyncpg.Record) -> dict[str, Any]:
+        payload = cls._json_value(row["payload"])
         return {
             "agent": row["agent"],
             "event_type": row["event_type"],
             "created_at": row["created_at"],
             **payload,
         }
+
+    @staticmethod
+    def _json_value(value: Any) -> dict[str, Any]:
+        if value in (None, ""):
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            decoded = json.loads(value)
+            if isinstance(decoded, dict):
+                return decoded
+            if isinstance(decoded, str):
+                return TradingRepository._json_value(decoded)
+            return {}
+        return dict(value)
 
     @staticmethod
     def _latest_pipeline_event(events: list[dict[str, Any]], event_type: str) -> dict[str, Any] | None:

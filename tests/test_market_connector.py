@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+
 import pytest
 
 from core.config import load_crypto_config
@@ -25,6 +27,8 @@ class FakeContext:
             polymarket_funder="",
             polymarket_signature_type=0,
             polymarket_chain_id=137,
+            polymarket_live_min_usdc_balance=5.0,
+            polymarket_sync_balance_allowance_on_startup=False,
         )
         self.crypto_config = load_crypto_config()
         self.repository = FakeRepository()
@@ -43,6 +47,23 @@ async def test_place_order_returns_simulated_when_live_disabled() -> None:
     )
     assert result["status"] == "simulated"
     assert result["order"]["token_id"] == "token-1"
+
+
+@pytest.mark.asyncio
+async def test_place_order_returns_simulated_pending_when_open_position_disabled() -> None:
+    connector = MarketConnector(FakeContext(live_trading=False))
+    result = await connector.place_order(
+        market_id="market-1",
+        token_id="token-hedge-1",
+        direction="NO",
+        size=5,
+        price_limit=0.38,
+        open_position=False,
+    )
+
+    assert result["status"] == "simulated_pending"
+    assert result["exchange_order_id"].startswith("paper-")
+    assert result["response"]["orderID"] == result["exchange_order_id"]
 
 
 @pytest.mark.asyncio
@@ -91,6 +112,125 @@ async def test_place_order_uses_py_clob_client_when_live_enabled(monkeypatch) ->
     assert created["order_args"].token_id == "token-1"
     assert created["order_args"].side == "BUY"
     assert created["post"]["signed_order"]["signed"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_live_bootstrap_status_reports_paper_mode() -> None:
+    connector = MarketConnector(FakeContext(live_trading=False))
+
+    result = await connector.get_live_bootstrap_status()
+
+    assert result["mode"] == "paper"
+    assert result["ready"] is True
+    assert result["checks"][0]["name"] == "live_trading_mode"
+
+
+@pytest.mark.asyncio
+async def test_get_live_bootstrap_status_validates_balance_and_allowance(monkeypatch) -> None:
+    sync_calls = {"count": 0}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def get_address(self):
+            return "0xFunder"
+
+        def create_or_derive_api_creds(self):
+            return SimpleNamespace(api_key="key", api_secret="secret", api_passphrase="pass")
+
+        def get_server_time(self):
+            return {"epoch": 12345}
+
+        def update_balance_allowance(self, params):
+            sync_calls["count"] += 1
+
+        def get_balance_allowance(self, params):
+            return {"balance": "12.50", "allowance": "25.00"}
+
+    monkeypatch.setattr("core.market_connector.ClobClient", FakeClient)
+
+    connector = MarketConnector(FakeContext(live_trading=True))
+    result = await connector.get_live_bootstrap_status(sync_allowance=True)
+
+    assert result["mode"] == "live"
+    assert result["ready"] is True
+    assert result["api_creds_source"] == "derived"
+    assert result["parsed_collateral"]["balance"] == pytest.approx(12.5)
+    assert result["parsed_collateral"]["allowance"] == pytest.approx(25.0)
+    assert sync_calls["count"] == 1
+    assert any(check["name"] == "allowance_sync" for check in result["checks"])
+
+
+@pytest.mark.asyncio
+async def test_get_live_bootstrap_status_requires_private_key_in_live_mode() -> None:
+    context = FakeContext(live_trading=True)
+    context.settings.polymarket_private_key = ""
+    connector = MarketConnector(context)
+
+    result = await connector.get_live_bootstrap_status()
+
+    assert result["mode"] == "live"
+    assert result["ready"] is False
+    assert result["checks"][0]["name"] == "private_key"
+
+
+@pytest.mark.asyncio
+async def test_stream_market_enables_best_bid_ask_and_handles_ping(monkeypatch) -> None:
+    sent_messages: list[str] = []
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.messages = iter(
+                [
+                    "PING",
+                    json.dumps({"event_type": "subscription_success"}),
+                    json.dumps(
+                        {
+                            "event_type": "best_bid_ask",
+                            "asset_id": "token-1",
+                            "best_bid": "0.40",
+                            "best_ask": "0.41",
+                        }
+                    ),
+                ]
+            )
+
+        async def send(self, message: str) -> None:
+            sent_messages.append(message)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.messages)
+            except StopIteration as exc:  # pragma: no cover - async iterator protocol
+                raise StopAsyncIteration from exc
+
+    class FakeConnect:
+        def __init__(self):
+            self.websocket = FakeWebSocket()
+
+        async def __aenter__(self):
+            return self.websocket
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    connector = MarketConnector(FakeContext(live_trading=False))
+    monkeypatch.setattr("core.market_connector.websockets.connect", lambda *args, **kwargs: FakeConnect())
+
+    messages = []
+    async for payload in connector.stream_market(["token-1"]):
+        messages.append(payload)
+
+    assert len(messages) == 1
+    assert messages[0]["event_type"] == "best_bid_ask"
+    subscription_message = json.loads(sent_messages[0])
+    assert subscription_message["assets_ids"] == ["token-1"]
+    assert subscription_message["custom_feature_enabled"] is True
+    assert "PONG" in sent_messages
 
 
 @pytest.mark.asyncio
@@ -150,6 +290,31 @@ async def test_get_active_markets_parses_json_encoded_arrays(monkeypatch) -> Non
     assert markets[0]["question_type"] == "upside_target"
     assert markets[0]["thesis_hash"]
     assert markets[0]["orderbook_summary_yes"]["best_bid"] == 0.4
+
+
+@pytest.mark.asyncio
+async def test_get_market_resolution_derives_winning_direction_from_outcome_prices(monkeypatch) -> None:
+    payload = {
+        "id": "market-1",
+        "question": "Will BTC close higher?",
+        "outcomePrices": ["0.99", "0.01"],
+        "closed": True,
+    }
+
+    async def fake_get_market_by_id(self, market_id: str):
+        assert market_id == "market-1"
+        return payload
+
+    monkeypatch.setattr(MarketConnector, "get_market_by_id", fake_get_market_by_id)
+
+    connector = MarketConnector(FakeContext(live_trading=False))
+    result = await connector.get_market_resolution("market-1")
+
+    assert result["found"] is True
+    assert result["resolved"] is True
+    assert result["winning_direction"] == "YES"
+    assert result["payout_yes"] == pytest.approx(0.99)
+    assert result["payout_no"] == pytest.approx(0.01)
 
 
 @pytest.mark.asyncio

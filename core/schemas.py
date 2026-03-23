@@ -113,6 +113,9 @@ class PaperOrderPayload(BaseModel):
     position_key: str = ""
     strategy_id: str = ""
     regime: str = ""
+    trade_group_id: str = ""
+    cycle_slug: str = ""
+    leg_role: str = ""
     take_profit_price: float | None = None
     stop_loss_price: float | None = None
     time_stop_minutes: int | None = None
@@ -123,10 +126,169 @@ class PaperOrderPayload(BaseModel):
     realized_pnl_usd: float = 0.0
     exit_reason: str = ""
     execution_mode: Literal["deterministic", "llm", "llm_fallback"] = "deterministic"
-    status: Literal["simulated", "blocked"] = "simulated"
+    status: Literal["simulated", "simulated_pending", "blocked", "live_submitted", "live_filled"] = "simulated"
     reason: str = ""
     news_validation: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class PairLegPlan(BaseModel):
+    market_id: str
+    token_id: str
+    direction: Literal["YES", "NO"]
+    leg_role: Literal["primary", "hedge"]
+    size: int
+    target_price: float
+    reference_price: float
+    current_ask: float
+    current_bid: float = 0.0
+
+
+class PairSignalPayload(BaseModel):
+    version: str = "v1"
+    event_type: Literal["pair_signal.created"] = "pair_signal.created"
+    signal_id: str
+    trade_group_id: str
+    cycle_slug: str
+    cycle_start: datetime
+    market_id: str
+    market_question: str
+    asset_symbol: str
+    asset_name: str
+    crypto_tier: Literal["btc", "major", "small_cap"]
+    strategy_id: str = "pair_15m"
+    strategy_version: str = "v1"
+    predictor_direction: Literal["up", "down"]
+    predictor_signal: Literal["BUY_UP", "BUY_DOWN"]
+    predictor_confidence: float
+    side_count_state: dict[str, Any] = Field(default_factory=dict)
+    primary_leg: PairLegPlan
+    hedge_leg: PairLegPlan
+    reasoning: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class PairReviewPayload(BaseModel):
+    version: str = "v1"
+    event_type: Literal["pair_signal.reviewed"] = "pair_signal.reviewed"
+    signal_id: str
+    trade_group_id: str
+    asset_symbol: str
+    crypto_tier: Literal["btc", "major", "small_cap"] | None = None
+    strategy_id: str = "pair_15m"
+    approved: bool
+    review_mode: Literal["deterministic", "llm", "llm_fallback"] = "deterministic"
+    notes: str = ""
+    llm_notes: str = ""
+    approved_primary_leg: PairLegPlan
+    approved_hedge_leg: PairLegPlan
+    original_signal: PairSignalPayload
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class PairOrderPayload(BaseModel):
+    version: str = "v1"
+    event_type: Literal["pair_order.submitted"] = "pair_order.submitted"
+    order_id: str
+    signal_id: str
+    trade_group_id: str
+    cycle_slug: str
+    market_id: str
+    token_id: str
+    market_question: str = ""
+    asset_symbol: str = ""
+    crypto_tier: Literal["btc", "major", "small_cap"] | None = None
+    strategy_id: str = "pair_15m"
+    position_key: str = ""
+    leg_role: Literal["primary", "hedge"]
+    direction: Literal["YES", "NO"]
+    size: int
+    price_limit: float
+    reference_price: float
+    notional_usd: float
+    hedge_status: str = ""
+    status: Literal["simulated", "simulated_pending", "blocked", "live_submitted", "live_filled"] = "simulated"
+    reason: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class PendingPairOrderPayload(BaseModel):
+    version: str = "v1"
+    event_type: Literal["pair_order.pending"] = "pair_order.pending"
+    pending_order_id: str
+    trade_group_id: str
+    signal_id: str
+    cycle_slug: str
+    market_id: str
+    market_question: str = ""
+    asset_symbol: str = ""
+    crypto_tier: Literal["btc", "major", "small_cap"] | None = None
+    strategy_id: str = "pair_15m"
+    position_key: str = ""
+    token_id: str
+    direction: Literal["YES", "NO"]
+    leg_role: Literal["hedge"] = "hedge"
+    size: int
+    target_price: float
+    reference_price: float
+    exchange_order_id: str = ""
+    submission_status: str = ""
+    submission_created_at: datetime | None = None
+    status: Literal["pending", "filled", "cancelled", "expired"] = "pending"
+    reason: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class SettlementEventPayload(BaseModel):
+    version: str = "v1"
+    event_type: Literal["settlement.processed"] = "settlement.processed"
+    settlement_id: str
+    market_id: str
+    position_key: str
+    token_id: str
+    market_question: str = ""
+    asset_symbol: str = ""
+    strategy_id: str = ""
+    trade_group_id: str = ""
+    cycle_slug: str = ""
+    leg_role: str = ""
+    direction: Literal["YES", "NO"]
+    size: int
+    average_price: float
+    payout_price: float
+    payout_usd: float
+    cost_basis_usd: float
+    realized_pnl_usd: float
+    status: Literal["dry_run", "settled", "skipped"] = "dry_run"
+    reason: str = ""
+    resolution: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class PairCycleStatePayload(BaseModel):
+    asset_symbol: str
+    asset_name: str
+    crypto_tier: Literal["btc", "major", "small_cap"]
+    cycle_slug: str
+    cycle_start: datetime
+    market_id: str
+    market_question: str
+    token_id_yes: str
+    token_id_no: str
+    price_yes: float = 0.0
+    price_no: float = 0.0
+    status: Literal["active", "paused", "rolled"] = "active"
+    side_counts: dict[str, int] = Field(default_factory=dict)
+    max_buy_counts_per_side: int = 1
+    last_signal_direction: Literal["YES", "NO"] | None = None
+    last_signal_at: datetime | None = None
+    last_quote_at: datetime | None = None
+    predictor_state: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class RiskEventPayload(BaseModel):

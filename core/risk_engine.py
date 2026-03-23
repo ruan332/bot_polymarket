@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from core.exceptions import RiskBlockedError
-from core.schemas import PortfolioSummary, ReviewPayload, SignalPayload
+from core.schemas import PairReviewPayload, PairSignalPayload, PortfolioSummary, ReviewPayload, SignalPayload
 from core.utils import clamp
 
 if TYPE_CHECKING:
@@ -19,6 +19,15 @@ class ExecutionGuard:
     price_limit: float
     notional_usd: float
     risk_fraction: float
+
+
+@dataclass
+class PairExecutionGuard:
+    primary_position_key: str
+    hedge_position_key: str
+    primary_notional_usd: float
+    hedge_notional_usd: float
+    total_notional_usd: float
 
 
 class RiskEngine:
@@ -83,6 +92,31 @@ class RiskEngine:
 
     async def portfolio_state(self) -> PortfolioSummary:
         return await self.context.repository.get_portfolio_summary()
+
+    async def validate_pair_signal(self, signal: PairSignalPayload) -> None:
+        if signal.strategy_id != "pair_15m":
+            raise RiskBlockedError("pair signal strategy_id must be pair_15m")
+        if not signal.cycle_slug or not signal.market_id:
+            raise RiskBlockedError("pair signal missing cycle_slug or market_id")
+        cycle_end = signal.cycle_start.astimezone(UTC) + timedelta(minutes=15)
+        if datetime.now(UTC) >= cycle_end:
+            raise RiskBlockedError("pair cycle already rolled over")
+        if signal.primary_leg.direction == signal.hedge_leg.direction:
+            raise RiskBlockedError("pair trade requires opposite hedge direction")
+        if signal.primary_leg.size <= 0 or signal.hedge_leg.size <= 0:
+            raise RiskBlockedError("pair trade size must be positive")
+        if signal.primary_leg.target_price <= 0 or signal.hedge_leg.target_price <= 0:
+            raise RiskBlockedError("pair trade prices must be positive")
+        if signal.primary_leg.target_price > self.config.max_order_price:
+            raise RiskBlockedError("primary leg exceeds max_order_price")
+        if signal.hedge_leg.target_price > self.config.max_order_price:
+            raise RiskBlockedError("hedge leg exceeds max_order_price")
+        max_per_side = int(signal.side_count_state.get("max_per_side") or 0)
+        if max_per_side > 0:
+            side_key = signal.primary_leg.direction.lower()
+            current_count = int(signal.side_count_state.get(side_key) or 0)
+            if current_count >= max_per_side:
+                raise RiskBlockedError("pair trade side limit already reached")
 
     def build_exit_plan(self, signal: SignalPayload) -> dict[str, float | int]:
         edge_buffer = max(signal.edge, 0.03)
@@ -202,6 +236,42 @@ class RiskEngine:
             price_limit=price_limit,
             notional_usd=notional,
             risk_fraction=round(risk_fraction, 4),
+        )
+
+    async def build_pair_execution_guard(self, review: PairReviewPayload) -> PairExecutionGuard:
+        signal = review.original_signal
+        await self.validate_pair_signal(signal)
+        portfolio = await self.portfolio_state()
+        positions = await self._open_positions()
+        tier_name = review.crypto_tier or signal.crypto_tier
+        tier = self.tier_settings(tier_name)
+        primary_notional = round(review.approved_primary_leg.size * review.approved_primary_leg.target_price, 4)
+        hedge_notional = round(review.approved_hedge_leg.size * review.approved_hedge_leg.target_price, 4)
+        total_notional = round(primary_notional + hedge_notional, 4)
+        max_pair_notional = min(self.config.max_single_position_usd, tier.max_position_usd)
+        if total_notional > max_pair_notional:
+            raise RiskBlockedError("pair trade notional exceeds max_single_position_usd")
+        if portfolio.available_balance < primary_notional:
+            raise RiskBlockedError("available balance is below primary leg notional")
+        effective_daily_limit = max(self.config.max_daily_spend_usd, max_pair_notional)
+        risk_state = await self._recent_execution_state()
+        if risk_state["daily_spend_usd"] + total_notional > effective_daily_limit:
+            raise RiskBlockedError("pair trade would exceed max_daily_spend_usd")
+        if portfolio.total_exposure + total_notional > self.config.max_total_exposure_usd:
+            raise RiskBlockedError("pair trade would exceed max_total_exposure_usd")
+        conflicting_positions = [
+            item
+            for item in positions
+            if str(item.get("market_id")) == signal.market_id and str(item.get("strategy_id") or "") != "pair_15m"
+        ]
+        if conflicting_positions:
+            raise RiskBlockedError("non-pair position already open for this market")
+        return PairExecutionGuard(
+            primary_position_key=f"{review.trade_group_id}:{review.approved_primary_leg.direction}",
+            hedge_position_key=f"{review.trade_group_id}:{review.approved_hedge_leg.direction}",
+            primary_notional_usd=primary_notional,
+            hedge_notional_usd=hedge_notional,
+            total_notional_usd=total_notional,
         )
 
     async def _open_positions(self) -> list[dict[str, Any]]:

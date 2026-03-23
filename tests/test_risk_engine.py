@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -7,7 +8,7 @@ import pytest
 from core.config import load_crypto_config
 from core.exceptions import RiskBlockedError
 from core.risk_engine import RiskEngine
-from core.schemas import PortfolioSummary, ReviewPayload, SignalPayload
+from core.schemas import PairLegPlan, PairReviewPayload, PairSignalPayload, PortfolioSummary, ReviewPayload, SignalPayload
 
 
 def make_context(*, positions: list[dict[str, object]] | None = None):
@@ -123,6 +124,61 @@ def make_review(signal: SignalPayload) -> ReviewPayload:
         kelly_size=0,
         risk_fraction=0.1,
         notes="test",
+        original_signal=signal,
+    )
+
+
+def make_pair_signal() -> PairSignalPayload:
+    return PairSignalPayload(
+        signal_id="pair-signal-1",
+        trade_group_id="pair-group-1",
+        cycle_slug="btc-updown-15m-123",
+        cycle_start=datetime.now(UTC),
+        market_id="pair-market-1",
+        market_question="Will BTC be above current price in 15 minutes?",
+        asset_symbol="BTC",
+        asset_name="Bitcoin",
+        crypto_tier="btc",
+        predictor_direction="up",
+        predictor_signal="BUY_UP",
+        predictor_confidence=0.7,
+        side_count_state={"yes": 0, "no": 0, "max_per_side": 2},
+        primary_leg=PairLegPlan(
+            market_id="pair-market-1",
+            token_id="token-yes-1",
+            direction="YES",
+            leg_role="primary",
+            size=2,
+            target_price=0.45,
+            reference_price=0.45,
+            current_ask=0.45,
+            current_bid=0.44,
+        ),
+        hedge_leg=PairLegPlan(
+            market_id="pair-market-1",
+            token_id="token-no-1",
+            direction="NO",
+            leg_role="hedge",
+            size=2,
+            target_price=0.40,
+            reference_price=0.45,
+            current_ask=0.42,
+            current_bid=0.41,
+        ),
+        reasoning="pair signal",
+    )
+
+
+def make_pair_review(signal: PairSignalPayload) -> PairReviewPayload:
+    return PairReviewPayload(
+        signal_id=signal.signal_id,
+        trade_group_id=signal.trade_group_id,
+        asset_symbol=signal.asset_symbol,
+        crypto_tier=signal.crypto_tier,
+        approved=True,
+        approved_primary_leg=signal.primary_leg,
+        approved_hedge_leg=signal.hedge_leg,
+        notes="pair ok",
         original_signal=signal,
     )
 
@@ -281,3 +337,43 @@ async def test_build_execution_guard_uses_tighter_exposure_cap_for_synthetic_cry
 
     with pytest.raises(RiskBlockedError, match="asset exposure exceeds max_asset_exposure_fraction"):
         await risk.build_execution_guard(make_review(incoming_signal))
+
+
+@pytest.mark.asyncio
+async def test_validate_pair_signal_accepts_opposite_legs_inside_cycle() -> None:
+    risk = RiskEngine(make_context())
+
+    await risk.validate_pair_signal(make_pair_signal())
+
+
+@pytest.mark.asyncio
+async def test_build_pair_execution_guard_blocks_non_pair_position_same_market() -> None:
+    signal = make_pair_signal()
+    risk = RiskEngine(
+        make_context(
+            positions=[
+                {
+                    "market_id": signal.market_id,
+                    "direction": "YES",
+                    "asset_symbol": "BTC",
+                    "strategy_id": "trend_follow_bayes",
+                    "cost_basis_usd": 30.0,
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(RiskBlockedError, match="non-pair position already open for this market"):
+        await risk.build_pair_execution_guard(make_pair_review(signal))
+
+
+@pytest.mark.asyncio
+async def test_build_pair_execution_guard_returns_trade_group_position_keys() -> None:
+    signal = make_pair_signal()
+    risk = RiskEngine(make_context())
+
+    guard = await risk.build_pair_execution_guard(make_pair_review(signal))
+
+    assert guard.primary_position_key == "pair-group-1:YES"
+    assert guard.hedge_position_key == "pair-group-1:NO"
+    assert guard.total_notional_usd == pytest.approx(1.7)

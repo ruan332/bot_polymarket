@@ -1,0 +1,4 @@
+interface:
+  display_name: "VPS Bot Maintenance"
+  short_description: "Manutencao SSH da VPS do bot"
+  default_prompt: "Use $vps-maintenance-bot-polymarket para diagnosticar e manter a VPS do bot_polymarket com seguranca."

@@ -1,19 +1,33 @@
 services:
   postgres:
     image: timescale/timescaledb:latest-pg15
+    env_file:
+      - .env
     environment:
       POSTGRES_DB: trading
       POSTGRES_USER: trading
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
   api:
     build:
@@ -25,10 +39,18 @@ services:
     env_file:
       - .env
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   agents:
     build:
@@ -40,9 +62,12 @@ services:
     env_file:
       - .env
     depends_on:
-      - postgres
-      - redis
-      - api
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
 
   dashboard:
     build:
@@ -51,9 +76,10 @@ services:
       args:
         NEXT_PUBLIC_API_URL: http://localhost:8000
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "3000:3000"
 
 volumes:
-  pgdata:
+  postgres_data:

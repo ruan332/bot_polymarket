@@ -7,6 +7,7 @@ from agents.base import BaseAgent
 from core.app_context import AppContext
 from core.exceptions import InvalidModelResponseError, RiskBlockedError
 from core.market_connector import MarketConnector
+from core.momentum_strategy import MomentumTradingEngine
 from core.pair_strategy import PairTradingEngine
 from core.risk_engine import RiskEngine
 from core.schemas import MarketSnapshotPayload, SignalPayload
@@ -20,11 +21,15 @@ class ClaudeAgent(BaseAgent):
         self.risk = RiskEngine(context)
         self.strategy = StrategyEngine(context)
         self.pair_engine = PairTradingEngine(context, self.connector)
+        self.momentum_engine = MomentumTradingEngine(context, self.connector)
 
     async def tick(self) -> None:
-        if self.context.settings.copytrade_enabled:
+        if self.context.settings.copytrade_enabled or self.context.settings.momentum_trading_enabled:
             await self.context.repository.record_equity_snapshot(source="scan_cycle")
-            await self.pair_engine.tick()
+            if self.context.settings.copytrade_enabled:
+                await self.pair_engine.tick()
+            if self.context.settings.momentum_trading_enabled:
+                await self.momentum_engine.tick()
             return
         agent_cfg = self.context.agents_config.agents[self.name]
         markets = await self.connector.get_active_markets(
@@ -186,5 +191,6 @@ class ClaudeAgent(BaseAgent):
 
     async def close(self) -> None:
         await super().close()
+        await self.momentum_engine.close()
         await self.pair_engine.close()
         await self.connector.close()

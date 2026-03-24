@@ -68,6 +68,13 @@ class RiskEngine:
             min_edge += self.crypto.indirect_min_edge_buffer
             min_confidence = clamp(min_confidence + self.crypto.indirect_min_confidence_buffer, 0.0, 0.99)
             min_volume *= self.crypto.indirect_min_volume_multiplier
+        if signal.strategy_id == "momentum_15m":
+            momentum_min_edge = float(getattr(self.context.settings, "momentum_min_edge", min_edge) or min_edge)
+            momentum_min_volume = float(
+                getattr(self.context.settings, "momentum_min_volume_24h", min_volume) or min_volume
+            )
+            min_edge = min(min_edge, momentum_min_edge)
+            min_volume = min(min_volume, momentum_min_volume)
 
         if signal.edge < min_edge:
             raise RiskBlockedError(f"edge below minimum ({signal.edge:.3f} < {min_edge:.3f})")
@@ -179,6 +186,16 @@ class RiskEngine:
             raise RiskBlockedError("single position notional exceeds max_single_position_usd")
         if portfolio.total_exposure + notional > self.config.max_total_exposure_usd:
             raise RiskBlockedError("portfolio exposure exceeds max_total_exposure_usd")
+        pair_position = next(
+            (
+                item
+                for item in positions
+                if str(item.get("market_id")) == signal.market_id and str(item.get("strategy_id") or "") == "pair_15m"
+            ),
+            None,
+        )
+        if pair_position is not None:
+            raise RiskBlockedError("pair position already open for this market")
         existing_position = next(
             (
                 item
@@ -197,9 +214,15 @@ class RiskEngine:
         )
         if opposite_position is not None:
             raise RiskBlockedError("opposite position already open for this market")
+        if signal.strategy_id == "momentum_15m":
+            momentum_positions = sum(
+                1 for item in positions if str(item.get("strategy_id") or "") == "momentum_15m"
+            )
+            if momentum_positions >= int(getattr(self.context.settings, "momentum_max_positions", 2) or 2) and existing_position is None:
+                raise RiskBlockedError("momentum max positions reached")
         if portfolio.open_positions >= self.config.max_open_positions and existing_position is None:
             raise RiskBlockedError("max_open_positions reached")
-        effective_daily_limit = max(self.config.max_daily_spend_usd, max_position_usd)
+        effective_daily_limit = self.config.max_daily_spend_usd
         if risk_state["daily_spend_usd"] + notional > effective_daily_limit:
             raise RiskBlockedError("daily spend would exceed max_daily_spend_usd")
 
@@ -253,7 +276,7 @@ class RiskEngine:
             raise RiskBlockedError("pair trade notional exceeds max_single_position_usd")
         if portfolio.available_balance < primary_notional:
             raise RiskBlockedError("available balance is below primary leg notional")
-        effective_daily_limit = max(self.config.max_daily_spend_usd, max_pair_notional)
+        effective_daily_limit = self.config.max_daily_spend_usd
         risk_state = await self._recent_execution_state()
         if risk_state["daily_spend_usd"] + total_notional > effective_daily_limit:
             raise RiskBlockedError("pair trade would exceed max_daily_spend_usd")

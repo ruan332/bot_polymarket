@@ -168,9 +168,38 @@ async def performance_report(
     )
 
 
+@app.get("/metrics/risk-breakdown")
+async def risk_breakdown_report(
+    hours: int = 24,
+    asset: str | None = None,
+    tier: str | None = None,
+    strategy: str | None = None,
+    cutoff_name: str | None = None,
+) -> dict[str, object]:
+    return await get_context().repository.get_risk_breakdown_report(
+        hours=hours,
+        asset=asset,
+        tier=tier,
+        strategy=strategy,
+        cutoff_name=cutoff_name,
+    )
+
+
 @app.get("/risk-events/recent")
-async def recent_risk_events(limit: int = 20, cutoff_name: str | None = None) -> list[dict[str, object]]:
-    return await get_context().repository.get_recent_risk_events(limit=limit, cutoff_name=cutoff_name)
+async def recent_risk_events(
+    limit: int = 20,
+    asset: str | None = None,
+    tier: str | None = None,
+    strategy: str | None = None,
+    cutoff_name: str | None = None,
+) -> list[dict[str, object]]:
+    return await get_context().repository.get_recent_risk_events(
+        limit=limit,
+        asset=asset,
+        tier=tier,
+        strategy=strategy,
+        cutoff_name=cutoff_name,
+    )
 
 
 @app.get("/metrics/pipeline/recent")

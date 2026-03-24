@@ -123,7 +123,7 @@ class RiskSettings(BaseModel):
     max_strategy_exposure_fraction: float = 0.25
     max_single_position_usd: float = 100.0
     max_total_exposure_usd: float = 250.0
-    max_daily_spend_usd: float = 5.0
+    max_daily_spend_usd: float = 50.0
     min_market_volume_24h: float = 5000.0
     max_order_price: float = 0.90
     max_spread_bps: int = 250
@@ -180,7 +180,7 @@ class AppSettings(BaseSettings):
     execution_llm_enabled: bool = False
     review_llm_fail_open: bool = False
     execution_llm_fail_open: bool = True
-    max_daily_spend_usd: float = 5.0
+    max_daily_spend_usd: float = 50.0
     max_single_position_usd: float = 100.0
     paper_bankroll_usd: float = 1000.0
     agent_heartbeat_ttl_seconds: int = 45
@@ -222,10 +222,30 @@ class AppSettings(BaseSettings):
     copytrade_signal_confidence_threshold: float = 0.50
     copytrade_noise_threshold: float = 0.02
     copytrade_min_history_points: int = 6
+    momentum_enabled: bool = False
+    momentum_markets: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    momentum_min_edge: float = 0.085
+    momentum_min_volume_24h: float = 500.0
+    momentum_signal_confidence_threshold: float = 0.62
+    momentum_min_history_points: int = 6
+    momentum_cooldown_minutes: int = 20
+    momentum_max_positions: int = 2
+    momentum_wait_for_next_market_start: bool = False
 
     @field_validator("copytrade_markets", mode="before")
     @classmethod
     def parse_copytrade_markets(cls, value: Any) -> list[str]:
+        if value in (None, "", []):
+            return []
+        if isinstance(value, str):
+            return [item.strip().upper() for item in value.split(",") if item.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip().upper() for item in value if str(item).strip()]
+        return [str(value).strip().upper()]
+
+    @field_validator("momentum_markets", mode="before")
+    @classmethod
+    def parse_momentum_markets(cls, value: Any) -> list[str]:
         if value in (None, "", []):
             return []
         if isinstance(value, str):
@@ -239,6 +259,8 @@ class AppSettings(BaseSettings):
         "copytrade_second_leg_base_price",
         "copytrade_signal_confidence_threshold",
         "copytrade_noise_threshold",
+        "momentum_min_edge",
+        "momentum_signal_confidence_threshold",
     )
     @classmethod
     def validate_copytrade_probability(cls, value: float) -> float:
@@ -246,9 +268,20 @@ class AppSettings(BaseSettings):
             raise ValueError("value must be between 0 and 1")
         return value
 
+    @field_validator("momentum_min_volume_24h", "momentum_min_history_points", "momentum_cooldown_minutes", "momentum_max_positions")
+    @classmethod
+    def validate_positive_momentum_settings(cls, value: int | float) -> int | float:
+        if value < 0:
+            raise ValueError("value must be non-negative")
+        return value
+
     @property
     def copytrade_enabled(self) -> bool:
         return bool(self.copytrade_markets)
+
+    @property
+    def momentum_trading_enabled(self) -> bool:
+        return self.momentum_enabled and bool(self.momentum_markets)
 
 
 def get_enabled_agent_names(settings: AppSettings, agents_config: AgentsConfig) -> list[str]:

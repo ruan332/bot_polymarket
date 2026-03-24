@@ -293,8 +293,45 @@ class FakeRepository:
         items = [item for item in self.orders if self._matches(item, asset, tier, strategy)]
         return list(reversed(items[-limit:]))
 
-    async def get_recent_risk_events(self, limit: int = 20, cutoff_name: str | None = None):
+    async def get_recent_risk_events(
+        self,
+        limit: int = 20,
+        *,
+        asset: str | None = None,
+        tier: str | None = None,
+        strategy: str | None = None,
+        cutoff_name: str | None = None,
+    ):
         return list(reversed(self.risk_events[-limit:]))
+
+    async def get_risk_breakdown_report(
+        self,
+        hours: int = 24,
+        *,
+        asset: str | None = None,
+        tier: str | None = None,
+        strategy: str | None = None,
+        cutoff_name: str | None = None,
+    ):
+        return {
+            "generated_at": "2026-03-18T12:00:00Z",
+            "window_hours": hours,
+            "asset_filter": asset or "",
+            "tier_filter": tier or "",
+            "strategy_filter": strategy or "",
+            "total_events": len(self.risk_events),
+            "by_reason": [{"label": "review rejected signal", "count": 1}] if self.risk_events else [],
+            "by_strategy": [{"label": strategy or "trend_follow_bayes", "count": len(self.risk_events)}] if self.risk_events else [],
+            "by_strategy_reason": [
+                {
+                    "label": strategy or "trend_follow_bayes",
+                    "count": len(self.risk_events),
+                    "reasons": [{"label": "review rejected signal", "count": 1}],
+                }
+            ]
+            if self.risk_events
+            else [],
+        }
 
     async def get_recent_pipeline_telemetry(self, limit: int = 30, cutoff_name: str | None = None):
         return list(reversed(self.pipeline_events[-limit:]))
@@ -387,6 +424,7 @@ class FakeRepository:
                 "selected_for_scan": sum(int(item.get("selected_for_scan") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
                 "strategy_candidates": sum(int(item.get("strategy_candidates") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
                 "reached_risk_engine": sum(int(item.get("reached_risk_engine") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
+                "pre_risk_blocked": sum(int(item.get("pre_risk_blocked") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
                 "risk_passed": sum(int(item.get("risk_passed") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
                 "risk_blocked": sum(int(item.get("risk_blocked") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
                 "duplicates_blocked": sum(int(item.get("duplicates_blocked") or 0) for item in self.pipeline_events if item["event_type"] == "scanner.scan_cycle"),
@@ -459,6 +497,13 @@ class FakeRepository:
             },
             "cost_by_agent": [{"agent": "claude", "cost_usd": 0.01, "calls": 1}],
             "risk_breakdown": [{"label": "review rejected signal", "count": 1}],
+            "risk_breakdown_by_strategy": [
+                {
+                    "label": "trend_follow_bayes",
+                    "count": 1,
+                    "reasons": [{"label": "review rejected signal", "count": 1}],
+                }
+            ],
             "asset_breakdown": [{"label": "BTC", "count": len(signals)}],
             "tier_breakdown": [{"label": "btc", "count": len(signals)}],
             "strategy_breakdown": [{"label": "trend_follow_bayes", "signals": len(signals), "orders": len(orders), "realized_pnl_usd": 0.0}],
@@ -576,9 +621,18 @@ class FakeContext:
             copytrade_signal_confidence_threshold=0.5,
             copytrade_noise_threshold=0.02,
             copytrade_min_history_points=6,
+            momentum_enabled=False,
+            momentum_markets=[],
+            momentum_trading_enabled=False,
+            momentum_signal_confidence_threshold=0.62,
+            momentum_min_history_points=6,
+            momentum_cooldown_minutes=20,
+            momentum_max_positions=2,
+            momentum_wait_for_next_market_start=False,
         )
         self.agents_config = load_agents_config()
         self.risk_config = load_risk_config()
+        self.risk_config.max_daily_spend_usd = 100.0
         self.crypto_config = load_crypto_config()
         self.repository = FakeRepository()
         self.bus = FakeBus()
@@ -689,6 +743,33 @@ async def test_signal_news_review_execute_flow_smoke(monkeypatch) -> None:
     portfolio = await context.repository.get_portfolio_summary()
     assert portfolio.open_positions == 1
     assert portfolio.total_exposure > 0
+
+
+@pytest.mark.asyncio
+async def test_claude_agent_runs_pair_and_momentum_engines_when_both_enabled(monkeypatch) -> None:
+    context = FakeContext()
+    context.settings.copytrade_enabled = True
+    context.settings.copytrade_markets = ["BTC"]
+    context.settings.momentum_enabled = True
+    context.settings.momentum_markets = ["BTC"]
+    context.settings.momentum_trading_enabled = True
+    agent = ClaudeAgent(context)
+    calls: list[str] = []
+
+    async def fake_pair_tick():
+        calls.append("pair")
+        return {"persisted_signals": 0}
+
+    async def fake_momentum_tick():
+        calls.append("momentum")
+        return {"persisted_signals": 0}
+
+    monkeypatch.setattr(agent.pair_engine, "tick", fake_pair_tick)
+    monkeypatch.setattr(agent.momentum_engine, "tick", fake_momentum_tick)
+
+    await agent.tick()
+
+    assert calls == ["pair", "momentum"]
 
 
 @pytest.mark.asyncio

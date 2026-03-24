@@ -164,6 +164,34 @@ def test_app_settings_copytrade_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.copytrade_second_leg_base_price == pytest.approx(0.98)
 
 
+def test_app_settings_momentum_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in (
+        "MOMENTUM_ENABLED",
+        "MOMENTUM_MARKETS",
+        "MOMENTUM_MIN_EDGE",
+        "MOMENTUM_MIN_VOLUME_24H",
+        "MOMENTUM_SIGNAL_CONFIDENCE_THRESHOLD",
+        "MOMENTUM_MIN_HISTORY_POINTS",
+        "MOMENTUM_COOLDOWN_MINUTES",
+        "MOMENTUM_MAX_POSITIONS",
+        "MOMENTUM_WAIT_FOR_NEXT_MARKET_START",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = AppSettings(_env_file=None)
+
+    assert settings.momentum_enabled is False
+    assert settings.momentum_markets == []
+    assert settings.momentum_trading_enabled is False
+    assert settings.momentum_min_edge == pytest.approx(0.085)
+    assert settings.momentum_min_volume_24h == pytest.approx(500.0)
+    assert settings.momentum_signal_confidence_threshold == pytest.approx(0.62)
+    assert settings.momentum_min_history_points == 6
+    assert settings.momentum_cooldown_minutes == 20
+    assert settings.momentum_max_positions == 2
+    assert settings.momentum_wait_for_next_market_start is False
+
+
 def test_app_settings_copytrade_env_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COPYTRADE_MARKETS", "btc, eth ")
     monkeypatch.setenv("COPYTRADE_SHARES", "3")
@@ -179,6 +207,31 @@ def test_app_settings_copytrade_env_parses_csv(monkeypatch: pytest.MonkeyPatch) 
     assert settings.copytrade_max_buy_counts_per_side == 2
     assert settings.copytrade_wait_for_next_market_start is True
     assert settings.copytrade_price_buffer == pytest.approx(0.015)
+
+
+def test_app_settings_momentum_env_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOMENTUM_ENABLED", "true")
+    monkeypatch.setenv("MOMENTUM_MARKETS", "btc, eth ")
+    monkeypatch.setenv("MOMENTUM_MIN_EDGE", "0.09")
+    monkeypatch.setenv("MOMENTUM_MIN_VOLUME_24H", "750")
+    monkeypatch.setenv("MOMENTUM_SIGNAL_CONFIDENCE_THRESHOLD", "0.68")
+    monkeypatch.setenv("MOMENTUM_MIN_HISTORY_POINTS", "8")
+    monkeypatch.setenv("MOMENTUM_COOLDOWN_MINUTES", "30")
+    monkeypatch.setenv("MOMENTUM_MAX_POSITIONS", "3")
+    monkeypatch.setenv("MOMENTUM_WAIT_FOR_NEXT_MARKET_START", "true")
+
+    settings = AppSettings(_env_file=None)
+
+    assert settings.momentum_enabled is True
+    assert settings.momentum_markets == ["BTC", "ETH"]
+    assert settings.momentum_trading_enabled is True
+    assert settings.momentum_min_edge == pytest.approx(0.09)
+    assert settings.momentum_min_volume_24h == pytest.approx(750.0)
+    assert settings.momentum_signal_confidence_threshold == pytest.approx(0.68)
+    assert settings.momentum_min_history_points == 8
+    assert settings.momentum_cooldown_minutes == 30
+    assert settings.momentum_max_positions == 3
+    assert settings.momentum_wait_for_next_market_start is True
 
 
 def test_app_settings_live_bootstrap_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

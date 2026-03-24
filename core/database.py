@@ -791,18 +791,78 @@ class TradingRepository:
         self,
         limit: int = 20,
         *,
+        asset: str | None = None,
+        tier: str | None = None,
+        strategy: str | None = None,
         cutoff_name: str | None = None,
     ) -> list[dict[str, Any]]:
         since = await self._cutoff_timestamp(cutoff_name)
         if since is None:
-            rows = await self.db.fetch("SELECT payload, created_at FROM risk_events ORDER BY created_at DESC LIMIT $1", limit)
+            rows = await self.db.fetch(
+                "SELECT agent, reason, payload, created_at FROM risk_events ORDER BY created_at DESC LIMIT $1",
+                limit,
+            )
         else:
             rows = await self.db.fetch(
-                "SELECT payload, created_at FROM risk_events WHERE created_at >= $1 ORDER BY created_at DESC LIMIT $2",
+                "SELECT agent, reason, payload, created_at FROM risk_events WHERE created_at >= $1 ORDER BY created_at DESC LIMIT $2",
                 since,
                 limit,
             )
-        return [self._decode_record(row) for row in rows]
+        events = await self._normalize_risk_payloads([self._decode_record(row) for row in rows])
+        return [
+            item
+            for item in events
+            if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy, allow_missing=True)
+        ]
+
+    async def get_risk_breakdown_report(
+        self,
+        hours: int = 24,
+        *,
+        asset: str | None = None,
+        tier: str | None = None,
+        strategy: str | None = None,
+        cutoff_name: str | None = None,
+    ) -> dict[str, Any]:
+        window_start = datetime.now(UTC) - timedelta(hours=max(hours, 1))
+        cutoff = await self.get_analysis_cutoff(cutoff_name) if cutoff_name else None
+        if cutoff is not None and cutoff["created_at"] > window_start:
+            window_start = cutoff["created_at"]
+        risk_rows = await self.db.fetch(
+            "SELECT agent, reason, payload, created_at FROM risk_events WHERE created_at >= $1 ORDER BY created_at ASC",
+            window_start,
+        )
+        risk_payloads = await self._normalize_risk_payloads([self._decode_record(row) for row in risk_rows])
+        risk_filtered = [
+            item
+            for item in risk_payloads
+            if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy, allow_missing=True)
+        ]
+        return {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "window_hours": hours,
+            "analysis_cutoff": {
+                "cutoff_name": cutoff["cutoff_name"],
+                "created_at": cutoff["created_at"].isoformat(),
+                "metadata": cutoff["metadata"],
+            }
+            if cutoff
+            else None,
+            "asset_filter": asset or "",
+            "tier_filter": tier or "",
+            "strategy_filter": strategy or "",
+            "total_events": len(risk_filtered),
+            "by_reason": self._count_by_key(risk_filtered, "reason", limit=12),
+            "by_strategy": self._count_by_key(risk_filtered, "strategy_id", limit=8, missing_label="unknown"),
+            "by_strategy_reason": self._group_count_by_keys(
+                risk_filtered,
+                group_key="strategy_id",
+                item_key="reason",
+                group_limit=8,
+                item_limit=6,
+                missing_group_label="unknown",
+            ),
+        }
 
     async def get_recent_pipeline_telemetry(
         self,
@@ -870,6 +930,14 @@ class TradingRepository:
         decisions = await self._count_rows_since("agent_decisions", since)
         orders = await self._count_rows_since("paper_orders", since)
         risk_events = await self._count_rows_since("risk_events", since)
+        signal_rows = await self.db.fetch(
+            "SELECT payload, created_at FROM signals" if since is None else "SELECT payload, created_at FROM signals WHERE created_at >= $1",
+            *(tuple() if since is None else (since,)),
+        )
+        order_rows = await self.db.fetch(
+            "SELECT payload, created_at FROM paper_orders" if since is None else "SELECT payload, created_at FROM paper_orders WHERE created_at >= $1",
+            *(tuple() if since is None else (since,)),
+        )
         pending_pair_orders = await self.db.fetchrow(
             "SELECT COUNT(*) AS count FROM pending_pair_orders WHERE status = 'pending'"
         )
@@ -884,6 +952,8 @@ class TradingRepository:
             pipeline_since or (datetime.now(UTC) - timedelta(minutes=15)),
         )
         pipeline_events = [self._decode_pipeline_record(row) for row in pipeline_rows]
+        signal_payloads = [self._decode_record(row) for row in signal_rows]
+        order_payloads = [self._decode_record(row) for row in order_rows]
         portfolio = await self.get_portfolio_summary()
         flow_summary = self._summarize_pipeline_events(pipeline_events, window_minutes=15)
         return {
@@ -895,6 +965,7 @@ class TradingRepository:
             "pending_pair_orders": int(pending_pair_orders["count"] or 0),
             "portfolio": portfolio.model_dump(),
             "flow_summary": flow_summary,
+            "strategy_breakdown": self._strategy_breakdown(signal_payloads, order_payloads),
             "latest_scan_telemetry": self._latest_pipeline_event(pipeline_events, "scanner.scan_cycle"),
             "latest_review_telemetry": self._latest_pipeline_event(pipeline_events, "reviewer.review_cycle"),
             "latest_execution_telemetry": self._latest_pipeline_event(pipeline_events, "executor.execute_cycle"),
@@ -951,7 +1022,7 @@ class TradingRepository:
         signals_payloads = [self._decode_record(row) for row in signal_rows]
         decisions_payloads = [self._decode_record(row) for row in decision_rows]
         orders_payloads = [self._decode_record(row) for row in order_rows]
-        risk_payloads = [self._decode_record(row) for row in risk_event_rows]
+        risk_payloads = await self._normalize_risk_payloads([self._decode_record(row) for row in risk_event_rows])
 
         signals_filtered = [
             item for item in signals_payloads if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)
@@ -982,8 +1053,9 @@ class TradingRepository:
         open_positions = [item for item in open_positions if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)]
         positive_positions = sum(1 for position in open_positions if float(position["unrealized_pnl"]) > 0)
 
-        signal_edges = [float(item.get("edge") or 0.0) for item in signals_filtered]
-        signal_confidences = [float(item.get("confidence") or 0.0) for item in signals_filtered]
+        signal_metrics = [self._signal_metrics(item) for item in signals_filtered]
+        signal_edges = [item["edge"] for item in signal_metrics]
+        signal_confidences = [item["confidence"] for item in signal_metrics]
         simulated_orders = [item for item in orders_filtered if str(item.get("status")) == "simulated"]
         entry_orders = [item for item in simulated_orders if str(item.get("action") or "entry") in {"entry", "scale_in"}]
         exit_orders = [item for item in simulated_orders if str(item.get("action") or "") in {"scale_out", "close"}]
@@ -1004,6 +1076,14 @@ class TradingRepository:
 
         top_markets = self._top_markets(signals_filtered, order_count_by_market)
         risk_breakdown = self._count_by_key(risk_filtered, "reason", limit=8)
+        risk_breakdown_by_strategy = self._group_count_by_keys(
+            risk_filtered,
+            group_key="strategy_id",
+            item_key="reason",
+            group_limit=6,
+            item_limit=5,
+            missing_group_label="unknown",
+        )
         asset_breakdown = self._count_by_key(signals_filtered, "asset_symbol", limit=8)
         tier_breakdown = self._count_by_key(signals_filtered, "crypto_tier", limit=3)
         strategy_breakdown = self._strategy_breakdown(signals_filtered, simulated_orders)
@@ -1069,6 +1149,7 @@ class TradingRepository:
                 for row in llm_cost_rows
             ],
             "risk_breakdown": risk_breakdown,
+            "risk_breakdown_by_strategy": risk_breakdown_by_strategy,
             "asset_breakdown": asset_breakdown,
             "tier_breakdown": tier_breakdown,
             "strategy_breakdown": strategy_breakdown,
@@ -1601,15 +1682,52 @@ class TradingRepository:
         return True
 
     @staticmethod
-    def _count_by_key(items: list[dict[str, Any]], key: str, *, limit: int) -> list[dict[str, Any]]:
+    def _count_by_key(
+        items: list[dict[str, Any]],
+        key: str,
+        *,
+        limit: int,
+        missing_label: str = "unknown",
+    ) -> list[dict[str, Any]]:
         counts: dict[str, int] = {}
         for item in items:
             value = str(item.get(key) or "").strip()
             if not value:
-                continue
+                value = missing_label
             counts[value] = counts.get(value, 0) + 1
         ordered = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
         return [{"label": label, "count": count} for label, count in ordered[:limit]]
+
+    @classmethod
+    def _group_count_by_keys(
+        cls,
+        items: list[dict[str, Any]],
+        *,
+        group_key: str,
+        item_key: str,
+        group_limit: int,
+        item_limit: int,
+        missing_group_label: str = "unknown",
+        missing_item_label: str = "unknown",
+    ) -> list[dict[str, Any]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in items:
+            group_label = str(item.get(group_key) or "").strip() or missing_group_label
+            grouped.setdefault(group_label, []).append(item)
+        ordered_groups = sorted(grouped.items(), key=lambda pair: (-len(pair[1]), pair[0]))[:group_limit]
+        return [
+            {
+                "label": label,
+                "count": len(group_items),
+                "reasons": cls._count_by_key(
+                    group_items,
+                    item_key,
+                    limit=item_limit,
+                    missing_label=missing_item_label,
+                ),
+            }
+            for label, group_items in ordered_groups
+        ]
 
     @staticmethod
     def _strategy_breakdown(signals: list[dict[str, Any]], orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1636,6 +1754,22 @@ class TradingRepository:
             }
             for key in keys
         ]
+
+    @staticmethod
+    def _signal_metrics(item: dict[str, Any]) -> dict[str, float]:
+        strategy_id = str(item.get("strategy_id") or "").strip()
+        edge = float(item.get("edge") or 0.0)
+        confidence = float(item.get("confidence") or 0.0)
+        if strategy_id == "pair_15m":
+            confidence = float(item.get("predictor_confidence") or confidence or 0.0)
+            primary_leg = item.get("primary_leg") or {}
+            try:
+                target_price = float(primary_leg.get("target_price") or 0.0)
+                reference_price = float(primary_leg.get("reference_price") or 0.0)
+                edge = abs(target_price - reference_price)
+            except (TypeError, ValueError, AttributeError):
+                edge = 0.0
+        return {"edge": edge, "confidence": confidence}
 
     @staticmethod
     def _pair_trade_summary(orders: list[dict[str, Any]], *, pending_count: int) -> dict[str, Any]:
@@ -1754,8 +1888,9 @@ class TradingRepository:
                 },
             )
             bucket["signal_count"] += 1
-            bucket["edge_total"] += float(item.get("edge") or 0.0)
-            bucket["confidence_total"] += float(item.get("confidence") or 0.0)
+            metrics = TradingRepository._signal_metrics(item)
+            bucket["edge_total"] += metrics["edge"]
+            bucket["confidence_total"] += metrics["confidence"]
         ordered = sorted(
             buckets.values(),
             key=lambda item: (-int(item["signal_count"]), -float(item["edge_total"]), str(item["market_id"])),
@@ -2057,6 +2192,14 @@ class TradingRepository:
     def _decode_record(self, row: asyncpg.Record) -> dict[str, Any]:
         payload = row["payload"]
         payload = self._json_value(payload)
+        if "agent" in row:
+            agent = row["agent"]
+            if agent not in (None, ""):
+                payload.setdefault("agent", agent)
+        if "reason" in row:
+            reason = row["reason"]
+            if reason not in (None, ""):
+                payload.setdefault("reason", reason)
         payload["created_at"] = row["created_at"]
         return payload
 
@@ -2069,6 +2212,62 @@ class TradingRepository:
             "created_at": row["created_at"],
             **payload,
         }
+
+    async def _normalize_risk_payloads(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        missing_signal_ids = sorted(
+            {
+                str(item.get("signal_id") or "").strip()
+                for item in items
+                if not str(item.get("strategy_id") or "").strip() and str(item.get("signal_id") or "").strip()
+            }
+        )
+        strategy_by_signal_id: dict[str, str] = {}
+        if missing_signal_ids:
+            rows = await self.db.fetch(
+                "SELECT id, payload FROM signals WHERE id = ANY($1::uuid[])",
+                missing_signal_ids,
+            )
+            for row in rows:
+                payload = self._json_value(row["payload"])
+                strategy_id = str(payload.get("strategy_id") or "").strip()
+                if strategy_id:
+                    strategy_by_signal_id[str(row["id"])] = strategy_id
+
+        normalized: list[dict[str, Any]] = []
+        for item in items:
+            normalized_item = dict(item)
+            if not str(normalized_item.get("strategy_id") or "").strip():
+                signal_id = str(normalized_item.get("signal_id") or "").strip()
+                inferred = strategy_by_signal_id.get(signal_id) or self._infer_risk_strategy_id(normalized_item)
+                if inferred:
+                    normalized_item["strategy_id"] = inferred
+            normalized.append(normalized_item)
+        return normalized
+
+    @staticmethod
+    def _infer_risk_strategy_id(payload: dict[str, Any]) -> str:
+        reason = str(payload.get("reason") or "").strip().lower()
+        error = str(payload.get("error") or "").strip().lower()
+        agent = str(payload.get("agent") or "").strip().lower()
+        if "momentumtradingengine" in error or "momentum_15m" in error or (
+            agent == "claude" and ("momentum" in error or "momentum" in reason)
+        ):
+            return "momentum_15m"
+        if "get_market_snapshots" in error:
+            return "momentum_15m"
+        if not reason:
+            if "agent_error" in error:
+                return "momentum_15m" if "momentum" in error else ""
+            return ""
+        if "non-pair position already open" in reason or "daily spend would exceed max_daily_spend_usd" in reason:
+            return "momentum_15m"
+        if "pair trade would exceed" in reason or "pair position already open" in reason:
+            return "pair_15m"
+        if "momentum max positions reached" in reason:
+            return "momentum_15m"
+        if "pair cycle" in reason or "hedge" in reason:
+            return "pair_15m"
+        return ""
 
     @staticmethod
     def _json_value(value: Any) -> dict[str, Any]:
@@ -2109,6 +2308,7 @@ class TradingRepository:
             "selected_for_scan": cls._sum_pipeline_field(events, "scanner.scan_cycle", "selected_for_scan"),
             "strategy_candidates": cls._sum_pipeline_field(events, "scanner.scan_cycle", "strategy_candidates"),
             "reached_risk_engine": cls._sum_pipeline_field(events, "scanner.scan_cycle", "reached_risk_engine"),
+            "pre_risk_blocked": cls._sum_pipeline_field(events, "scanner.scan_cycle", "pre_risk_blocked"),
             "risk_passed": cls._sum_pipeline_field(events, "scanner.scan_cycle", "risk_passed"),
             "risk_blocked": cls._sum_pipeline_field(events, "scanner.scan_cycle", "risk_blocked"),
             "duplicates_blocked": cls._sum_pipeline_field(events, "scanner.scan_cycle", "duplicates_blocked"),

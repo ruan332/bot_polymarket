@@ -41,6 +41,8 @@ class Quote:
     best_bid: float
     best_ask: float
     updated_at: datetime
+    bid_depth: float = 0.0
+    ask_depth: float = 0.0
 
     @property
     def spread_bps(self) -> float:
@@ -56,8 +58,8 @@ class Quote:
             "best_bid": round(self.best_bid, 4),
             "best_ask": round(self.best_ask, 4),
             "spread_bps": round(self.spread_bps, 2),
-            "bid_depth": 0.0,
-            "ask_depth": 0.0,
+            "bid_depth": round(self.bid_depth, 4),
+            "ask_depth": round(self.ask_depth, 4),
         }
 
 
@@ -566,6 +568,8 @@ class PairTradingEngine:
             best_bid=float(summary.get("best_bid") or 0.0),
             best_ask=float(summary.get("best_ask") or 0.0),
             updated_at=datetime.now(UTC),
+            bid_depth=float(summary.get("bid_depth") or 0.0),
+            ask_depth=float(summary.get("ask_depth") or 0.0),
         )
         self.quote_cache[token_id] = quote
         return quote

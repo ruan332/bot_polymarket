@@ -117,7 +117,7 @@ ALPHAVANTAGE_NEWS_LIMIT=50
 LIVE_TRADING=false
 SMOKE_TEST_MODE=false
 
-MAX_DAILY_SPEND_USD=5.00
+MAX_DAILY_SPEND_USD=25.00
 MAX_SINGLE_POSITION_USD=100.00
 PAPER_BANKROLL_USD=1000.00
 AGENT_HEARTBEAT_TTL_SECONDS=45
@@ -145,6 +145,13 @@ Toggle de noticias:
 - `NEWS_VALIDATION_ENABLED=true`: fluxo completo `claude -> news_validator -> codex -> claw`
 - `NEWS_VALIDATION_ENABLED=false`: bypass da etapa de noticias e fluxo `claude -> codex -> claw`
 - com o toggle desligado, o agente `news_validator` nao sobe e `agents/status` nao deve listar esse agente
+
+Toggle de momentum:
+
+- `MOMENTUM_ENABLED=true`: habilita a estrategia direcional `momentum_15m`
+- `MOMENTUM_MARKETS=BTC,ETH`: define os ativos 15m monitorados pelo motor de momentum
+- `MOMENTUM_SIGNAL_CONFIDENCE_THRESHOLD`: filtro minimo de confianca para publicacao do sinal
+- `MOMENTUM_COOLDOWN_MINUTES`: evita republicacao imediata de sinais equivalentes
 
 ## Configuracoes de Estrategia
 

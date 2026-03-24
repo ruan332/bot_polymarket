@@ -11,9 +11,19 @@ from core.risk_engine import RiskEngine
 from core.schemas import PairLegPlan, PairReviewPayload, PairSignalPayload, PortfolioSummary, ReviewPayload, SignalPayload
 
 
-def make_context(*, positions: list[dict[str, object]] | None = None):
+def make_context(
+    *,
+    positions: list[dict[str, object]] | None = None,
+    execution_state: dict[str, object] | None = None,
+):
     crypto_config = load_crypto_config()
     open_positions = positions or []
+    execution_state = execution_state or {
+        "daily_spend_usd": 0.0,
+        "realized_pnl_usd": 0.0,
+        "consecutive_losses": 0,
+        "last_loss_at": None,
+    }
 
     class Repository:
         def __init__(self):
@@ -35,15 +45,15 @@ def make_context(*, positions: list[dict[str, object]] | None = None):
             return open_positions
 
         async def get_execution_risk_state(self, hours: int = 24) -> dict[str, object]:
-            return {
-                "daily_spend_usd": 0.0,
-                "realized_pnl_usd": 0.0,
-                "consecutive_losses": 0,
-                "last_loss_at": None,
-            }
+            return execution_state
 
     return SimpleNamespace(
-        settings=SimpleNamespace(paper_bankroll_usd=1000.0),
+        settings=SimpleNamespace(
+            paper_bankroll_usd=1000.0,
+            momentum_max_positions=2,
+            momentum_min_edge=0.085,
+            momentum_min_volume_24h=500.0,
+        ),
         risk_config=SimpleNamespace(
             min_edge=0.19,
             min_confidence=0.55,
@@ -240,6 +250,24 @@ async def test_validate_signal_requires_stronger_thresholds_for_indirect_crypto(
 
 
 @pytest.mark.asyncio
+async def test_validate_signal_uses_momentum_specific_edge_floor() -> None:
+    risk = RiskEngine(make_context())
+    signal = make_signal(symbol="ETH", tier="major", edge=0.09, confidence=0.70, price=0.40, volume_24h=2000.0)
+    signal.strategy_id = "momentum_15m"
+
+    await risk.validate_signal(signal)
+
+
+@pytest.mark.asyncio
+async def test_validate_signal_uses_momentum_specific_volume_floor() -> None:
+    risk = RiskEngine(make_context())
+    signal = make_signal(symbol="ETH", tier="major", edge=0.20, confidence=0.70, price=0.40, volume_24h=600.0)
+    signal.strategy_id = "momentum_15m"
+
+    await risk.validate_signal(signal)
+
+
+@pytest.mark.asyncio
 async def test_build_execution_guard_scales_down_indirect_crypto_positions() -> None:
     risk = RiskEngine(make_context())
     direct_signal = make_signal(symbol="BTC", tier="btc", edge=0.40, confidence=0.80, price=0.40, volume_24h=100000.0)
@@ -311,6 +339,71 @@ async def test_build_execution_guard_blocks_opposite_position_same_market() -> N
 
 
 @pytest.mark.asyncio
+async def test_build_execution_guard_blocks_when_pair_position_exists_for_same_market() -> None:
+    incoming_signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.40,
+        confidence=0.80,
+        price=0.40,
+        volume_24h=100000.0,
+    )
+    incoming_signal.strategy_id = "momentum_15m"
+    risk = RiskEngine(
+        make_context(
+            positions=[
+                {
+                    "market_id": incoming_signal.market_id,
+                    "direction": "YES",
+                    "asset_symbol": "BTC",
+                    "strategy_id": "pair_15m",
+                    "cost_basis_usd": 20.0,
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(RiskBlockedError, match="pair position already open for this market"):
+        await risk.build_execution_guard(make_review(incoming_signal))
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_enforces_momentum_max_positions() -> None:
+    signal = make_signal(
+        symbol="ETH",
+        tier="major",
+        edge=0.40,
+        confidence=0.80,
+        price=0.40,
+        volume_24h=100000.0,
+    )
+    signal.strategy_id = "momentum_15m"
+    risk = RiskEngine(
+        make_context(
+            positions=[
+                {
+                    "market_id": "market-btc",
+                    "direction": "YES",
+                    "asset_symbol": "BTC",
+                    "strategy_id": "momentum_15m",
+                    "cost_basis_usd": 20.0,
+                },
+                {
+                    "market_id": "market-sol",
+                    "direction": "NO",
+                    "asset_symbol": "SOL",
+                    "strategy_id": "momentum_15m",
+                    "cost_basis_usd": 20.0,
+                },
+            ]
+        )
+    )
+
+    with pytest.raises(RiskBlockedError, match="momentum max positions reached"):
+        await risk.build_execution_guard(make_review(signal))
+
+
+@pytest.mark.asyncio
 async def test_build_execution_guard_uses_tighter_exposure_cap_for_synthetic_crypto_asset() -> None:
     risk = RiskEngine(
         make_context(
@@ -377,3 +470,22 @@ async def test_build_pair_execution_guard_returns_trade_group_position_keys() ->
     assert guard.primary_position_key == "pair-group-1:YES"
     assert guard.hedge_position_key == "pair-group-1:NO"
     assert guard.total_notional_usd == pytest.approx(1.7)
+
+
+@pytest.mark.asyncio
+async def test_build_pair_execution_guard_honors_daily_spend_cap() -> None:
+    signal = make_pair_signal()
+    risk = RiskEngine(
+        make_context(
+            execution_state={
+                "daily_spend_usd": 4.6,
+                "realized_pnl_usd": 0.0,
+                "consecutive_losses": 0,
+                "last_loss_at": None,
+            }
+        )
+    )
+    risk.config.max_daily_spend_usd = 5.0
+
+    with pytest.raises(RiskBlockedError, match="pair trade would exceed max_daily_spend_usd"):
+        await risk.build_pair_execution_guard(make_pair_review(signal))

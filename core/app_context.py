@@ -39,6 +39,7 @@ class AppContext:
         settings = AppSettings()
         agents_config = load_agents_config()
         risk_config = load_risk_config()
+        _apply_runtime_risk_overrides(settings, risk_config)
         crypto_config = load_crypto_config()
         db = Database(settings.database_url)
         await _retry_async(
@@ -57,6 +58,7 @@ class AppContext:
         )
         bus = RedisBus(redis)
         await bus.bootstrap_runtime_config(agents_config)
+        await bus.ensure_known_groups()
         context = cls(settings, agents_config, risk_config, crypto_config, db, repository, redis, bus)
         if settings.live_trading:
             connector = MarketConnector(context)
@@ -80,6 +82,7 @@ class AppContext:
     async def reload_configs(self) -> None:
         self.agents_config = load_agents_config()
         self.risk_config = load_risk_config()
+        _apply_runtime_risk_overrides(self.settings, self.risk_config)
         self.crypto_config = load_crypto_config()
 
     async def close(self) -> None:
@@ -120,3 +123,9 @@ async def _retry_async(
             await asyncio.sleep(delay_seconds)
     assert last_error is not None
     raise RuntimeError(f"{label} failed after {attempts} attempts") from last_error
+
+
+def _apply_runtime_risk_overrides(settings: AppSettings, risk_config: RiskSettings) -> None:
+    # Keep env-driven paper controls in sync with the risk engine runtime.
+    risk_config.max_daily_spend_usd = settings.max_daily_spend_usd
+    risk_config.max_single_position_usd = settings.max_single_position_usd

@@ -118,10 +118,12 @@ type PipelineTelemetryEvent = {
   }>;
   strategy_candidates?: number;
   reached_risk_engine?: number;
+  pre_risk_blocked?: number;
   risk_passed?: number;
   risk_blocked?: number;
   duplicates_blocked?: number;
   persisted_signals?: number;
+  pre_risk_block_reasons?: Record<string, number>;
   risk_block_reasons?: Record<string, number>;
   inbox_count?: number;
   approved_count?: number;
@@ -147,6 +149,7 @@ type MetricsOverview = {
     selected_for_scan: number;
     strategy_candidates: number;
     reached_risk_engine: number;
+    pre_risk_blocked: number;
     risk_passed: number;
     risk_blocked: number;
     duplicates_blocked: number;
@@ -232,6 +235,11 @@ type PerformanceReport = {
   };
   cost_by_agent: Array<{ agent: string; cost_usd: number; calls: number }>;
   risk_breakdown: Array<{ label: string; count: number }>;
+  risk_breakdown_by_strategy?: Array<{
+    label: string;
+    count: number;
+    reasons: Array<{ label: string; count: number }>;
+  }>;
   asset_breakdown: Array<{ label: string; count: number }>;
   tier_breakdown: Array<{ label: string; count: number }>;
   strategy_breakdown?: Array<{ label: string; signals: number; orders: number; realized_pnl_usd: number }>;
@@ -281,6 +289,22 @@ type PerformanceReport = {
   };
 };
 
+type RiskBreakdownReport = {
+  generated_at: string;
+  window_hours: number;
+  asset_filter: string;
+  tier_filter: string;
+  strategy_filter: string;
+  total_events: number;
+  by_reason: Array<{ label: string; count: number }>;
+  by_strategy: Array<{ label: string; count: number }>;
+  by_strategy_reason: Array<{
+    label: string;
+    count: number;
+    reasons: Array<{ label: string; count: number }>;
+  }>;
+};
+
 type LogEntry = {
   id: string;
   time: string;
@@ -301,6 +325,7 @@ type DashboardState = {
   portfolio: PortfolioSummary | null;
   positions: Position[];
   performance: PerformanceReport | null;
+  riskBreakdown: RiskBreakdownReport | null;
   logs: LogEntry[];
 };
 
@@ -410,6 +435,7 @@ export function DashboardClient() {
     portfolio: null,
     positions: [],
     performance: null,
+    riskBreakdown: null,
     logs: [],
   });
   const [error, setError] = useState<string | null>(null);
@@ -444,6 +470,7 @@ export function DashboardClient() {
         { key: "portfolio", path: "/portfolio/summary", fallback: currentState.portfolio as PortfolioSummary | null },
         { key: "positions", path: "/portfolio/positions", fallback: currentState.positions as Position[] },
         { key: "performance", path: "/metrics/performance?hours=24", fallback: currentState.performance as PerformanceReport | null },
+        { key: "riskBreakdown", path: "/metrics/risk-breakdown?hours=24", fallback: currentState.riskBreakdown as RiskBreakdownReport | null },
       ] as const;
 
       const results = await Promise.allSettled(requests.map((request) => getJson(request.path)));
@@ -473,6 +500,7 @@ export function DashboardClient() {
         const portfolio = (nextData.get("portfolio") ?? null) as PortfolioSummary | null;
         const positions = (nextData.get("positions") ?? []) as Position[];
         const performance = (nextData.get("performance") ?? null) as PerformanceReport | null;
+        const riskBreakdown = (nextData.get("riskBreakdown") ?? null) as RiskBreakdownReport | null;
 
         const newLogs: LogEntry[] = [];
         signals.forEach(s => newLogs.push({
@@ -524,6 +552,7 @@ export function DashboardClient() {
           portfolio,
           positions,
           performance,
+          riskBreakdown,
           logs: newLogs.slice(0, 120),
         });
         setError(failures.length > 0 ? `Failed: ${failures.join(", ")}` : null);
@@ -548,12 +577,15 @@ export function DashboardClient() {
   const drawdown = equity > 0 ? ((state.portfolio?.total_exposure ?? 0) / equity * 100) : 0;
   const sharpe = perf?.summary.sharpe_ratio ?? 0;
   const maxDrawdown = perf?.summary.max_drawdown ?? 0;
+  const riskBreakdown = state.riskBreakdown;
+  const riskByStrategy = perf?.risk_breakdown_by_strategy ?? riskBreakdown?.by_strategy_reason ?? [];
   const overview = state.overview;
   const flow = overview?.flow_summary;
   const latestScan = overview?.latest_scan_telemetry ?? null;
   const latestReview = overview?.latest_review_telemetry ?? null;
   const latestExecution = overview?.latest_execution_telemetry ?? null;
   const scanRejects = normalizeBreakdownMap(latestScan?.rejection_breakdown);
+  const scanPreRiskRejects = normalizeBreakdownMap(latestScan?.pre_risk_block_reasons);
   const scanRiskRejects = normalizeBreakdownMap(latestScan?.risk_block_reasons);
 
   return (
@@ -678,13 +710,18 @@ export function DashboardClient() {
             <KpiCard label="Crypto_Classified" value={`${latestScan?.crypto_classified ?? 0}`} icon="token" color="text-poly-green" />
             <KpiCard label="Selected_For_Scan" value={`${latestScan?.selected_for_scan ?? 0}`} icon="filter_alt" color="text-poly-amber" />
             <KpiCard label="RiskEngine_In" value={`${latestScan?.reached_risk_engine ?? 0}`} icon="stream" color="text-poly-cyan" />
+            <KpiCard label="PreRisk_Blocked" value={`${latestScan?.pre_risk_blocked ?? 0}`} icon="block" color="text-poly-red" />
             <KpiCard label="Risk_Passed" value={`${latestScan?.risk_passed ?? 0}`} icon="verified" color="text-poly-green" />
             <KpiCard label="Signals_Out" value={`${latestScan?.persisted_signals ?? 0}`} icon="outbound" color="text-poly-amber" />
           </div>
-          <div className="grid grid-cols-2 gap-3 px-3 pb-3">
+          <div className="grid grid-cols-3 gap-3 px-3 pb-3">
             <div className="border border-poly-border p-3">
               <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Reject_Prefilter</div>
               <BreakdownMiniBar data={scanRejects.map((item) => ({ label: compactReason(item.label), count: item.count }))} color="#ff3131" />
+            </div>
+            <div className="border border-poly-border p-3">
+              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Reject_PreRisk</div>
+              <BreakdownMiniBar data={scanPreRiskRejects.map((item) => ({ label: compactReason(item.label), count: item.count }))} color="#ff8a3d" />
             </div>
             <div className="border border-poly-border p-3">
               <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Reject_RiskEngine</div>
@@ -807,8 +844,26 @@ export function DashboardClient() {
 
         <section className="col-span-4 border border-poly-border bg-poly-black flex flex-col min-h-[200px]">
           <PanelHead title="Risk_Breakdown" badge={<span className="text-poly-red">{summary?.risk_events ?? 0} events</span>} />
-          <div className="flex-1 p-1">
-            <RiskBreakdownChart data={perf?.risk_breakdown ?? []} />
+          <div className="p-1 h-[110px]">
+            <RiskBreakdownChart data={riskBreakdown?.by_reason ?? perf?.risk_breakdown ?? []} />
+          </div>
+          <div className="border-t border-poly-border p-3 space-y-3">
+            <div className="font-mono text-[8px] text-poly-dim uppercase">By_Strategy_And_Reason</div>
+            {riskByStrategy.slice(0, 3).map((group) => (
+              <div key={group.label} className="space-y-1">
+                <div className="flex items-center justify-between font-mono text-[9px] uppercase">
+                  <span className="text-poly-muted">{labelStrategy(group.label)}</span>
+                  <span className="text-poly-red">{group.count}</span>
+                </div>
+                <BreakdownMiniBar
+                  data={group.reasons.map((item) => ({ label: compactReason(item.label), count: item.count }))}
+                  color="#ff3131"
+                />
+              </div>
+            ))}
+            {riskByStrategy.length === 0 && (
+              <div className="font-mono text-[9px] text-poly-dim text-center py-2">NO_STRATEGY_RISK_DATA</div>
+            )}
           </div>
         </section>
 

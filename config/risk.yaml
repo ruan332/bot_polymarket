@@ -7,7 +7,7 @@ risk:
   max_strategy_exposure_fraction: 0.25
   max_single_position_usd: 100.0
   max_total_exposure_usd: 300.0
-  max_daily_spend_usd: 5.0
+  max_daily_spend_usd: 50.0
   max_spread_bps: 250
   max_slippage_bps: 150
   max_order_price: 0.90

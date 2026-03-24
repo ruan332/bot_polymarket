@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from core.app_context import _retry_async
+from types import SimpleNamespace
+
+from core.app_context import _apply_runtime_risk_overrides, _retry_async
 
 
 @pytest.mark.asyncio
@@ -35,3 +37,13 @@ async def test_retry_async_raises_after_last_attempt() -> None:
         await _retry_async("dependency", 2, 0.0, always_fail)
 
     assert attempts == 2
+
+
+def test_apply_runtime_risk_overrides_syncs_env_controls() -> None:
+    settings = SimpleNamespace(max_daily_spend_usd=25.0, max_single_position_usd=80.0)
+    risk = SimpleNamespace(max_daily_spend_usd=5.0, max_single_position_usd=100.0)
+
+    _apply_runtime_risk_overrides(settings, risk)
+
+    assert risk.max_daily_spend_usd == pytest.approx(25.0)
+    assert risk.max_single_position_usd == pytest.approx(80.0)

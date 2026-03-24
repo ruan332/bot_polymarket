@@ -12,6 +12,10 @@ class RedisBus:
     def __init__(self, redis: Redis):
         self.redis = redis
 
+    async def ensure_known_groups(self) -> None:
+        await self.ensure_group("signals:validated", "codex_reviewers")
+        await self.ensure_group("signals:reviewed", "claw_executors")
+
     async def publish_event(self, stream: str, payload: dict[str, Any]) -> str:
         encoded = {key: json.dumps(value, default=str) for key, value in payload.items()}
         return await self.redis.xadd(stream, encoded, maxlen=1000, approximate=True)
@@ -31,7 +35,13 @@ class RedisBus:
         block_ms: int = 1000,
         count: int = 1,
     ) -> list[tuple[str, dict[str, Any]]]:
-        response = await self.redis.xreadgroup(group, consumer, {stream: ">"}, count=count, block=block_ms)
+        try:
+            response = await self.redis.xreadgroup(group, consumer, {stream: ">"}, count=count, block=block_ms)
+        except Exception as exc:
+            if "NOGROUP" not in str(exc):
+                raise
+            await self.ensure_group(stream, group)
+            response = await self.redis.xreadgroup(group, consumer, {stream: ">"}, count=count, block=block_ms)
         if not response:
             return []
         items: list[tuple[str, dict[str, Any]]] = []

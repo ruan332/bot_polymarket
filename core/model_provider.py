@@ -85,7 +85,10 @@ class ModelProvider:
         global_cost = await self.context.bus.get_daily_cost(f"cost:global:{today}")
         if agent_cost >= self.daily_cost_limit:
             raise BudgetExceededError(f"{self.agent_name} daily cost limit reached")
-        if global_cost >= self.context.settings.max_daily_spend_usd:
+        if (
+            self.context.settings.llm_daily_spend_limit_enabled
+            and global_cost >= self.context.settings.max_daily_spend_usd
+        ):
             raise BudgetExceededError("global daily spend limit reached")
 
     def _smoke_response(self, prompt: str) -> ModelResponse:

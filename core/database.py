@@ -18,6 +18,9 @@ from core.schemas import (
 )
 
 
+PAIR_HEDGE_DAILY_SPEND_WEIGHT = 0.25
+
+
 SCHEMA_SQL = """
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -681,11 +684,7 @@ class TradingRepository:
             window_start,
         )
         payloads = [self._decode_record(row) for row in rows]
-        daily_spend_usd = sum(
-            float(item.get("notional_usd") or 0.0)
-            for item in payloads
-            if str(item.get("action") or "entry") in {"entry", "scale_in"}
-        )
+        spend_breakdown = self._daily_spend_breakdown(payloads)
         realized_pnl_usd = sum(float(item.get("realized_pnl_usd") or 0.0) for item in payloads)
         consecutive_losses = 0
         last_loss_at = None
@@ -698,7 +697,9 @@ class TradingRepository:
             elif pnl > 0:
                 break
         return {
-            "daily_spend_usd": round(daily_spend_usd, 4),
+            "daily_spend_usd": spend_breakdown["daily_spend_usd"],
+            "pair_gross_notional_usd": spend_breakdown["pair_gross_notional_usd"],
+            "pair_effective_spend_usd": spend_breakdown["pair_effective_spend_usd"],
             "realized_pnl_usd": round(realized_pnl_usd, 4),
             "consecutive_losses": consecutive_losses,
             "last_loss_at": last_loss_at,
@@ -1062,6 +1063,7 @@ class TradingRepository:
         total_notional = sum(float(item.get("notional_usd") or 0.0) for item in simulated_orders)
         avg_notional = total_notional / len(simulated_orders) if simulated_orders else 0.0
         realized_pnl = sum(float(item.get("realized_pnl_usd") or 0.0) for item in exit_orders)
+        spend_breakdown = self._daily_spend_breakdown(entry_orders)
         win_rate = (
             round(sum(1 for item in exit_orders if float(item.get("realized_pnl_usd") or 0.0) > 0) / len(exit_orders), 4)
             if exit_orders
@@ -1133,7 +1135,9 @@ class TradingRepository:
                 "avg_confidence": round(sum(signal_confidences) / len(signal_confidences), 4) if signal_confidences else 0.0,
                 "total_order_notional": round(total_notional, 4),
                 "avg_order_notional": round(avg_notional, 4),
-                "daily_spend_usd": round(sum(float(item.get("notional_usd") or 0.0) for item in entry_orders), 4),
+                "daily_spend_usd": spend_breakdown["daily_spend_usd"],
+                "pair_gross_notional_usd": spend_breakdown["pair_gross_notional_usd"],
+                "pair_effective_spend_usd": spend_breakdown["pair_effective_spend_usd"],
                 "realized_pnl_window": round(realized_pnl, 4),
                 "sharpe_ratio": sharpe_ratio,
                 "max_drawdown": max_drawdown,
@@ -1153,6 +1157,7 @@ class TradingRepository:
             "asset_breakdown": asset_breakdown,
             "tier_breakdown": tier_breakdown,
             "strategy_breakdown": strategy_breakdown,
+            "strategy_comparison": strategy_breakdown,
             "regime_breakdown": regime_breakdown,
             "exit_reason_breakdown": exit_reason_breakdown,
             "news_breakdown": news_breakdown,
@@ -1734,6 +1739,8 @@ class TradingRepository:
         signal_counts: dict[str, int] = {}
         order_counts: dict[str, int] = {}
         realized: dict[str, float] = {}
+        trade_counts: dict[str, int] = {}
+        win_counts: dict[str, int] = {}
         for item in signals:
             key = str(item.get("strategy_id") or "").strip()
             if key:
@@ -1743,13 +1750,21 @@ class TradingRepository:
             if not key:
                 continue
             order_counts[key] = order_counts.get(key, 0) + 1
-            realized[key] = realized.get(key, 0.0) + float(item.get("realized_pnl_usd") or 0.0)
+            pnl = float(item.get("realized_pnl_usd") or 0.0)
+            realized[key] = realized.get(key, 0.0) + pnl
+            action = str(item.get("action") or "entry").strip().lower()
+            if action in {"close", "scale_out"} or pnl != 0.0:
+                trade_counts[key] = trade_counts.get(key, 0) + 1
+                if pnl > 0:
+                    win_counts[key] = win_counts.get(key, 0) + 1
         keys = sorted(set(signal_counts) | set(order_counts))
         return [
             {
                 "label": key,
                 "signals": signal_counts.get(key, 0),
                 "orders": order_counts.get(key, 0),
+                "trade_count": trade_counts.get(key, 0),
+                "win_rate": round(win_counts.get(key, 0) / trade_counts.get(key, 0), 4) if trade_counts.get(key, 0) else 0.0,
                 "realized_pnl_usd": round(realized.get(key, 0.0), 4),
             }
             for key in keys
@@ -1807,6 +1822,44 @@ class TradingRepository:
             "pending_hedges": pending_count,
             "primary_notional": round(sum(float(bucket["primary_notional"]) for bucket in groups.values()), 4),
             "hedge_notional": round(sum(float(bucket["hedge_notional"]) for bucket in groups.values()), 4),
+            "gross_notional_usd": round(
+                sum(float(bucket["primary_notional"]) + float(bucket["hedge_notional"]) for bucket in groups.values()),
+                4,
+            ),
+            "effective_spend_usd": round(
+                sum(
+                    float(bucket["primary_notional"]) + float(bucket["hedge_notional"]) * PAIR_HEDGE_DAILY_SPEND_WEIGHT
+                    for bucket in groups.values()
+                ),
+                4,
+            ),
+        }
+
+    @staticmethod
+    def _daily_spend_breakdown(items: list[dict[str, Any]]) -> dict[str, float]:
+        daily_spend_usd = 0.0
+        pair_gross_notional_usd = 0.0
+        pair_effective_spend_usd = 0.0
+        for item in items:
+            action = str(item.get("action") or "entry")
+            if action not in {"entry", "scale_in"}:
+                continue
+            notional = float(item.get("notional_usd") or 0.0)
+            daily_spend_usd += notional
+            strategy_id = str(item.get("strategy_id") or "").strip()
+            if strategy_id == "pair_15m":
+                pair_gross_notional_usd += notional
+                leg_role = str(item.get("leg_role") or "").strip().lower()
+                if leg_role == "hedge":
+                    pair_effective_spend_usd += notional * PAIR_HEDGE_DAILY_SPEND_WEIGHT
+                else:
+                    pair_effective_spend_usd += notional
+            else:
+                pair_effective_spend_usd += notional
+        return {
+            "daily_spend_usd": round(daily_spend_usd, 4),
+            "pair_gross_notional_usd": round(pair_gross_notional_usd, 4),
+            "pair_effective_spend_usd": round(pair_effective_spend_usd, 4),
         }
 
     @staticmethod
@@ -2259,9 +2312,13 @@ class TradingRepository:
             if "agent_error" in error:
                 return "momentum_15m" if "momentum" in error else ""
             return ""
-        if "non-pair position already open" in reason or "daily spend would exceed max_daily_spend_usd" in reason:
+        if (
+            "momentum_15m position already open" in reason
+            or "non-pair position already open" in reason
+            or "daily spend would exceed max_daily_spend_usd" in reason
+        ):
             return "momentum_15m"
-        if "pair trade would exceed" in reason or "pair position already open" in reason:
+        if "pair_15m position already open" in reason or "pair trade would exceed" in reason or "pair position already open" in reason:
             return "pair_15m"
         if "momentum max positions reached" in reason:
             return "momentum_15m"

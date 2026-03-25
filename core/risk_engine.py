@@ -13,6 +13,9 @@ if TYPE_CHECKING:
     from core.app_context import AppContext
 
 
+PAIR_HEDGE_DAILY_SPEND_WEIGHT = 0.25
+
+
 @dataclass
 class ExecutionGuard:
     size: int
@@ -186,45 +189,28 @@ class RiskEngine:
             raise RiskBlockedError("single position notional exceeds max_single_position_usd")
         if portfolio.total_exposure + notional > self.config.max_total_exposure_usd:
             raise RiskBlockedError("portfolio exposure exceeds max_total_exposure_usd")
-        pair_position = next(
+        same_strategy_position = next(
             (
                 item
                 for item in positions
-                if str(item.get("market_id")) == signal.market_id and str(item.get("strategy_id") or "") == "pair_15m"
+                if str(item.get("market_id")) == signal.market_id and str(item.get("strategy_id") or "") == signal.strategy_id
             ),
             None,
         )
-        if pair_position is not None:
-            raise RiskBlockedError("pair position already open for this market")
-        existing_position = next(
-            (
-                item
-                for item in positions
-                if str(item.get("market_id")) == signal.market_id and str(item.get("direction")) == signal.direction
-            ),
-            None,
-        )
-        opposite_position = next(
-            (
-                item
-                for item in positions
-                if str(item.get("market_id")) == signal.market_id and str(item.get("direction")) != signal.direction
-            ),
-            None,
-        )
-        if opposite_position is not None:
-            raise RiskBlockedError("opposite position already open for this market")
+        if same_strategy_position is not None:
+            raise RiskBlockedError(f"{signal.strategy_id} position already open for this market")
         if signal.strategy_id == "momentum_15m":
             momentum_positions = sum(
                 1 for item in positions if str(item.get("strategy_id") or "") == "momentum_15m"
             )
-            if momentum_positions >= int(getattr(self.context.settings, "momentum_max_positions", 2) or 2) and existing_position is None:
+            if momentum_positions >= int(getattr(self.context.settings, "momentum_max_positions", 2) or 2):
                 raise RiskBlockedError("momentum max positions reached")
-        if portfolio.open_positions >= self.config.max_open_positions and existing_position is None:
+        if portfolio.open_positions >= self.config.max_open_positions:
             raise RiskBlockedError("max_open_positions reached")
-        effective_daily_limit = self.config.max_daily_spend_usd
-        if risk_state["daily_spend_usd"] + notional > effective_daily_limit:
-            raise RiskBlockedError("daily spend would exceed max_daily_spend_usd")
+        if getattr(self.context.settings, "trade_daily_spend_limit_enabled", True):
+            effective_daily_limit = self.config.max_daily_spend_usd
+            if risk_state["daily_spend_usd"] + notional > effective_daily_limit:
+                raise RiskBlockedError("daily spend would exceed max_daily_spend_usd")
 
         total_equity = max(bankroll, initial_bankroll * 0.25, 1.0)
         asset_exposure = sum(
@@ -271,24 +257,32 @@ class RiskEngine:
         primary_notional = round(review.approved_primary_leg.size * review.approved_primary_leg.target_price, 4)
         hedge_notional = round(review.approved_hedge_leg.size * review.approved_hedge_leg.target_price, 4)
         total_notional = round(primary_notional + hedge_notional, 4)
+        effective_notional = round(primary_notional + hedge_notional * PAIR_HEDGE_DAILY_SPEND_WEIGHT, 4)
         max_pair_notional = min(self.config.max_single_position_usd, tier.max_position_usd)
         if total_notional > max_pair_notional:
             raise RiskBlockedError("pair trade notional exceeds max_single_position_usd")
         if portfolio.available_balance < primary_notional:
             raise RiskBlockedError("available balance is below primary leg notional")
-        effective_daily_limit = self.config.max_daily_spend_usd
         risk_state = await self._recent_execution_state()
-        if risk_state["daily_spend_usd"] + total_notional > effective_daily_limit:
-            raise RiskBlockedError("pair trade would exceed max_daily_spend_usd")
+        if getattr(self.context.settings, "trade_daily_spend_limit_enabled", True):
+            effective_daily_limit = self.config.max_daily_spend_usd
+            current_pair_spend = float(
+                risk_state.get("pair_effective_spend_usd", risk_state["daily_spend_usd"]) or 0.0
+            )
+            if current_pair_spend + effective_notional > effective_daily_limit:
+                raise RiskBlockedError("pair trade would exceed max_daily_spend_usd")
         if portfolio.total_exposure + total_notional > self.config.max_total_exposure_usd:
             raise RiskBlockedError("pair trade would exceed max_total_exposure_usd")
-        conflicting_positions = [
-            item
-            for item in positions
-            if str(item.get("market_id")) == signal.market_id and str(item.get("strategy_id") or "") != "pair_15m"
-        ]
-        if conflicting_positions:
-            raise RiskBlockedError("non-pair position already open for this market")
+        same_strategy_position = next(
+            (
+                item
+                for item in positions
+                if str(item.get("market_id")) == signal.market_id and str(item.get("strategy_id") or "") == signal.strategy_id
+            ),
+            None,
+        )
+        if same_strategy_position is not None:
+            raise RiskBlockedError(f"{signal.strategy_id} position already open for this market")
         return PairExecutionGuard(
             primary_position_key=f"{review.trade_group_id}:{review.approved_primary_leg.direction}",
             hedge_position_key=f"{review.trade_group_id}:{review.approved_hedge_leg.direction}",
@@ -306,6 +300,8 @@ class RiskEngine:
     async def _recent_execution_state(self) -> dict[str, Any]:
         default = {
             "daily_spend_usd": 0.0,
+            "pair_gross_notional_usd": 0.0,
+            "pair_effective_spend_usd": 0.0,
             "realized_pnl_usd": 0.0,
             "consecutive_losses": 0,
             "last_loss_at": None,

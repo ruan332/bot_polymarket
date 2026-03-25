@@ -123,6 +123,14 @@ PAPER_BANKROLL_USD=1000.00
 AGENT_HEARTBEAT_TTL_SECONDS=45
 ```
 
+Observacao operacional:
+
+- `TRADE_DAILY_SPEND_LIMIT_ENABLED=false` desativa o bloqueio diario de trade para stress tests
+- `LLM_DAILY_SPEND_LIMIT_ENABLED=false` desativa o bloqueio diario de custo do LLM
+- `MAX_DAILY_SPEND_USD` controla o teto diario economico do bot quando o limite esta ativo
+- em `pair_15m`, o hedge conta com peso reduzido no teto diario para nao travar o fluxo por notional bruto dobrado
+- o notional bruto e o gasto efetivo do `pair_15m` aparecem nas metricas de performance/replay para auditoria
+
 Arquivo base de exemplo:
 
 - [.env.production.example](C:\Projetos\bot_polymarket\.env.production.example)
@@ -494,6 +502,7 @@ Razoes comuns:
 - salvar `metrics/performance?hours=24`
 - revisar `open_positions`
 - revisar principais razoes em `risk_events`
+- conferir `pair_gross_notional_usd` e `pair_effective_spend_usd` antes de mexer no teto diario
 
 ### Antes de habilitar live trading
 

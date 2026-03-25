@@ -107,6 +107,8 @@ def test_infer_provider_from_model_handles_prefixed_and_plain_models() -> None:
 
 def test_app_settings_news_provider_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in (
+        "TRADE_DAILY_SPEND_LIMIT_ENABLED",
+        "LLM_DAILY_SPEND_LIMIT_ENABLED",
         "NEWS_PROVIDER_PRIMARY",
         "NEWS_PROVIDER_FALLBACK",
         "NEWS_LOOKBACK_HOURS",
@@ -124,9 +126,13 @@ def test_app_settings_news_provider_defaults(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.news_lookback_hours == 24
     assert settings.news_validation_enabled is True
     assert settings.news_fallback_on_empty_result is False
+    assert settings.trade_daily_spend_limit_enabled is True
+    assert settings.llm_daily_spend_limit_enabled is True
 
 
 def test_app_settings_news_provider_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRADE_DAILY_SPEND_LIMIT_ENABLED", "false")
+    monkeypatch.setenv("LLM_DAILY_SPEND_LIMIT_ENABLED", "false")
     monkeypatch.setenv("NEWS_PROVIDER_PRIMARY", "alphavantage")
     monkeypatch.setenv("NEWS_PROVIDER_FALLBACK", "marketaux")
     monkeypatch.setenv("NEWS_VALIDATION_ENABLED", "false")
@@ -142,6 +148,8 @@ def test_app_settings_news_provider_env_overrides(monkeypatch: pytest.MonkeyPatc
     assert settings.marketaux_api_key == "marketaux-key"
     assert settings.alphavantage_api_key == "alpha-key"
     assert settings.news_lookback_hours == 12
+    assert settings.trade_daily_spend_limit_enabled is False
+    assert settings.llm_daily_spend_limit_enabled is False
 
 
 def test_app_settings_copytrade_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

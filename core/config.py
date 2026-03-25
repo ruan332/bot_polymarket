@@ -180,6 +180,8 @@ class AppSettings(BaseSettings):
     execution_llm_enabled: bool = False
     review_llm_fail_open: bool = False
     execution_llm_fail_open: bool = True
+    trade_daily_spend_limit_enabled: bool = True
+    llm_daily_spend_limit_enabled: bool = True
     max_daily_spend_usd: float = 50.0
     max_single_position_usd: float = 100.0
     paper_bankroll_usd: float = 1000.0

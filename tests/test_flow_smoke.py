@@ -397,6 +397,22 @@ class FakeRepository:
                 for item in self.orders
                 if str(item.get("action") or "entry") in {"entry", "scale_in"}
             ),
+            "pair_gross_notional_usd": sum(
+                float(item.get("notional_usd") or 0.0)
+                for item in self.orders
+                if str(item.get("strategy_id") or "") == "pair_15m"
+                and str(item.get("action") or "entry") in {"entry", "scale_in"}
+            ),
+            "pair_effective_spend_usd": sum(
+                (
+                    float(item.get("notional_usd") or 0.0)
+                    if str(item.get("strategy_id") or "") != "pair_15m"
+                    or str(item.get("leg_role") or "") != "hedge"
+                    else float(item.get("notional_usd") or 0.0) * 0.25
+                )
+                for item in self.orders
+                if str(item.get("action") or "entry") in {"entry", "scale_in"}
+            ),
             "realized_pnl_usd": sum(float(item.get("realized_pnl_usd") or 0.0) for item in self.orders),
             "consecutive_losses": consecutive_losses,
             "last_loss_at": last_loss_at,
@@ -489,6 +505,8 @@ class FakeRepository:
                 "total_order_notional": 44.0,
                 "avg_order_notional": 44.0,
                 "daily_spend_usd": 44.0,
+                "pair_gross_notional_usd": 44.0,
+                "pair_effective_spend_usd": 40.0,
                 "realized_pnl_window": 0.0,
                 "sharpe_ratio": 0.0,
                 "max_drawdown": 0.0,
@@ -506,7 +524,26 @@ class FakeRepository:
             ],
             "asset_breakdown": [{"label": "BTC", "count": len(signals)}],
             "tier_breakdown": [{"label": "btc", "count": len(signals)}],
-            "strategy_breakdown": [{"label": "trend_follow_bayes", "signals": len(signals), "orders": len(orders), "realized_pnl_usd": 0.0}],
+            "strategy_breakdown": [
+                {
+                    "label": "trend_follow_bayes",
+                    "signals": len(signals),
+                    "orders": len(orders),
+                    "trade_count": len(orders),
+                    "win_rate": 1.0 if orders else 0.0,
+                    "realized_pnl_usd": 0.0,
+                }
+            ],
+            "strategy_comparison": [
+                {
+                    "label": "trend_follow_bayes",
+                    "signals": len(signals),
+                    "orders": len(orders),
+                    "trade_count": len(orders),
+                    "win_rate": 1.0 if orders else 0.0,
+                    "realized_pnl_usd": 0.0,
+                }
+            ],
             "regime_breakdown": [{"label": "trend", "count": len(signals)}],
             "exit_reason_breakdown": [],
             "news_breakdown": [{"label": "validated", "count": len(signals)}],
@@ -528,6 +565,22 @@ class FakeRepository:
                 ),
                 "hedge_notional": round(
                     sum(float(item.get("notional_usd") or 0.0) for item in orders if str(item.get("leg_role") or "") == "hedge"),
+                    4,
+                ),
+                "gross_notional_usd": round(
+                    sum(float(item.get("notional_usd") or 0.0) for item in orders if str(item.get("strategy_id") or "") == "pair_15m"),
+                    4,
+                ),
+                "effective_spend_usd": round(
+                    sum(
+                        (
+                            float(item.get("notional_usd") or 0.0)
+                            if str(item.get("leg_role") or "") != "hedge"
+                            else float(item.get("notional_usd") or 0.0) * 0.25
+                        )
+                        for item in orders
+                        if str(item.get("strategy_id") or "") == "pair_15m"
+                    ),
                     4,
                 ),
             },
@@ -1295,6 +1348,7 @@ def test_api_smoke(monkeypatch) -> None:
         assert performance["summary"]["signals"] == 1
         assert performance["asset_filter"] == "BTC"
         assert performance["tier_filter"] == "btc"
+        assert performance["strategy_comparison"][0]["trade_count"] == 1
         response = client.post("/agents/swap-model", json={"agent": "claude", "model": "openai/gpt-4o-mini"})
         assert response.status_code == 200
         assert response.json()["provider"] == "openai"

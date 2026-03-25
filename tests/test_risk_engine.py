@@ -20,6 +20,8 @@ def make_context(
     open_positions = positions or []
     execution_state = execution_state or {
         "daily_spend_usd": 0.0,
+        "pair_gross_notional_usd": 0.0,
+        "pair_effective_spend_usd": 0.0,
         "realized_pnl_usd": 0.0,
         "consecutive_losses": 0,
         "last_loss_at": None,
@@ -50,6 +52,7 @@ def make_context(
     return SimpleNamespace(
         settings=SimpleNamespace(
             paper_bankroll_usd=1000.0,
+            trade_daily_spend_limit_enabled=True,
             momentum_max_positions=2,
             momentum_min_edge=0.085,
             momentum_min_volume_24h=500.0,
@@ -300,7 +303,29 @@ async def test_build_execution_guard_allows_missing_news_validation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_build_execution_guard_blocks_opposite_position_same_market() -> None:
+async def test_build_execution_guard_ignores_daily_spend_when_disabled() -> None:
+    context = make_context(
+        execution_state={
+            "daily_spend_usd": 99.0,
+            "pair_gross_notional_usd": 0.0,
+            "pair_effective_spend_usd": 0.0,
+            "realized_pnl_usd": 0.0,
+            "consecutive_losses": 0,
+            "last_loss_at": None,
+        }
+    )
+    context.settings.trade_daily_spend_limit_enabled = False
+    risk = RiskEngine(context)
+    signal = make_signal(symbol="BTC", tier="btc", edge=0.40, confidence=0.80, price=0.40, volume_24h=100000.0)
+
+    guard = await risk.build_execution_guard(make_review(signal))
+
+    assert guard.size == 250
+    assert guard.notional_usd == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_blocks_same_strategy_position_same_market() -> None:
     existing_signal = make_signal(
         symbol="BTC",
         tier="btc",
@@ -334,12 +359,12 @@ async def test_build_execution_guard_blocks_opposite_position_same_market() -> N
         )
     )
 
-    with pytest.raises(RiskBlockedError, match="opposite position already open for this market"):
+    with pytest.raises(RiskBlockedError, match="trend_follow_bayes position already open for this market"):
         await risk.build_execution_guard(make_review(incoming_signal))
 
 
 @pytest.mark.asyncio
-async def test_build_execution_guard_blocks_when_pair_position_exists_for_same_market() -> None:
+async def test_build_execution_guard_allows_pair_position_from_other_strategy_in_same_market() -> None:
     incoming_signal = make_signal(
         symbol="BTC",
         tier="btc",
@@ -349,6 +374,7 @@ async def test_build_execution_guard_blocks_when_pair_position_exists_for_same_m
         volume_24h=100000.0,
     )
     incoming_signal.strategy_id = "momentum_15m"
+    incoming_signal.direction = "NO"
     risk = RiskEngine(
         make_context(
             positions=[
@@ -363,7 +389,39 @@ async def test_build_execution_guard_blocks_when_pair_position_exists_for_same_m
         )
     )
 
-    with pytest.raises(RiskBlockedError, match="pair position already open for this market"):
+    guard = await risk.build_execution_guard(make_review(incoming_signal))
+
+    assert guard.size == 250
+    assert guard.notional_usd == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_blocks_same_strategy_position_for_same_market() -> None:
+    incoming_signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.40,
+        confidence=0.80,
+        price=0.40,
+        volume_24h=100000.0,
+    )
+    incoming_signal.strategy_id = "momentum_15m"
+    incoming_signal.direction = "NO"
+    risk = RiskEngine(
+        make_context(
+            positions=[
+                {
+                    "market_id": incoming_signal.market_id,
+                    "direction": "YES",
+                    "asset_symbol": "BTC",
+                    "strategy_id": "momentum_15m",
+                    "cost_basis_usd": 20.0,
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(RiskBlockedError, match="momentum_15m position already open for this market"):
         await risk.build_execution_guard(make_review(incoming_signal))
 
 
@@ -440,7 +498,7 @@ async def test_validate_pair_signal_accepts_opposite_legs_inside_cycle() -> None
 
 
 @pytest.mark.asyncio
-async def test_build_pair_execution_guard_blocks_non_pair_position_same_market() -> None:
+async def test_build_pair_execution_guard_allows_momentum_position_in_same_market() -> None:
     signal = make_pair_signal()
     risk = RiskEngine(
         make_context(
@@ -449,14 +507,37 @@ async def test_build_pair_execution_guard_blocks_non_pair_position_same_market()
                     "market_id": signal.market_id,
                     "direction": "YES",
                     "asset_symbol": "BTC",
-                    "strategy_id": "trend_follow_bayes",
+                    "strategy_id": "momentum_15m",
                     "cost_basis_usd": 30.0,
                 }
             ]
         )
     )
 
-    with pytest.raises(RiskBlockedError, match="non-pair position already open for this market"):
+    guard = await risk.build_pair_execution_guard(make_pair_review(signal))
+
+    assert guard.primary_position_key == "pair-group-1:YES"
+    assert guard.hedge_position_key == "pair-group-1:NO"
+
+
+@pytest.mark.asyncio
+async def test_build_pair_execution_guard_blocks_same_strategy_position_for_same_market() -> None:
+    signal = make_pair_signal()
+    risk = RiskEngine(
+        make_context(
+            positions=[
+                {
+                    "market_id": signal.market_id,
+                    "direction": "YES",
+                    "asset_symbol": "BTC",
+                    "strategy_id": "pair_15m",
+                    "cost_basis_usd": 30.0,
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(RiskBlockedError, match="pair_15m position already open for this market"):
         await risk.build_pair_execution_guard(make_pair_review(signal))
 
 
@@ -479,6 +560,8 @@ async def test_build_pair_execution_guard_honors_daily_spend_cap() -> None:
         make_context(
             execution_state={
                 "daily_spend_usd": 4.6,
+                "pair_gross_notional_usd": 0.0,
+                "pair_effective_spend_usd": 4.6,
                 "realized_pnl_usd": 0.0,
                 "consecutive_losses": 0,
                 "last_loss_at": None,
@@ -489,3 +572,51 @@ async def test_build_pair_execution_guard_honors_daily_spend_cap() -> None:
 
     with pytest.raises(RiskBlockedError, match="pair trade would exceed max_daily_spend_usd"):
         await risk.build_pair_execution_guard(make_pair_review(signal))
+
+
+@pytest.mark.asyncio
+async def test_build_pair_execution_guard_ignores_daily_spend_when_disabled() -> None:
+    signal = make_pair_signal()
+    context = make_context(
+        execution_state={
+            "daily_spend_usd": 4.9,
+            "pair_gross_notional_usd": 4.9,
+            "pair_effective_spend_usd": 4.9,
+            "realized_pnl_usd": 0.0,
+            "consecutive_losses": 0,
+            "last_loss_at": None,
+        }
+    )
+    context.settings.trade_daily_spend_limit_enabled = False
+    risk = RiskEngine(context)
+    risk.config.max_daily_spend_usd = 5.0
+
+    guard = await risk.build_pair_execution_guard(make_pair_review(signal))
+
+    assert guard.total_notional_usd == pytest.approx(1.7)
+    assert guard.primary_notional_usd == pytest.approx(0.9)
+    assert guard.hedge_notional_usd == pytest.approx(0.8)
+
+
+@pytest.mark.asyncio
+async def test_build_pair_execution_guard_uses_weighted_daily_spend_for_hedge() -> None:
+    signal = make_pair_signal()
+    risk = RiskEngine(
+        make_context(
+            execution_state={
+                "daily_spend_usd": 4.8,
+                "pair_gross_notional_usd": 4.8,
+                "pair_effective_spend_usd": 3.7,
+                "realized_pnl_usd": 0.0,
+                "consecutive_losses": 0,
+                "last_loss_at": None,
+            }
+        )
+    )
+    risk.config.max_daily_spend_usd = 5.0
+
+    guard = await risk.build_pair_execution_guard(make_pair_review(signal))
+
+    assert guard.total_notional_usd == pytest.approx(1.7)
+    assert guard.primary_notional_usd == pytest.approx(0.9)
+    assert guard.hedge_notional_usd == pytest.approx(0.8)

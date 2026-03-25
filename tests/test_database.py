@@ -39,6 +39,36 @@ def test_mark_price_for_position_falls_back_to_average_price_on_incoherent_snaps
     assert spread == 0.0
 
 
+def test_daily_spend_breakdown_weights_pair_hedge_less_aggressively() -> None:
+    items = [
+        {"strategy_id": "trend_follow_bayes", "action": "entry", "notional_usd": 4.0},
+        {"strategy_id": "pair_15m", "leg_role": "primary", "action": "entry", "notional_usd": 0.9},
+        {"strategy_id": "pair_15m", "leg_role": "hedge", "action": "scale_in", "notional_usd": 0.8},
+    ]
+
+    breakdown = TradingRepository._daily_spend_breakdown(items)
+
+    assert breakdown["daily_spend_usd"] == pytest.approx(5.7)
+    assert breakdown["pair_gross_notional_usd"] == pytest.approx(1.7)
+    assert breakdown["pair_effective_spend_usd"] == pytest.approx(5.1)
+
+
+def test_pair_trade_summary_exposes_gross_and_effective_notional() -> None:
+    orders = [
+        {"strategy_id": "pair_15m", "trade_group_id": "g1", "leg_role": "primary", "notional_usd": 0.9},
+        {"strategy_id": "pair_15m", "trade_group_id": "g1", "leg_role": "hedge", "notional_usd": 0.8},
+        {"strategy_id": "pair_15m", "trade_group_id": "g2", "leg_role": "primary", "notional_usd": 0.6},
+    ]
+
+    summary = TradingRepository._pair_trade_summary(orders, pending_count=2)
+
+    assert summary["groups"] == 2
+    assert summary["primary_notional"] == pytest.approx(1.5)
+    assert summary["hedge_notional"] == pytest.approx(0.8)
+    assert summary["gross_notional_usd"] == pytest.approx(2.3)
+    assert summary["effective_spend_usd"] == pytest.approx(1.5 + 0.8 * 0.25)
+
+
 def test_mark_price_for_position_prefers_current_pair_cycle_for_matching_cycle_slug() -> None:
     row = {
         "direction": "YES",
@@ -131,6 +161,37 @@ def test_group_count_by_keys_groups_reasons_by_strategy() -> None:
     assert breakdown[0]["reasons"][0] == {"label": "spread", "count": 2}
     assert breakdown[1]["label"] == "pair_15m"
     assert breakdown[2]["label"] == "unknown"
+
+
+def test_strategy_breakdown_includes_trade_count_and_win_rate() -> None:
+    signals = [
+        {"strategy_id": "momentum_15m"},
+        {"strategy_id": "pair_15m"},
+        {"strategy_id": "pair_15m"},
+    ]
+    orders = [
+        {"strategy_id": "momentum_15m", "action": "entry", "realized_pnl_usd": 0.0},
+        {"strategy_id": "momentum_15m", "action": "close", "realized_pnl_usd": 1.2},
+        {"strategy_id": "momentum_15m", "action": "close", "realized_pnl_usd": -0.4},
+        {"strategy_id": "pair_15m", "action": "entry", "realized_pnl_usd": 0.0},
+        {"strategy_id": "pair_15m", "action": "close", "realized_pnl_usd": 2.0},
+    ]
+
+    breakdown = TradingRepository._strategy_breakdown(signals, orders)
+
+    momentum = next(item for item in breakdown if item["label"] == "momentum_15m")
+    pair = next(item for item in breakdown if item["label"] == "pair_15m")
+
+    assert momentum["signals"] == 1
+    assert momentum["orders"] == 3
+    assert momentum["trade_count"] == 2
+    assert momentum["win_rate"] == pytest.approx(0.5)
+    assert momentum["realized_pnl_usd"] == pytest.approx(0.8)
+    assert pair["signals"] == 2
+    assert pair["orders"] == 2
+    assert pair["trade_count"] == 1
+    assert pair["win_rate"] == pytest.approx(1.0)
+    assert pair["realized_pnl_usd"] == pytest.approx(2.0)
 
 
 @pytest.mark.asyncio

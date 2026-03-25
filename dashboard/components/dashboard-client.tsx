@@ -242,7 +242,22 @@ type PerformanceReport = {
   }>;
   asset_breakdown: Array<{ label: string; count: number }>;
   tier_breakdown: Array<{ label: string; count: number }>;
-  strategy_breakdown?: Array<{ label: string; signals: number; orders: number; realized_pnl_usd: number }>;
+  strategy_breakdown?: Array<{
+    label: string;
+    signals: number;
+    orders: number;
+    trade_count: number;
+    win_rate: number;
+    realized_pnl_usd: number;
+  }>;
+  strategy_comparison?: Array<{
+    label: string;
+    signals: number;
+    orders: number;
+    trade_count: number;
+    win_rate: number;
+    realized_pnl_usd: number;
+  }>;
   regime_breakdown?: Array<{ label: string; count: number }>;
   exit_reason_breakdown?: Array<{ label: string; count: number }>;
   news_breakdown: Array<{ label: string; count: number }>;
@@ -587,6 +602,9 @@ export function DashboardClient() {
   const scanRejects = normalizeBreakdownMap(latestScan?.rejection_breakdown);
   const scanPreRiskRejects = normalizeBreakdownMap(latestScan?.pre_risk_block_reasons);
   const scanRiskRejects = normalizeBreakdownMap(latestScan?.risk_block_reasons);
+  const strategyBreakdown = (perf?.strategy_comparison ?? perf?.strategy_breakdown ?? [])
+    .slice()
+    .sort((a, b) => b.realized_pnl_usd - a.realized_pnl_usd || b.trade_count - a.trade_count || a.label.localeCompare(b.label));
 
   return (
     <>
@@ -961,12 +979,65 @@ export function DashboardClient() {
         </section>
 
         <section className="col-span-4 border border-poly-border bg-poly-black flex flex-col">
-          <PanelHead title="Strategy_Distribution" badge={<span>{perf?.strategy_breakdown?.length ?? 0} models</span>} />
+          <PanelHead title="Strategy_Distribution" badge={<span>{strategyBreakdown.length} models</span>} />
           <div className="flex-1 p-3">
             <BreakdownMiniBar
-              data={(perf?.strategy_breakdown ?? []).map((item) => ({ label: labelStrategy(item.label), count: item.orders }))}
+              data={strategyBreakdown.map((item) => ({ label: labelStrategy(item.label), count: item.trade_count || item.orders }))}
               color="#00ff41"
             />
+          </div>
+        </section>
+
+        <section className="col-span-12 border border-poly-border bg-poly-black flex flex-col max-h-[320px]">
+          <PanelHead
+            title="Strategy_Comparison"
+            badge={<span>{strategyBreakdown.length} tracked</span>}
+          />
+          <div className="flex-1 overflow-y-auto custom-scrollbar">
+            <table className="w-full font-mono text-[9px] text-left border-collapse">
+              <thead className="bg-poly-surface-container/50 text-poly-dim uppercase sticky top-0">
+                <tr>
+                  <th className="p-1.5 font-normal">STRATEGY</th>
+                  <th className="p-1.5 font-normal text-right">SIGS</th>
+                  <th className="p-1.5 font-normal text-right">ORDS</th>
+                  <th className="p-1.5 font-normal text-right">TRADES</th>
+                  <th className="p-1.5 font-normal text-right">WIN%</th>
+                  <th className="p-1.5 font-normal text-right">RPNL</th>
+                  <th className="p-1.5 font-normal text-right">AVG/TRADE</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-poly-border-dim">
+                {strategyBreakdown.map((item) => {
+                  const isPair = item.label === "pair_15m";
+                  const isMomentum = item.label === "momentum_15m";
+                  const avgTrade = item.trade_count > 0 ? item.realized_pnl_usd / item.trade_count : 0;
+                  return (
+                    <tr key={item.label} className="hover:bg-poly-surface-container/40">
+                      <td className={`p-1.5 truncate max-w-[180px] ${isPair ? "text-poly-cyan" : isMomentum ? "text-poly-green" : "text-poly-muted"}`}>
+                        {labelStrategy(item.label)}
+                      </td>
+                      <td className="p-1.5 text-right text-poly-dim">{item.signals}</td>
+                      <td className="p-1.5 text-right text-poly-amber">{item.orders}</td>
+                      <td className="p-1.5 text-right">{item.trade_count}</td>
+                      <td className={`p-1.5 text-right ${item.win_rate >= 0.5 ? "text-poly-green" : "text-poly-red"}`}>
+                        {asPercent(item.win_rate)}
+                      </td>
+                      <td className={`p-1.5 text-right font-bold ${item.realized_pnl_usd >= 0 ? "text-poly-green" : "text-poly-red"}`}>
+                        {asCurrencySigned(item.realized_pnl_usd)}
+                      </td>
+                      <td className={`p-1.5 text-right ${avgTrade >= 0 ? "text-poly-green" : "text-poly-red"}`}>
+                        {asCurrencySigned(avgTrade)}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {strategyBreakdown.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="p-3 text-center text-poly-dim">NO_DATA</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </section>
 

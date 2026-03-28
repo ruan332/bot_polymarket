@@ -325,6 +325,8 @@ type DashboardState = {
   portfolio: PortfolioSummary | null;
   positions: Position[];
   performance: PerformanceReport | null;
+  pairGoalPerformance: PerformanceReport | null;
+  momentumGoalPerformance: PerformanceReport | null;
   riskBreakdown: RiskBreakdownReport | null;
   logs: LogEntry[];
 };
@@ -418,6 +420,62 @@ function relativeAge(value?: string | null) {
   return `${Math.floor(delta / 3600)}h`;
 }
 
+type StrategyGoalCheck = {
+  id: string;
+  label: string;
+  value: string;
+  ok: boolean;
+};
+
+type StrategyGoalStatus = {
+  strategy: "pair_15m" | "momentum_15m";
+  windowHours: number;
+  go: boolean;
+  score: string;
+  checks: StrategyGoalCheck[];
+};
+
+function evaluateStrategyGoals(
+  strategy: "pair_15m" | "momentum_15m",
+  report: PerformanceReport | null,
+): StrategyGoalStatus {
+  const summary = report?.summary;
+  const signals = numberOr(summary?.signals);
+  const orders = numberOr(summary?.orders);
+  const realized = numberOr(summary?.realized_pnl_window);
+  const notional = numberOr(summary?.total_order_notional);
+  const winRate = numberOr(summary?.win_rate);
+  const maxDrawdown = numberOr(summary?.max_drawdown);
+  const riskEvents = numberOr(summary?.risk_events);
+  const riskPerSignal = signals > 0 ? riskEvents / signals : Number.POSITIVE_INFINITY;
+  const pnlPerNotional = notional > 0 ? realized / notional : 0;
+  const riskLimit = strategy === "momentum_15m" ? 40 : 20;
+
+  const checks: StrategyGoalCheck[] = [
+    { id: "sample", label: "Orders >= 150", value: `${orders}`, ok: orders >= 150 },
+    { id: "pnl", label: "Realized PnL > 0", value: asCurrencySigned(realized), ok: realized > 0 },
+    { id: "eff", label: "PnL/Notional >= 1.0%", value: asPercent(pnlPerNotional), ok: pnlPerNotional >= 0.01 },
+    { id: "win", label: "Win Rate >= 48%", value: asPercent(winRate), ok: winRate >= 0.48 },
+    { id: "dd", label: "Max DD <= 3%", value: asPercent(maxDrawdown), ok: maxDrawdown <= 0.03 },
+    {
+      id: "risk",
+      label: `Risk/Signal < ${riskLimit}`,
+      value: Number.isFinite(riskPerSignal) ? riskPerSignal.toFixed(1) : "--",
+      ok: Number.isFinite(riskPerSignal) && riskPerSignal < riskLimit,
+    },
+  ];
+
+  const passed = checks.filter((check) => check.ok).length;
+  const total = checks.length;
+  return {
+    strategy,
+    windowHours: report?.window_hours ?? 0,
+    go: total > 0 && passed === total,
+    score: `${passed}/${total}`,
+    checks,
+  };
+}
+
 function Icon({ name, className }: { name: string; className?: string }) {
   return <span className={`material-symbols-outlined ${className ?? ""}`}>{name}</span>;
 }
@@ -435,6 +493,8 @@ export function DashboardClient() {
     portfolio: null,
     positions: [],
     performance: null,
+    pairGoalPerformance: null,
+    momentumGoalPerformance: null,
     riskBreakdown: null,
     logs: [],
   });
@@ -470,6 +530,16 @@ export function DashboardClient() {
         { key: "portfolio", path: "/portfolio/summary", fallback: currentState.portfolio as PortfolioSummary | null },
         { key: "positions", path: "/portfolio/positions", fallback: currentState.positions as Position[] },
         { key: "performance", path: "/metrics/performance?hours=24", fallback: currentState.performance as PerformanceReport | null },
+        {
+          key: "pairGoalPerformance",
+          path: "/metrics/performance?hours=336&strategy=pair_15m",
+          fallback: currentState.pairGoalPerformance as PerformanceReport | null,
+        },
+        {
+          key: "momentumGoalPerformance",
+          path: "/metrics/performance?hours=336&strategy=momentum_15m",
+          fallback: currentState.momentumGoalPerformance as PerformanceReport | null,
+        },
         { key: "riskBreakdown", path: "/metrics/risk-breakdown?hours=24", fallback: currentState.riskBreakdown as RiskBreakdownReport | null },
       ] as const;
 
@@ -500,6 +570,8 @@ export function DashboardClient() {
         const portfolio = (nextData.get("portfolio") ?? null) as PortfolioSummary | null;
         const positions = (nextData.get("positions") ?? []) as Position[];
         const performance = (nextData.get("performance") ?? null) as PerformanceReport | null;
+        const pairGoalPerformance = (nextData.get("pairGoalPerformance") ?? null) as PerformanceReport | null;
+        const momentumGoalPerformance = (nextData.get("momentumGoalPerformance") ?? null) as PerformanceReport | null;
         const riskBreakdown = (nextData.get("riskBreakdown") ?? null) as RiskBreakdownReport | null;
 
         const newLogs: LogEntry[] = [];
@@ -552,6 +624,8 @@ export function DashboardClient() {
           portfolio,
           positions,
           performance,
+          pairGoalPerformance,
+          momentumGoalPerformance,
           riskBreakdown,
           logs: newLogs.slice(0, 120),
         });
@@ -587,6 +661,8 @@ export function DashboardClient() {
   const scanRejects = normalizeBreakdownMap(latestScan?.rejection_breakdown);
   const scanPreRiskRejects = normalizeBreakdownMap(latestScan?.pre_risk_block_reasons);
   const scanRiskRejects = normalizeBreakdownMap(latestScan?.risk_block_reasons);
+  const pairGoal = evaluateStrategyGoals("pair_15m", state.pairGoalPerformance);
+  const momentumGoal = evaluateStrategyGoals("momentum_15m", state.momentumGoalPerformance);
 
   return (
     <>
@@ -868,6 +944,13 @@ export function DashboardClient() {
         </section>
 
         {/* ══════ ROW 5: Orders Table + Agents + Top Markets ══════ */}
+        <section className="col-span-12 border border-poly-border bg-poly-black flex flex-col">
+          <PanelHead title="Strategy_Go_NoGo_Gates_14d" badge={<span className="text-poly-amber">LIVE_READY_CHECK</span>} />
+          <div className="p-3 grid grid-cols-2 gap-3">
+            <StrategyGoalCard goal={pairGoal} />
+            <StrategyGoalCard goal={momentumGoal} />
+          </div>
+        </section>
         <section className="col-span-6 border border-poly-border bg-poly-black flex flex-col max-h-[280px]">
           <PanelHead title="Recent_Executions" badge={<span>{summary?.orders ?? state.orders.length} total</span>} />
           <div className="flex-1 overflow-y-auto custom-scrollbar">
@@ -1107,6 +1190,41 @@ function Kpi({ label, value, color }: { label: string; value: string; color: str
   );
 }
 
+function StrategyGoalCard({ goal }: { goal: StrategyGoalStatus }) {
+  const strategyLabel = labelStrategy(goal.strategy).toUpperCase();
+  const statusLabel = goal.go ? "GO" : "NO-GO";
+  return (
+    <div className="border border-poly-border bg-poly-surface-dim/20 p-3 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="font-mono text-[9px] text-poly-dim uppercase">{strategyLabel}</div>
+          <div className="font-mono text-[8px] text-poly-dim uppercase">{goal.windowHours}h window | score {goal.score}</div>
+        </div>
+        <span
+          className={`px-2 py-1 font-mono text-[9px] font-bold ${
+            goal.go ? "bg-poly-green text-poly-black" : "bg-poly-red text-white"
+          }`}
+        >
+          {statusLabel}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {goal.checks.map((check) => (
+          <div key={`${goal.strategy}-${check.id}`} className="border border-poly-border px-2 py-1.5">
+            <div className="font-mono text-[8px] text-poly-dim uppercase">{check.label}</div>
+            <div className="flex items-center justify-between mt-1">
+              <span className="font-mono text-[10px] text-poly-text">{check.value}</span>
+              <span className={`font-mono text-[9px] font-bold ${check.ok ? "text-poly-green" : "text-poly-red"}`}>
+                {check.ok ? "OK" : "FAIL"}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function KpiCard({ label, value, icon, color }: { label: string; value: string; icon: string; color: string }) {
   return (
     <div className="border border-poly-border bg-poly-black p-3 flex flex-col justify-between min-h-[80px]">
@@ -1204,4 +1322,6 @@ function LogTerminal({ logs }: { logs: LogEntry[] }) {
     </div>
   );
 }
+
+
 

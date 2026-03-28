@@ -200,6 +200,14 @@ type Position = {
   scaled_out_count?: number;
 };
 
+type EquityHistoryPoint = {
+  created_at: string;
+  total_equity: number;
+  total_pnl: number;
+  unrealized_pnl: number;
+  available_balance?: number;
+};
+
 type PerformanceReport = {
   generated_at: string;
   window_hours: number;
@@ -324,6 +332,7 @@ type DashboardState = {
   pipelineEvents: PipelineTelemetryEvent[];
   portfolio: PortfolioSummary | null;
   positions: Position[];
+  equityHistory: EquityHistoryPoint[];
   performance: PerformanceReport | null;
   pairGoalPerformance: PerformanceReport | null;
   momentumGoalPerformance: PerformanceReport | null;
@@ -492,6 +501,7 @@ export function DashboardClient() {
     pipelineEvents: [],
     portfolio: null,
     positions: [],
+    equityHistory: [],
     performance: null,
     pairGoalPerformance: null,
     momentumGoalPerformance: null,
@@ -529,6 +539,7 @@ export function DashboardClient() {
         { key: "pipelineEvents", path: "/metrics/pipeline/recent", fallback: currentState.pipelineEvents as PipelineTelemetryEvent[] },
         { key: "portfolio", path: "/portfolio/summary", fallback: currentState.portfolio as PortfolioSummary | null },
         { key: "positions", path: "/portfolio/positions", fallback: currentState.positions as Position[] },
+        { key: "equityHistory", path: "/portfolio/equity-history?limit=1000", fallback: currentState.equityHistory as EquityHistoryPoint[] },
         { key: "performance", path: "/metrics/performance?hours=24", fallback: currentState.performance as PerformanceReport | null },
         {
           key: "pairGoalPerformance",
@@ -569,6 +580,13 @@ export function DashboardClient() {
         const pipelineEvents = (nextData.get("pipelineEvents") ?? []) as PipelineTelemetryEvent[];
         const portfolio = (nextData.get("portfolio") ?? null) as PortfolioSummary | null;
         const positions = (nextData.get("positions") ?? []) as Position[];
+        const equityHistoryRaw = (nextData.get("equityHistory") ?? []) as EquityHistoryPoint[];
+        const equityHistory = equityHistoryRaw.map((point) => ({
+          created_at: point.created_at,
+          total_equity: numberOr(point.total_equity),
+          total_pnl: numberOr(point.total_pnl),
+          unrealized_pnl: numberOr(point.unrealized_pnl),
+        }));
         const performance = (nextData.get("performance") ?? null) as PerformanceReport | null;
         const pairGoalPerformance = (nextData.get("pairGoalPerformance") ?? null) as PerformanceReport | null;
         const momentumGoalPerformance = (nextData.get("momentumGoalPerformance") ?? null) as PerformanceReport | null;
@@ -623,6 +641,7 @@ export function DashboardClient() {
           pipelineEvents,
           portfolio,
           positions,
+          equityHistory,
           performance,
           pairGoalPerformance,
           momentumGoalPerformance,
@@ -663,6 +682,7 @@ export function DashboardClient() {
   const scanRiskRejects = normalizeBreakdownMap(latestScan?.risk_block_reasons);
   const pairGoal = evaluateStrategyGoals("pair_15m", state.pairGoalPerformance);
   const momentumGoal = evaluateStrategyGoals("momentum_15m", state.momentumGoalPerformance);
+  const equitySeries = state.equityHistory.length > 0 ? state.equityHistory : (perf?.time_series.equity ?? []);
 
   return (
     <>
@@ -736,7 +756,7 @@ export function DashboardClient() {
         <section className="col-span-8 border border-poly-border bg-poly-black relative min-h-[220px] flex flex-col">
           <div className="absolute top-3 left-3 font-mono text-[10px] text-poly-dim uppercase z-10">Equity_Performance_Matrix</div>
           <div className="flex-1 pt-7 px-2 pb-2">
-            <EquityChart equity={perf?.time_series.equity ?? []} />
+            <EquityChart equity={equitySeries} />
           </div>
           <div className="absolute inset-0 bg-gradient-to-t from-poly-green/5 to-transparent pointer-events-none" />
         </section>

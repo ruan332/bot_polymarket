@@ -18,6 +18,7 @@ type EquityPoint = { created_at: string; total_equity: number; total_pnl: number
 type PipelinePoint = { bucket: string; signals: number; decisions: number; orders: number; risk_events: number };
 type CostPoint = { agent: string; cost_usd: number; calls: number };
 type BreakdownPoint = { label: string; count: number };
+type FunnelStagePoint = { label: string; count: number; detail?: string; accent?: string };
 
 const C = {
   green: "#00ff41",
@@ -158,6 +159,56 @@ export function BreakdownMiniBar({ data, color }: { data: BreakdownPoint[]; colo
         </div>
       ))}
       {data.length === 0 && <div className="text-poly-dim font-mono text-[9px] text-center py-2">NO_DATA</div>}
+    </div>
+  );
+}
+
+export function DiscoveryFunnelChart({
+  stages,
+  operableCount,
+}: {
+  stages: FunnelStagePoint[];
+  operableCount: number;
+}) {
+  const max = Math.max(...stages.map((stage) => stage.count), 1);
+  const palette = ["#00f3ff", "#00ff41", "#fbbf24", "#ff8a3d", "#ff3131", "#a855f7"];
+
+  return (
+    <div className="h-full flex flex-col gap-2">
+      <div className="space-y-2">
+        {stages.map((stage, index) => {
+          const width = Math.max(18, (stage.count / max) * 100);
+          const color = stage.accent ?? palette[index % palette.length];
+          return (
+            <div key={stage.label} className="relative overflow-hidden border border-poly-border bg-poly-surface-dim/20">
+              <div
+                className="absolute inset-y-0 left-0 opacity-20"
+                style={{ width: `${width}%`, backgroundColor: color }}
+              />
+              <div className="relative flex items-center justify-between gap-3 px-3 py-2">
+                <div className="min-w-0">
+                  <div className="font-mono text-[8px] uppercase text-poly-dim">{stage.label}</div>
+                  {stage.detail && <div className="font-mono text-[9px] text-poly-muted truncate">{stage.detail}</div>}
+                </div>
+                <div className="text-right">
+                  <div className="font-mono text-lg font-bold" style={{ color }}>
+                    {stage.count}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="border border-poly-border bg-poly-surface-dim/20 px-3 py-2 flex items-center justify-between font-mono text-[9px]">
+        <div>
+          <div className="text-poly-dim uppercase">Final_Operable</div>
+          <div className="text-poly-muted">markets ready to enter the operation</div>
+        </div>
+        <div className={`px-2 py-1 font-bold ${operableCount > 0 ? "bg-poly-green text-poly-black" : "bg-poly-red text-white"}`}>
+          {operableCount > 0 ? `OPERABLE ${operableCount}` : "NOT_OPERABLE"}
+        </div>
+      </div>
     </div>
   );
 }

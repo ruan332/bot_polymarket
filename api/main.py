@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException
 from core.app_context import AppContext
 from core.config import get_enabled_agent_names, update_agent_model
 from core.cost_tracker import CostTracker
+from core.discovery_service import DiscoveryService
 from core.market_connector import MarketConnector
 from core.schemas import ModelSwapRequest
 from core.settlement import SettlementService
@@ -286,3 +287,43 @@ async def settlement_process(dry_run: bool | None = None, limit: int = 20) -> di
 @app.get("/settlement/events/recent")
 async def settlement_events_recent(limit: int = 20) -> list[dict[str, object]]:
     return await get_context().repository.get_recent_settlement_events(limit=limit)
+
+
+@app.get("/discovery/funnel")
+async def discovery_funnel(limit: int = 16) -> dict[str, object]:
+    context = get_context()
+    stored = await context.repository.get_latest_discovery_funnel(limit=limit)
+    if stored is None:
+        return {
+            "run": None,
+            "candidates": [],
+            "latest_scan_stats": {},
+            "stage_counts": [
+                {"label": "universe", "count": 0},
+                {"label": "crypto_classified", "count": 0},
+                {"label": "deterministic_passed", "count": 0},
+                {"label": "cheap_llm_passed", "count": 0},
+                {"label": "claude_passed", "count": 0},
+                {"label": "operable", "count": 0},
+            ],
+            "dropoff_counts": [],
+            "rejected_breakdown": {},
+            "cost_summary": {
+                "research_cost_usd": 0.0,
+                "research_calls": 0,
+                "claude_cost_usd": 0.0,
+                "claude_calls": 0,
+                "total_cost_usd": 0.0,
+            },
+        }
+    return stored
+
+
+@app.post("/discovery/funnel/run")
+async def discovery_funnel_run(limit: int = 24) -> dict[str, object]:
+    context = get_context()
+    service = DiscoveryService(context)
+    try:
+        return await service.run(limit=limit)
+    finally:
+        await service.close()

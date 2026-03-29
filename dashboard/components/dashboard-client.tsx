@@ -313,6 +313,74 @@ type RiskBreakdownReport = {
   }>;
 };
 
+type DiscoveryFunnelCandidate = {
+  run_id: string;
+  market_id: string;
+  question: string;
+  asset_symbol: string;
+  asset_name: string;
+  crypto_tier: "btc" | "major" | "small_cap" | string;
+  market_kind: string;
+  volume_24h: number;
+  spread_bps: number;
+  edge: number;
+  confidence: number;
+  liquidity_score: number;
+  time_to_expiry_hours: number | null;
+  strategy_id: string;
+  direction: string;
+  deterministic_pass: boolean;
+  research_pass: boolean;
+  claude_pass: boolean;
+  verdict: "operable" | "watch" | "reject" | string;
+  score: number;
+  reason: string;
+  stage_payload: {
+    deterministic?: Record<string, unknown>;
+    research?: Record<string, unknown>;
+    claude?: Record<string, unknown>;
+  };
+  created_at: string;
+};
+
+type DiscoveryFunnelResponse = {
+  run: {
+    run_id: string;
+    requested_limit: number;
+    universe_count: number;
+    crypto_classified_count: number;
+    deterministic_passed_count: number;
+    research_passed_count: number;
+    claude_passed_count: number;
+    operable_count: number;
+    stage_counts: Array<{ label: string; count: number }>;
+    dropoff_counts: Array<{ label: string; count: number }>;
+    rejected_breakdown: Record<string, number>;
+    cost_summary: {
+      research_cost_usd: number;
+      research_calls: number;
+      claude_cost_usd: number;
+      claude_calls: number;
+      total_cost_usd: number;
+    };
+    scan_stats: Record<string, unknown>;
+    metadata: Record<string, unknown>;
+    created_at: string;
+  } | null;
+  candidates: DiscoveryFunnelCandidate[];
+  latest_scan_stats: Record<string, unknown>;
+  stage_counts: Array<{ label: string; count: number }>;
+  dropoff_counts: Array<{ label: string; count: number }>;
+  rejected_breakdown: Record<string, number>;
+  cost_summary: {
+    research_cost_usd: number;
+    research_calls: number;
+    claude_cost_usd: number;
+    claude_calls: number;
+    total_cost_usd: number;
+  };
+};
+
 type LogEntry = {
   id: string;
   time: string;
@@ -337,6 +405,7 @@ type DashboardState = {
   pairGoalPerformance: PerformanceReport | null;
   momentumGoalPerformance: PerformanceReport | null;
   riskBreakdown: RiskBreakdownReport | null;
+  discoveryFunnel: DiscoveryFunnelResponse | null;
   logs: LogEntry[];
 };
 
@@ -346,6 +415,7 @@ const PipelineChart = dynamic(() => import("./charts").then((m) => m.PipelineCha
 const CostBarChart = dynamic(() => import("./charts").then((m) => m.CostBarChart), { ssr: false });
 const RiskBreakdownChart = dynamic(() => import("./charts").then((m) => m.RiskBreakdownChart), { ssr: false });
 const BreakdownMiniBar = dynamic(() => import("./charts").then((m) => m.BreakdownMiniBar), { ssr: false });
+const DiscoveryFunnelChart = dynamic(() => import("./charts").then((m) => m.DiscoveryFunnelChart), { ssr: false });
 
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, { cache: "no-store" });
@@ -506,6 +576,7 @@ export function DashboardClient() {
     pairGoalPerformance: null,
     momentumGoalPerformance: null,
     riskBreakdown: null,
+    discoveryFunnel: null,
     logs: [],
   });
   const [error, setError] = useState<string | null>(null);
@@ -552,6 +623,7 @@ export function DashboardClient() {
           fallback: currentState.momentumGoalPerformance as PerformanceReport | null,
         },
         { key: "riskBreakdown", path: "/metrics/risk-breakdown?hours=24", fallback: currentState.riskBreakdown as RiskBreakdownReport | null },
+        { key: "discoveryFunnel", path: "/discovery/funnel?limit=16", fallback: currentState.discoveryFunnel as DiscoveryFunnelResponse | null },
       ] as const;
 
       const results = await Promise.allSettled(requests.map((request) => getJson(request.path)));
@@ -591,6 +663,7 @@ export function DashboardClient() {
         const pairGoalPerformance = (nextData.get("pairGoalPerformance") ?? null) as PerformanceReport | null;
         const momentumGoalPerformance = (nextData.get("momentumGoalPerformance") ?? null) as PerformanceReport | null;
         const riskBreakdown = (nextData.get("riskBreakdown") ?? null) as RiskBreakdownReport | null;
+        const discoveryFunnel = (nextData.get("discoveryFunnel") ?? null) as DiscoveryFunnelResponse | null;
 
         const newLogs: LogEntry[] = [];
         signals.forEach(s => newLogs.push({
@@ -646,6 +719,7 @@ export function DashboardClient() {
           pairGoalPerformance,
           momentumGoalPerformance,
           riskBreakdown,
+          discoveryFunnel,
           logs: newLogs.slice(0, 120),
         });
         setError(failures.length > 0 ? `Failed: ${failures.join(", ")}` : null);
@@ -672,6 +746,20 @@ export function DashboardClient() {
   const maxDrawdown = perf?.summary.max_drawdown ?? 0;
   const riskBreakdown = state.riskBreakdown;
   const riskByStrategy = perf?.risk_breakdown_by_strategy ?? riskBreakdown?.by_strategy_reason ?? [];
+  const discovery = state.discoveryFunnel;
+  const discoveryRun = discovery?.run ?? null;
+  const discoveryStages = discovery?.stage_counts ?? discoveryRun?.stage_counts ?? [];
+  const discoveryDropoffs = discovery?.dropoff_counts ?? discoveryRun?.dropoff_counts ?? [];
+  const discoveryCandidates = discovery?.candidates ?? [];
+  const discoveryStageMap = Object.fromEntries(discoveryStages.map((item) => [item.label, item.count])) as Record<string, number>;
+  const discoveryChartStages = [
+    { label: "Universe", count: discoveryStageMap.universe ?? 0, detail: "raw active crypto markets", accent: "#00f3ff" },
+    { label: "Crypto Classified", count: discoveryStageMap.crypto_classified ?? 0, detail: "classifiable crypto markets", accent: "#00ff41" },
+    { label: "Deterministic Pass", count: discoveryStageMap.deterministic_passed ?? 0, detail: "threshold + strategy fit", accent: "#fbbf24" },
+    { label: "Cheap LLM Pass", count: discoveryStageMap.cheap_llm_passed ?? 0, detail: "promoted to Claude", accent: "#ff8a3d" },
+    { label: "Claude Pass", count: discoveryStageMap.claude_passed ?? 0, detail: "operationally fit", accent: "#a855f7" },
+    { label: "Operable", count: discoveryStageMap.operable ?? 0, detail: "ready for inclusion", accent: "#00ff41" },
+  ];
   const overview = state.overview;
   const flow = overview?.flow_summary;
   const latestScan = overview?.latest_scan_telemetry ?? null;
@@ -683,6 +771,7 @@ export function DashboardClient() {
   const pairGoal = evaluateStrategyGoals("pair_15m", state.pairGoalPerformance);
   const momentumGoal = evaluateStrategyGoals("momentum_15m", state.momentumGoalPerformance);
   const equitySeries = state.equityHistory.length > 0 ? state.equityHistory : (perf?.time_series.equity ?? []);
+  const discoveryOperableCount = discoveryRun?.operable_count ?? 0;
 
   return (
     <>
@@ -800,7 +889,57 @@ export function DashboardClient() {
 
         {/* ══════ ROW 3: Scanner + Visual Flow ══════ */}
         <section className="col-span-5 border border-poly-border bg-poly-black flex flex-col min-h-[240px]">
-          <PanelHead title="Scanner_Prefilter_Live" badge={<span>{flow?.window_minutes ?? 15}m window</span>} />
+          <PanelHead title="Discovery_Funnel_Live" badge={<span>{discoveryRun ? `${relativeAge(discoveryRun.created_at)} ago` : "NO_RUN"}</span>} />
+          <div className="p-3 space-y-3 border-b border-poly-border">
+            <div className="grid grid-cols-2 gap-3">
+              <KpiCard label="Universe" value={`${discoveryRun?.universe_count ?? 0}`} icon="hub" color="text-poly-cyan" />
+              <KpiCard label="Crypto_Classified" value={`${discoveryRun?.crypto_classified_count ?? 0}`} icon="token" color="text-poly-green" />
+              <KpiCard label="Deterministic_Pass" value={`${discoveryRun?.deterministic_passed_count ?? 0}`} icon="filter_alt" color="text-poly-amber" />
+              <KpiCard label="Operable" value={`${discoveryOperableCount}`} icon="verified" color="text-poly-green" />
+            </div>
+            <div className="border border-poly-border p-2">
+              <DiscoveryFunnelChart stages={discoveryChartStages} operableCount={discoveryOperableCount} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="border border-poly-border p-3">
+                <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Dropoff_Reason</div>
+                <BreakdownMiniBar
+                  data={discoveryDropoffs.map((item) => ({ label: compactReason(item.label), count: item.count }))}
+                  color="#ff8a3d"
+                />
+              </div>
+              <div className="border border-poly-border p-3">
+                <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Final_Candidates</div>
+                <div className="space-y-1.5 max-h-[120px] overflow-y-auto custom-scrollbar">
+                  {discoveryCandidates.slice(0, 4).map((candidate) => (
+                    <div key={`${candidate.market_id}-${candidate.created_at}`} className="flex items-center justify-between font-mono text-[9px] bg-poly-surface-container/30 px-2 py-1">
+                      <span className="truncate max-w-[72%] text-poly-cyan" title={candidate.question}>
+                        {candidate.asset_symbol || "?"} [{candidate.crypto_tier || "â€”"}] {candidate.question}
+                      </span>
+                      <span className={candidate.verdict === "operable" ? "text-poly-green" : "text-poly-dim"}>
+                        {candidate.verdict.toUpperCase()}
+                      </span>
+                    </div>
+                  ))}
+                  {discoveryCandidates.length === 0 && <div className="font-mono text-[9px] text-poly-dim text-center py-2">NO_DISCOVERY_RUN</div>}
+                </div>
+              </div>
+            </div>
+            <div className="border border-poly-border p-3">
+              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Latest_Selected_Markets</div>
+              <div className="space-y-1.5">
+                {(latestScan?.selected_markets ?? []).slice(0, 3).map((market) => (
+                  <div key={`${market.market_id}-${market.asset_symbol}`} className="flex items-center justify-between font-mono text-[9px] bg-poly-surface-container/30 px-2 py-1">
+                    <span className="truncate max-w-[72%] text-poly-cyan" title={market.question}>
+                      {market.asset_symbol || "?"} [{market.crypto_tier || "â€”"}] {market.question}
+                    </span>
+                    <span className="text-poly-dim">{asCurrency(market.volume_24h ?? 0)}</span>
+                  </div>
+                ))}
+                {(latestScan?.selected_markets ?? []).length === 0 && <div className="font-mono text-[9px] text-poly-dim text-center py-2">NO_SELECTED_MARKETS</div>}
+              </div>
+            </div>
+          </div>
           <div className="flex-1 p-3 grid grid-cols-3 gap-3">
             <KpiCard label="Gamma_Fetched" value={`${latestScan?.gamma_markets_fetched ?? 0}`} icon="hub" color="text-poly-cyan" />
             <KpiCard label="Crypto_Classified" value={`${latestScan?.crypto_classified ?? 0}`} icon="token" color="text-poly-green" />

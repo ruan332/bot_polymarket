@@ -223,6 +223,51 @@ CREATE TABLE IF NOT EXISTS analysis_cutoffs (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+CREATE TABLE IF NOT EXISTS market_discovery_runs (
+    run_id UUID PRIMARY KEY,
+    requested_limit INTEGER NOT NULL DEFAULT 0,
+    universe_count INTEGER NOT NULL DEFAULT 0,
+    crypto_classified_count INTEGER NOT NULL DEFAULT 0,
+    deterministic_passed_count INTEGER NOT NULL DEFAULT 0,
+    research_passed_count INTEGER NOT NULL DEFAULT 0,
+    claude_passed_count INTEGER NOT NULL DEFAULT 0,
+    operable_count INTEGER NOT NULL DEFAULT 0,
+    stage_counts JSONB NOT NULL DEFAULT '[]'::jsonb,
+    dropoff_counts JSONB NOT NULL DEFAULT '[]'::jsonb,
+    rejected_breakdown JSONB NOT NULL DEFAULT '{}'::jsonb,
+    cost_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    scan_stats JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS market_discovery_candidates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id UUID NOT NULL REFERENCES market_discovery_runs (run_id) ON DELETE CASCADE,
+    market_id TEXT NOT NULL,
+    question TEXT NOT NULL DEFAULT '',
+    asset_symbol TEXT NOT NULL DEFAULT '',
+    asset_name TEXT NOT NULL DEFAULT '',
+    crypto_tier TEXT NOT NULL DEFAULT '',
+    market_kind TEXT NOT NULL DEFAULT '',
+    volume_24h DOUBLE PRECISION NOT NULL DEFAULT 0,
+    spread_bps DOUBLE PRECISION NOT NULL DEFAULT 0,
+    edge DOUBLE PRECISION NOT NULL DEFAULT 0,
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+    liquidity_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    time_to_expiry_hours DOUBLE PRECISION,
+    strategy_id TEXT NOT NULL DEFAULT '',
+    direction TEXT NOT NULL DEFAULT '',
+    deterministic_pass BOOLEAN NOT NULL DEFAULT FALSE,
+    research_pass BOOLEAN NOT NULL DEFAULT FALSE,
+    claude_pass BOOLEAN NOT NULL DEFAULT FALSE,
+    verdict TEXT NOT NULL DEFAULT 'reject',
+    score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    stage_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS settlement_events (
     id UUID PRIMARY KEY,
     position_key TEXT NOT NULL,
@@ -256,6 +301,15 @@ ON news_validations (signal_id);
 
 CREATE INDEX IF NOT EXISTS idx_analysis_cutoffs_created_at
 ON analysis_cutoffs (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_market_discovery_runs_created_at
+ON market_discovery_runs (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_market_discovery_candidates_run_id
+ON market_discovery_candidates (run_id, score DESC, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_market_discovery_candidates_verdict
+ON market_discovery_candidates (verdict, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_settlement_events_created_at
 ON settlement_events (created_at DESC);
@@ -894,6 +948,220 @@ class TradingRepository:
                 limit,
             )
         return [self._decode_pipeline_record(row) for row in rows]
+
+    async def record_discovery_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        row = await self.db.fetchrow(
+            """
+            INSERT INTO market_discovery_runs (
+                run_id,
+                requested_limit,
+                universe_count,
+                crypto_classified_count,
+                deterministic_passed_count,
+                research_passed_count,
+                claude_passed_count,
+                operable_count,
+                stage_counts,
+                dropoff_counts,
+                rejected_breakdown,
+                cost_summary,
+                scan_stats,
+                metadata,
+                created_at
+            )
+            VALUES (
+                $1::uuid,
+                $2,
+                $3,
+                $4,
+                $5,
+                $6,
+                $7,
+                $8,
+                $9::jsonb,
+                $10::jsonb,
+                $11::jsonb,
+                $12::jsonb,
+                $13::jsonb,
+                $14::jsonb,
+                $15
+            )
+            RETURNING run_id, requested_limit, universe_count, crypto_classified_count,
+                      deterministic_passed_count, research_passed_count, claude_passed_count,
+                      operable_count, stage_counts, dropoff_counts, rejected_breakdown,
+                      cost_summary, scan_stats, metadata, created_at
+            """,
+            payload["run_id"],
+            int(payload.get("requested_limit") or 0),
+            int(payload.get("universe_count") or 0),
+            int(payload.get("crypto_classified_count") or 0),
+            int(payload.get("deterministic_passed_count") or 0),
+            int(payload.get("research_passed_count") or 0),
+            int(payload.get("claude_passed_count") or 0),
+            int(payload.get("operable_count") or 0),
+            _as_json(payload.get("stage_counts") or []),
+            _as_json(payload.get("dropoff_counts") or []),
+            _as_json(payload.get("rejected_breakdown") or {}),
+            _as_json(payload.get("cost_summary") or {}),
+            _as_json(payload.get("scan_stats") or {}),
+            _as_json(payload.get("metadata") or {}),
+            payload.get("created_at") or datetime.now(UTC),
+        )
+        assert row is not None
+        return {
+            "run_id": str(row["run_id"]),
+            "requested_limit": int(row["requested_limit"] or 0),
+            "universe_count": int(row["universe_count"] or 0),
+            "crypto_classified_count": int(row["crypto_classified_count"] or 0),
+            "deterministic_passed_count": int(row["deterministic_passed_count"] or 0),
+            "research_passed_count": int(row["research_passed_count"] or 0),
+            "claude_passed_count": int(row["claude_passed_count"] or 0),
+            "operable_count": int(row["operable_count"] or 0),
+            "stage_counts": self._json_value(row["stage_counts"]),
+            "dropoff_counts": self._json_value(row["dropoff_counts"]),
+            "rejected_breakdown": self._json_value(row["rejected_breakdown"]),
+            "cost_summary": self._json_value(row["cost_summary"]),
+            "scan_stats": self._json_value(row["scan_stats"]),
+            "metadata": self._json_value(row["metadata"]),
+            "created_at": row["created_at"],
+        }
+
+    async def record_discovery_candidates(self, candidates: list[dict[str, Any]]) -> None:
+        if not candidates:
+            return
+        await self.db.execute(
+            """
+            INSERT INTO market_discovery_candidates (
+                run_id,
+                market_id,
+                question,
+                asset_symbol,
+                asset_name,
+                crypto_tier,
+                market_kind,
+                volume_24h,
+                spread_bps,
+                edge,
+                confidence,
+                liquidity_score,
+                time_to_expiry_hours,
+                strategy_id,
+                direction,
+                deterministic_pass,
+                research_pass,
+                claude_pass,
+                verdict,
+                score,
+                reason,
+                stage_payload,
+                created_at
+            )
+            SELECT
+                (item->>'run_id')::uuid,
+                item->>'market_id',
+                item->>'question',
+                item->>'asset_symbol',
+                item->>'asset_name',
+                item->>'crypto_tier',
+                item->>'market_kind',
+                COALESCE((item->>'volume_24h')::double precision, 0),
+                COALESCE((item->>'spread_bps')::double precision, 0),
+                COALESCE((item->>'edge')::double precision, 0),
+                COALESCE((item->>'confidence')::double precision, 0),
+                COALESCE((item->>'liquidity_score')::double precision, 0),
+                NULLIF(item->>'time_to_expiry_hours', '')::double precision,
+                item->>'strategy_id',
+                item->>'direction',
+                COALESCE((item->>'deterministic_pass')::boolean, false),
+                COALESCE((item->>'research_pass')::boolean, false),
+                COALESCE((item->>'claude_pass')::boolean, false),
+                item->>'verdict',
+                COALESCE((item->>'score')::double precision, 0),
+                item->>'reason',
+                item,
+                COALESCE((item->>'created_at')::timestamptz, NOW())
+            FROM jsonb_array_elements($1::jsonb) AS item
+            """,
+            _as_json([candidate for candidate in candidates]),
+        )
+
+    async def get_latest_discovery_funnel(self, *, limit: int = 12) -> dict[str, Any] | None:
+        run_row = await self.db.fetchrow(
+            """
+            SELECT run_id, requested_limit, universe_count, crypto_classified_count,
+                   deterministic_passed_count, research_passed_count, claude_passed_count,
+                   operable_count, stage_counts, dropoff_counts, rejected_breakdown,
+                   cost_summary, scan_stats, metadata, created_at
+            FROM market_discovery_runs
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        )
+        if run_row is None:
+            return None
+        candidate_rows = await self.db.fetch(
+            """
+            SELECT run_id, market_id, question, asset_symbol, asset_name, crypto_tier, market_kind,
+                   volume_24h, spread_bps, edge, confidence, liquidity_score, time_to_expiry_hours,
+                   strategy_id, direction, deterministic_pass, research_pass, claude_pass,
+                   verdict, score, reason, stage_payload, created_at
+            FROM market_discovery_candidates
+            WHERE run_id = $1::uuid
+            ORDER BY score DESC, created_at DESC
+            LIMIT $2
+            """,
+            run_row["run_id"],
+            limit,
+        )
+        candidates: list[dict[str, Any]] = []
+        for row in candidate_rows:
+            candidates.append(
+                {
+                    "run_id": str(row["run_id"]),
+                    "market_id": row["market_id"],
+                    "question": row["question"],
+                    "asset_symbol": row["asset_symbol"],
+                    "asset_name": row["asset_name"],
+                    "crypto_tier": row["crypto_tier"],
+                    "market_kind": row["market_kind"],
+                    "volume_24h": float(row["volume_24h"] or 0.0),
+                    "spread_bps": float(row["spread_bps"] or 0.0),
+                    "edge": float(row["edge"] or 0.0),
+                    "confidence": float(row["confidence"] or 0.0),
+                    "liquidity_score": float(row["liquidity_score"] or 0.0),
+                    "time_to_expiry_hours": _as_optional_float(row["time_to_expiry_hours"]),
+                    "strategy_id": row["strategy_id"],
+                    "direction": row["direction"],
+                    "deterministic_pass": bool(row["deterministic_pass"]),
+                    "research_pass": bool(row["research_pass"]),
+                    "claude_pass": bool(row["claude_pass"]),
+                    "verdict": row["verdict"],
+                    "score": float(row["score"] or 0.0),
+                    "reason": row["reason"],
+                    "stage_payload": self._json_value(row["stage_payload"]),
+                    "created_at": row["created_at"],
+                }
+            )
+        return {
+            "run": {
+                "run_id": str(run_row["run_id"]),
+                "requested_limit": int(run_row["requested_limit"] or 0),
+                "universe_count": int(run_row["universe_count"] or 0),
+                "crypto_classified_count": int(run_row["crypto_classified_count"] or 0),
+                "deterministic_passed_count": int(run_row["deterministic_passed_count"] or 0),
+                "research_passed_count": int(run_row["research_passed_count"] or 0),
+                "claude_passed_count": int(run_row["claude_passed_count"] or 0),
+                "operable_count": int(run_row["operable_count"] or 0),
+                "stage_counts": self._json_value(run_row["stage_counts"]),
+                "dropoff_counts": self._json_value(run_row["dropoff_counts"]),
+                "rejected_breakdown": self._json_value(run_row["rejected_breakdown"]),
+                "cost_summary": self._json_value(run_row["cost_summary"]),
+                "scan_stats": self._json_value(run_row["scan_stats"]),
+                "metadata": self._json_value(run_row["metadata"]),
+                "created_at": run_row["created_at"],
+            },
+            "candidates": candidates,
+        }
 
     async def get_recent_settlement_events(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = await self.db.fetch(

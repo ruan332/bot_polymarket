@@ -2538,19 +2538,22 @@ class TradingRepository:
         return ""
 
     @staticmethod
-    def _json_value(value: Any) -> dict[str, Any]:
+    def _json_value(value: Any) -> Any:
         if value in (None, ""):
             return {}
-        if isinstance(value, dict):
+        if isinstance(value, (dict, list)):
             return value
         if isinstance(value, str):
             decoded = json.loads(value)
-            if isinstance(decoded, dict):
+            if isinstance(decoded, (dict, list)):
                 return decoded
             if isinstance(decoded, str):
                 return TradingRepository._json_value(decoded)
-            return {}
-        return dict(value)
+            return decoded
+        try:
+            return dict(value)
+        except Exception:
+            return value
 
     @staticmethod
     def _latest_pipeline_event(events: list[dict[str, Any]], event_type: str) -> dict[str, Any] | None:

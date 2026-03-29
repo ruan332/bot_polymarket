@@ -233,6 +233,26 @@ async def test_build_execution_guard_blocks_small_caps_more_aggressively() -> No
 
 
 @pytest.mark.asyncio
+async def test_build_execution_guard_treats_zero_daily_spend_as_unlimited() -> None:
+    risk = RiskEngine(
+        make_context(
+            execution_state={
+                "daily_spend_usd": 9_999.0,
+                "realized_pnl_usd": 0.0,
+                "consecutive_losses": 0,
+                "last_loss_at": None,
+            }
+        )
+    )
+    risk.config.max_daily_spend_usd = 0.0
+    signal = make_signal(symbol="BTC", tier="btc", edge=0.40, confidence=0.80, price=0.40, volume_24h=100000.0)
+
+    guard = await risk.build_execution_guard(make_review(signal))
+
+    assert guard.notional_usd == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
 async def test_validate_signal_requires_stronger_thresholds_for_indirect_crypto() -> None:
     risk = RiskEngine(make_context())
     indirect_signal = make_signal(
@@ -489,3 +509,23 @@ async def test_build_pair_execution_guard_honors_daily_spend_cap() -> None:
 
     with pytest.raises(RiskBlockedError, match="pair trade would exceed max_daily_spend_usd"):
         await risk.build_pair_execution_guard(make_pair_review(signal))
+
+
+@pytest.mark.asyncio
+async def test_build_pair_execution_guard_treats_zero_daily_spend_as_unlimited() -> None:
+    signal = make_pair_signal()
+    risk = RiskEngine(
+        make_context(
+            execution_state={
+                "daily_spend_usd": 9_999.0,
+                "realized_pnl_usd": 0.0,
+                "consecutive_losses": 0,
+                "last_loss_at": None,
+            }
+        )
+    )
+    risk.config.max_daily_spend_usd = 0.0
+
+    guard = await risk.build_pair_execution_guard(make_pair_review(signal))
+
+    assert guard.total_notional_usd == pytest.approx(1.7)

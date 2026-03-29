@@ -223,7 +223,8 @@ class RiskEngine:
         if portfolio.open_positions >= self.config.max_open_positions and existing_position is None:
             raise RiskBlockedError("max_open_positions reached")
         effective_daily_limit = self.config.max_daily_spend_usd
-        if risk_state["daily_spend_usd"] + notional > effective_daily_limit:
+        # Treat zero or negative values as "no daily spend cap".
+        if effective_daily_limit > 0 and risk_state["daily_spend_usd"] + notional > effective_daily_limit:
             raise RiskBlockedError("daily spend would exceed max_daily_spend_usd")
 
         total_equity = max(bankroll, initial_bankroll * 0.25, 1.0)
@@ -276,9 +277,9 @@ class RiskEngine:
             raise RiskBlockedError("pair trade notional exceeds max_single_position_usd")
         if portfolio.available_balance < primary_notional:
             raise RiskBlockedError("available balance is below primary leg notional")
-        effective_daily_limit = self.config.max_daily_spend_usd
         risk_state = await self._recent_execution_state()
-        if risk_state["daily_spend_usd"] + total_notional > effective_daily_limit:
+        effective_daily_limit = self.config.max_daily_spend_usd
+        if effective_daily_limit > 0 and risk_state["daily_spend_usd"] + total_notional > effective_daily_limit:
             raise RiskBlockedError("pair trade would exceed max_daily_spend_usd")
         if portfolio.total_exposure + total_notional > self.config.max_total_exposure_usd:
             raise RiskBlockedError("pair trade would exceed max_total_exposure_usd")

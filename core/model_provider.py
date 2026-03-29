@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import date
 from typing import TYPE_CHECKING, Any
 
 import litellm
@@ -80,13 +79,12 @@ class ModelProvider:
         return version
 
     async def _guard_budget(self) -> None:
+        from datetime import date
+
         today = str(date.today())
         agent_cost = await self.context.bus.get_daily_cost(f"cost:{self.agent_name}:{today}")
-        global_cost = await self.context.bus.get_daily_cost(f"cost:global:{today}")
         if agent_cost >= self.daily_cost_limit:
             raise BudgetExceededError(f"{self.agent_name} daily cost limit reached")
-        if global_cost >= self.context.settings.max_daily_spend_usd:
-            raise BudgetExceededError("global daily spend limit reached")
 
     def _smoke_response(self, prompt: str) -> ModelResponse:
         content = "{}"

@@ -123,6 +123,13 @@ PAPER_BANKROLL_USD=1000.00
 AGENT_HEARTBEAT_TTL_SECONDS=45
 ```
 
+Observacao:
+
+- `MAX_DAILY_SPEND_USD` continua sendo um limite operacional de gasto para o fluxo de trading/risk;
+- `MAX_DAILY_SPEND_USD=0` desabilita esse teto e libera operacoes sem limite diario;
+- ele nao deve ser interpretado como bloqueio do reviewer/LLM;
+- o custo de LLM que voce acompanha no dashboard vem de `llm_calls` e do campo `llm_cost_usd` nas metricas.
+
 Arquivo base de exemplo:
 
 - [.env.production.example](C:\Projetos\bot_polymarket\.env.production.example)
@@ -308,6 +315,12 @@ docker compose -f docker-compose.prod.yml up -d api agents dashboard
 - `GET /api/portfolio/summary`
 - `GET /api/portfolio/positions`
 - `GET /api/portfolio/equity-history?limit=100`
+
+Observacao importante:
+
+- snapshots em `.tmp/api-snap` podem vir de execucoes de validacao/smoke e nao representam o estado atual da VPS;
+- para diagnostico da producao, prefira sempre os endpoints ao vivo acima;
+- se houver divergencia entre um snapshot local e o dashboard, valide primeiro a data de captura do snapshot.
 
 ## Replay e Backtest Observado
 

@@ -219,14 +219,14 @@ class AppSettings(BaseSettings):
     copytrade_wait_for_next_market_start: bool = False
     copytrade_price_buffer: float = 0.01
     copytrade_second_leg_base_price: float = 0.98
-    copytrade_signal_confidence_threshold: float = 0.50
-    copytrade_noise_threshold: float = 0.02
-    copytrade_min_history_points: int = 6
+    copytrade_signal_confidence_threshold: float = 0.55
+    copytrade_noise_threshold: float = 0.025
+    copytrade_min_history_points: int = 7
     momentum_enabled: bool = False
     momentum_markets: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    momentum_min_edge: float = 0.085
-    momentum_min_volume_24h: float = 500.0
-    momentum_signal_confidence_threshold: float = 0.62
+    momentum_min_edge: float = 0.10
+    momentum_min_volume_24h: float = 750.0
+    momentum_signal_confidence_threshold: float = 0.66
     momentum_min_history_points: int = 6
     momentum_cooldown_minutes: int = 20
     momentum_max_positions: int = 2

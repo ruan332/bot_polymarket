@@ -64,6 +64,9 @@ class BaseAgent(ABC):
 
     async def close(self) -> None:
         self.running = False
+        close = getattr(self.provider, "close", None)
+        if callable(close):
+            await close()
 
     @abstractmethod
     async def tick(self) -> None:

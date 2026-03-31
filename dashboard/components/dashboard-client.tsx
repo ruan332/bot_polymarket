@@ -1,95 +1,40 @@
 "use client";
 
-import dynamic from "next/dynamic";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type AgentStatus = {
-  model: string;
   running: boolean;
-  config_version: number;
-  last_seen: string | null;
-};
-
-type CostSummary = {
-  agent: string;
-  cost_usd: number;
-  calls: number;
-  input_tokens: number;
-  output_tokens: number;
 };
 
 type Signal = {
   signal_id: string;
-  market_question: string;
   asset_symbol: string;
-  crypto_tier: "btc" | "major" | "small_cap";
-  direction?: "YES" | "NO";
   strategy_id: string;
-  strategy_version: string;
-  regime?: "trend" | "mean_revert" | "illiquid_choppy" | string;
-  model_probability?: number;
-  market_probability?: number;
+  regime?: string;
   edge?: number;
   confidence?: number;
-  price?: number;
-  volume_24h?: number;
-  predictor_confidence?: number;
-  predictor_signal?: string;
-  predictor_direction?: string;
-  reasoning?: string;
-  primary_leg?: {
-    direction?: "YES" | "NO";
-    reference_price?: number;
-    target_price?: number;
-  } | null;
-  expected_slippage_bps?: number;
-  expected_holding_minutes?: number;
-  news_validation?: {
-    validated: boolean;
-    support_score: number;
-    conflict_score: number;
-    source_count: number;
-    provider_used?: string;
-    fallback_used?: boolean;
-    primary_error_type?: string | null;
-    reason: string;
-  } | null;
+  direction?: "YES" | "NO";
   created_at: string;
 };
 
 type Decision = {
   signal_id: string;
   asset_symbol: string;
-  crypto_tier: "btc" | "major" | "small_cap" | null;
   approved: boolean;
-  corrected_price_limit: number | null;
+  notes: string;
   kelly_size?: number;
   risk_fraction?: number;
-  take_profit_price?: number | null;
-  stop_loss_price?: number | null;
-  time_stop_minutes?: number | null;
-  notes: string;
   created_at: string;
 };
 
 type Order = {
   order_id: string;
-  signal_id: string;
-  market_id: string;
-  market_question?: string;
   asset_symbol: string;
-  crypto_tier: "btc" | "major" | "small_cap" | null;
-  action?: "entry" | "scale_in" | "scale_out" | "close";
-  position_key?: string;
   strategy_id?: string;
-  regime?: string;
   direction: "YES" | "NO";
-  size: number;
-  price_limit: number;
-  status: string;
-  notional_usd: number;
+  action?: "entry" | "scale_in" | "scale_out" | "close";
   realized_pnl_usd?: number;
-  exit_reason?: string;
+  status: string;
   created_at: string;
 };
 
@@ -99,323 +44,82 @@ type RiskEvent = {
   created_at: string;
 };
 
-type PipelineTelemetryEvent = {
-  agent: string;
-  event_type: "scanner.scan_cycle" | "reviewer.review_cycle" | "executor.execute_cycle";
-  created_at: string;
-  requested_limit?: number;
-  upstream_limit?: number;
-  gamma_markets_fetched?: number;
-  crypto_classified?: number;
-  rejection_breakdown?: Record<string, number>;
-  selected_for_scan?: number;
-  selected_markets?: Array<{
-    market_id: string;
-    asset_symbol: string;
-    crypto_tier: string;
-    volume_24h: number;
-    question: string;
-  }>;
-  strategy_candidates?: number;
-  reached_risk_engine?: number;
-  pre_risk_blocked?: number;
-  risk_passed?: number;
-  risk_blocked?: number;
-  duplicates_blocked?: number;
-  persisted_signals?: number;
-  pre_risk_block_reasons?: Record<string, number>;
-  risk_block_reasons?: Record<string, number>;
-  inbox_count?: number;
-  approved_count?: number;
-  rejected_count?: number;
-  reviewed_assets?: string[];
-  executed_count?: number;
-  blocked_count?: number;
-  exit_orders_count?: number;
-  open_positions_seen?: number;
-  exit_actions?: string[];
+type PortfolioSummary = {
+  available_balance: number;
+  total_equity: number;
+  total_pnl: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  open_positions: number;
 };
 
-type MetricsOverview = {
+type PerformanceSummary = {
   signals: number;
   decisions: number;
   orders: number;
   risk_events: number;
-  portfolio: PortfolioSummary;
-  flow_summary?: {
-    window_minutes: number;
-    gamma_markets_fetched: number;
-    crypto_classified: number;
-    selected_for_scan: number;
-    strategy_candidates: number;
-    reached_risk_engine: number;
-    pre_risk_blocked: number;
-    risk_passed: number;
-    risk_blocked: number;
-    duplicates_blocked: number;
-    persisted_signals: number;
-    reviewer_inbox: number;
-    reviewer_approved: number;
-    reviewer_rejected: number;
-    executor_inbox: number;
-    executor_executed: number;
-    executor_blocked: number;
-    exit_orders_count: number;
-  };
-  latest_scan_telemetry?: PipelineTelemetryEvent | null;
-  latest_review_telemetry?: PipelineTelemetryEvent | null;
-  latest_execution_telemetry?: PipelineTelemetryEvent | null;
-};
-
-type PortfolioSummary = {
-  available_balance: number;
-  total_exposure: number;
-  current_market_value: number;
-  total_equity: number;
-  total_pnl: number;
-  open_positions: number;
-  realized_pnl: number;
-  unrealized_pnl: number;
-};
-
-type Position = {
-  market_id: string;
-  position_key?: string;
-  market_question: string;
-  asset_symbol?: string;
-  crypto_tier?: "btc" | "major" | "small_cap";
-  strategy_id?: string;
-  regime?: string;
-  direction: "YES" | "NO";
-  size: number;
-  average_price: number;
-  current_price: number;
-  current_value_usd: number;
-  unrealized_pnl: number;
-  cost_basis_usd?: number;
-  take_profit_price?: number | null;
-  stop_loss_price?: number | null;
-  time_stop_minutes?: number | null;
-  opened_at?: string;
-  scaled_out_count?: number;
-};
-
-type EquityHistoryPoint = {
-  created_at: string;
-  total_equity: number;
-  total_pnl: number;
-  unrealized_pnl: number;
-  available_balance?: number;
+  approval_rate: number;
+  execution_rate: number;
+  win_rate?: number;
+  total_order_notional: number;
+  realized_pnl_window?: number;
+  max_drawdown?: number;
+  avg_edge: number;
+  avg_confidence: number;
 };
 
 type PerformanceReport = {
-  generated_at: string;
-  window_hours: number;
-  asset_filter: string;
-  tier_filter: string;
-  strategy_filter?: string;
-  summary: {
-    signals: number;
-    decisions: number;
-    orders: number;
-    risk_events: number;
-    approval_rate: number;
-    execution_rate: number;
-    positive_position_rate: number;
-    win_rate?: number;
-    avg_edge: number;
-    avg_confidence: number;
-    total_order_notional: number;
-    avg_order_notional: number;
-    daily_spend_usd?: number;
-    realized_pnl_window?: number;
-    sharpe_ratio?: number;
-    max_drawdown?: number;
-    llm_cost_usd: number;
-    available_balance: number;
-    total_exposure: number;
-    current_market_value: number;
-    total_equity: number;
-    total_pnl: number;
-    open_positions: number;
-    realized_pnl: number;
-    unrealized_pnl: number;
-  };
-  cost_by_agent: Array<{ agent: string; cost_usd: number; calls: number }>;
-  risk_breakdown: Array<{ label: string; count: number }>;
-  risk_breakdown_by_strategy?: Array<{
-    label: string;
-    count: number;
-    reasons: Array<{ label: string; count: number }>;
-  }>;
-  asset_breakdown: Array<{ label: string; count: number }>;
-  tier_breakdown: Array<{ label: string; count: number }>;
+  summary: PerformanceSummary;
   strategy_breakdown?: Array<{ label: string; signals: number; orders: number; realized_pnl_usd: number }>;
-  regime_breakdown?: Array<{ label: string; count: number }>;
-  exit_reason_breakdown?: Array<{ label: string; count: number }>;
-  news_breakdown: Array<{ label: string; count: number }>;
-  news_provider_breakdown: Array<{ label: string; count: number }>;
-  news_fallback_breakdown: Array<{ label: string; count: number }>;
-  last_news_provider: {
-    provider_used: string;
-    fallback_used: boolean;
-    signal_id: string;
-    asset_symbol: string;
-    crypto_tier: string;
-    created_at: string;
-  } | null;
-  top_markets: Array<{
-    market_id: string;
-    market_question: string;
-    asset_symbol: string;
-    crypto_tier: string;
-    signal_count: number;
-    order_count: number;
-    avg_edge: number;
-    avg_confidence: number;
-  }>;
-  open_positions: Position[];
-  mae_mfe?: {
-    avg_mae: number;
-    avg_mfe: number;
-  };
-  time_series: {
-    pipeline: Array<{
-      bucket: string;
-      signals: number;
-      decisions: number;
-      orders: number;
-      risk_events: number;
-    }>;
-    equity: Array<{
-      created_at: string;
-      total_equity: number;
-      total_pnl: number;
-      unrealized_pnl: number;
-      available_balance: number;
-    }>;
-  };
 };
 
-type RiskBreakdownReport = {
-  generated_at: string;
-  window_hours: number;
-  asset_filter: string;
-  tier_filter: string;
-  strategy_filter: string;
-  total_events: number;
-  by_reason: Array<{ label: string; count: number }>;
-  by_strategy: Array<{ label: string; count: number }>;
-  by_strategy_reason: Array<{
-    label: string;
-    count: number;
-    reasons: Array<{ label: string; count: number }>;
-  }>;
-};
-
-type DiscoveryFunnelCandidate = {
-  run_id: string;
-  market_id: string;
-  question: string;
-  asset_symbol: string;
-  asset_name: string;
-  crypto_tier: "btc" | "major" | "small_cap" | string;
-  market_kind: string;
-  volume_24h: number;
-  spread_bps: number;
-  edge: number;
-  confidence: number;
-  liquidity_score: number;
-  time_to_expiry_hours: number | null;
-  strategy_id: string;
-  direction: string;
-  deterministic_pass: boolean;
-  research_pass: boolean;
-  claude_pass: boolean;
-  verdict: "operable" | "watch" | "reject" | string;
-  score: number;
-  reason: string;
-  stage_payload: {
-    deterministic?: Record<string, unknown>;
-    research?: Record<string, unknown>;
-    claude?: Record<string, unknown>;
+type MetricsOverview = {
+  flow_summary?: {
+    reviewer_approved: number;
+    reviewer_rejected: number;
+    executor_executed: number;
+    executor_blocked: number;
+    risk_passed: number;
+    risk_blocked: number;
+    pre_risk_blocked: number;
   };
-  created_at: string;
+  latest_scan_telemetry?: { risk_block_reasons?: Record<string, number>; pre_risk_block_reasons?: Record<string, number> } | null;
+  latest_review_telemetry?: { reviewed_assets?: string[] } | null;
+  latest_execution_telemetry?: { reviewed_assets?: string[]; exit_actions?: string[] } | null;
 };
 
-type DiscoveryFunnelResponse = {
-  run: {
-    run_id: string;
-    requested_limit: number;
-    universe_count: number;
-    crypto_classified_count: number;
-    deterministic_passed_count: number;
-    research_passed_count: number;
-    claude_passed_count: number;
-    operable_count: number;
-    stage_counts: Array<{ label: string; count: number }>;
-    dropoff_counts: Array<{ label: string; count: number }>;
-    rejected_breakdown: Record<string, number>;
-    cost_summary: {
-      research_cost_usd: number;
-      research_calls: number;
-      claude_cost_usd: number;
-      claude_calls: number;
-      total_cost_usd: number;
-    };
-    scan_stats: Record<string, unknown>;
-    metadata: Record<string, unknown>;
-    created_at: string;
-  } | null;
-  candidates: DiscoveryFunnelCandidate[];
-  latest_scan_stats: Record<string, unknown>;
-  stage_counts: Array<{ label: string; count: number }>;
-  dropoff_counts: Array<{ label: string; count: number }>;
-  rejected_breakdown: Record<string, number>;
-  cost_summary: {
-    research_cost_usd: number;
-    research_calls: number;
-    claude_cost_usd: number;
-    claude_calls: number;
-    total_cost_usd: number;
-  };
-};
-
-type LogEntry = {
-  id: string;
+type LogLine = {
   time: string;
-  type: "signal" | "decision" | "order" | "risk" | "flow";
-  message: string;
-  raw_time: string;
+  text: string;
+};
+
+type StrategyGoalCheck = {
+  label: string;
+  value: string;
+  ok: boolean;
+};
+
+type StrategyGoalStatus = {
+  strategy: "pair_15m" | "momentum_15m";
+  go: boolean;
+  score: string;
+  checks: StrategyGoalCheck[];
 };
 
 type DashboardState = {
   statuses: Record<string, AgentStatus>;
-  costs: CostSummary[];
+  portfolio: PortfolioSummary | null;
+  overview: MetricsOverview | null;
+  performance: PerformanceReport | null;
+  pairPerformance: PerformanceReport | null;
+  momentumPerformance: PerformanceReport | null;
   signals: Signal[];
   decisions: Decision[];
   orders: Order[];
   riskEvents: RiskEvent[];
-  overview: MetricsOverview | null;
-  pipelineEvents: PipelineTelemetryEvent[];
-  portfolio: PortfolioSummary | null;
-  positions: Position[];
-  equityHistory: EquityHistoryPoint[];
-  performance: PerformanceReport | null;
-  pairGoalPerformance: PerformanceReport | null;
-  momentumGoalPerformance: PerformanceReport | null;
-  riskBreakdown: RiskBreakdownReport | null;
-  discoveryFunnel: DiscoveryFunnelResponse | null;
-  logs: LogEntry[];
 };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
-const EquityChart = dynamic(() => import("./charts").then((m) => m.EquityChart), { ssr: false });
-const PipelineChart = dynamic(() => import("./charts").then((m) => m.PipelineChart), { ssr: false });
-const CostBarChart = dynamic(() => import("./charts").then((m) => m.CostBarChart), { ssr: false });
-const RiskBreakdownChart = dynamic(() => import("./charts").then((m) => m.RiskBreakdownChart), { ssr: false });
-const BreakdownMiniBar = dynamic(() => import("./charts").then((m) => m.BreakdownMiniBar), { ssr: false });
-const DiscoveryFunnelChart = dynamic(() => import("./charts").then((m) => m.DiscoveryFunnelChart), { ssr: false });
 
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, { cache: "no-store" });
@@ -439,85 +143,75 @@ function asCurrency(value: number) {
 }
 
 function asCurrencySigned(value: number) {
-  const prefix = value >= 0 ? "+" : "";
-  return prefix + asCurrency(value);
-}
-
-function labelStrategy(value?: string) {
-  if (!value) return "—";
-  return value.replaceAll("_", " ");
-}
-
-function labelRegime(value?: string) {
-  if (!value) return "—";
-  return value.replaceAll("_", " ");
-}
-
-function normalizeBreakdownMap(value?: Record<string, number>) {
-  if (!value) return [];
-  return Object.entries(value)
-    .map(([label, count]) => ({ label, count }))
-    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
-}
-
-function compactReason(value?: string) {
-  if (!value) return "unknown";
-  return value.replaceAll("_", " ");
+  return `${value >= 0 ? "+" : ""}${asCurrency(value)}`;
 }
 
 function numberOr(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function labelStrategy(value?: string) {
+  if (!value) return "unknown";
+  return value.replaceAll("_", " ");
+}
+
 function signalDirection(signal: Signal) {
-  return signal.direction ?? signal.primary_leg?.direction ?? "—";
+  return signal.direction ?? "—";
 }
 
-function signalConfidence(signal: Signal) {
-  return numberOr(signal.confidence, numberOr(signal.predictor_confidence, 0));
+function signalLog(signal: Signal) {
+  const edge = numberOr(signal.edge);
+  const confidence = numberOr(signal.confidence);
+  return `${signal.asset_symbol} ${signalDirection(signal)} | ${labelStrategy(signal.strategy_id)} | edge ${edge.toFixed(3)} | conf ${asPercent(confidence)}`;
 }
 
-function signalEdge(signal: Signal) {
-  return numberOr(signal.edge, 0);
-}
-
-function summarizePipelineEvent(event: PipelineTelemetryEvent) {
-  if (event.event_type === "scanner.scan_cycle") {
-    return `SCAN: gamma ${event.gamma_markets_fetched ?? 0} | crypto ${event.crypto_classified ?? 0} | selected ${event.selected_for_scan ?? 0} | risk ${event.reached_risk_engine ?? 0} | signals ${event.persisted_signals ?? 0}`;
-  }
-  if (event.event_type === "reviewer.review_cycle") {
-    return `REVIEW: inbox ${event.inbox_count ?? 0} | approved ${event.approved_count ?? 0} | rejected ${event.rejected_count ?? 0}`;
-  }
-  return `EXEC: inbox ${event.inbox_count ?? 0} | filled ${event.executed_count ?? 0} | blocked ${event.blocked_count ?? 0} | exits ${event.exit_orders_count ?? 0}`;
-}
-
-function relativeAge(value?: string | null) {
-  if (!value) return "—";
-  const delta = Math.max(Math.floor((Date.now() - new Date(value).getTime()) / 1000), 0);
-  if (delta < 60) return `${delta}s`;
-  if (delta < 3600) return `${Math.floor(delta / 60)}m`;
-  return `${Math.floor(delta / 3600)}h`;
-}
-
-type StrategyGoalCheck = {
-  id: string;
-  label: string;
-  value: string;
-  ok: boolean;
-};
-
-type StrategyGoalStatus = {
-  strategy: "pair_15m" | "momentum_15m";
-  windowHours: number;
-  go: boolean;
-  score: string;
-  checks: StrategyGoalCheck[];
-};
-
-function evaluateStrategyGoals(
+function buildStrategyLog(
   strategy: "pair_15m" | "momentum_15m",
-  report: PerformanceReport | null,
-): StrategyGoalStatus {
+  signals: Signal[],
+  decisions: Decision[],
+  orders: Order[],
+  riskEvents: RiskEvent[],
+) {
+  const lines: Array<{ time: string; text: string }> = [];
+
+  signals
+    .filter((signal) => signal.strategy_id === strategy)
+    .slice(0, 3)
+    .forEach((signal) => lines.push({ time: signal.created_at, text: `SIG | ${signalLog(signal)}` }));
+
+  decisions
+    .filter((decision) => signals.some((signal) => signal.signal_id === decision.signal_id && signal.strategy_id === strategy))
+    .slice(0, 2)
+    .forEach((decision) =>
+      lines.push({
+        time: decision.created_at,
+        text: `DEC | ${decision.asset_symbol} ${decision.approved ? "APPROVED" : "REJECTED"} | ${decision.notes}`,
+      }),
+    );
+
+  orders
+    .filter((order) => order.strategy_id === strategy)
+    .slice(0, 2)
+    .forEach((order) =>
+      lines.push({
+        time: order.created_at,
+        text: `ORD | ${order.asset_symbol} ${order.direction} ${order.action ?? "entry"} | ${asCurrencySigned(order.realized_pnl_usd ?? 0)}`,
+      }),
+    );
+
+  riskEvents
+    .slice(0, 2)
+    .forEach((event) =>
+      lines.push({
+        time: event.created_at,
+        text: `RSK | [${event.agent}] ${event.reason}`,
+      }),
+    );
+
+  return lines.sort((a, b) => b.time.localeCompare(a.time)).slice(0, 6);
+}
+
+function evaluateStrategyGoals(strategy: "pair_15m" | "momentum_15m", report: PerformanceReport | null): StrategyGoalStatus {
   const summary = report?.summary;
   const signals = numberOr(summary?.signals);
   const orders = numberOr(summary?.orders);
@@ -526,62 +220,46 @@ function evaluateStrategyGoals(
   const winRate = numberOr(summary?.win_rate);
   const maxDrawdown = numberOr(summary?.max_drawdown);
   const riskEvents = numberOr(summary?.risk_events);
+  const riskLimit = strategy === "momentum_15m" ? 40 : 20;
   const riskPerSignal = signals > 0 ? riskEvents / signals : Number.POSITIVE_INFINITY;
   const pnlPerNotional = notional > 0 ? realized / notional : 0;
-  const riskLimit = strategy === "momentum_15m" ? 40 : 20;
 
   const checks: StrategyGoalCheck[] = [
-    { id: "sample", label: "Orders >= 150", value: `${orders}`, ok: orders >= 150 },
-    { id: "pnl", label: "Realized PnL > 0", value: asCurrencySigned(realized), ok: realized > 0 },
-    { id: "eff", label: "PnL/Notional >= 1.0%", value: asPercent(pnlPerNotional), ok: pnlPerNotional >= 0.01 },
-    { id: "win", label: "Win Rate >= 48%", value: asPercent(winRate), ok: winRate >= 0.48 },
-    { id: "dd", label: "Max DD <= 3%", value: asPercent(maxDrawdown), ok: maxDrawdown <= 0.03 },
+    { label: "PnL/Notional", value: asPercent(pnlPerNotional), ok: pnlPerNotional >= 0.01 },
+    { label: "Win%", value: asPercent(winRate), ok: winRate >= 0.48 },
+    { label: "Max DD", value: asPercent(maxDrawdown), ok: maxDrawdown <= 0.03 },
     {
-      id: "risk",
-      label: `Risk/Signal < ${riskLimit}`,
-      value: Number.isFinite(riskPerSignal) ? riskPerSignal.toFixed(1) : "--",
+      label: "Risk/Signal",
+      value: Number.isFinite(riskPerSignal) ? riskPerSignal.toFixed(1) : "—",
       ok: Number.isFinite(riskPerSignal) && riskPerSignal < riskLimit,
     },
   ];
 
   const passed = checks.filter((check) => check.ok).length;
-  const total = checks.length;
   return {
     strategy,
-    windowHours: report?.window_hours ?? 0,
-    go: total > 0 && passed === total,
-    score: `${passed}/${total}`,
+    go: passed === checks.length,
+    score: `${passed}/${checks.length}`,
     checks,
   };
-}
-
-function Icon({ name, className }: { name: string; className?: string }) {
-  return <span className={`material-symbols-outlined ${className ?? ""}`}>{name}</span>;
 }
 
 export function DashboardClient() {
   const [state, setState] = useState<DashboardState>({
     statuses: {},
-    costs: [],
+    portfolio: null,
+    overview: null,
+    performance: null,
+    pairPerformance: null,
+    momentumPerformance: null,
     signals: [],
     decisions: [],
     orders: [],
     riskEvents: [],
-    overview: null,
-    pipelineEvents: [],
-    portfolio: null,
-    positions: [],
-    equityHistory: [],
-    performance: null,
-    pairGoalPerformance: null,
-    momentumGoalPerformance: null,
-    riskBreakdown: null,
-    discoveryFunnel: null,
-    logs: [],
   });
   const [error, setError] = useState<string | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<string>("booting");
-  const [clock, setClock] = useState<string>("--:--:--");
+  const [lastUpdated, setLastUpdated] = useState("booting");
+  const [clock, setClock] = useState("--:--:--");
   const stateRef = useRef(state);
 
   useEffect(() => {
@@ -598,129 +276,47 @@ export function DashboardClient() {
     let active = true;
 
     async function load() {
-      const currentState = stateRef.current;
+      const current = stateRef.current;
       const requests = [
-        { key: "statuses", path: "/agents/status", fallback: currentState.statuses as Record<string, AgentStatus> },
-        { key: "costs", path: "/costs/daily", fallback: currentState.costs as CostSummary[] },
-        { key: "signals", path: "/signals/recent", fallback: currentState.signals as Signal[] },
-        { key: "decisions", path: "/decisions/recent", fallback: currentState.decisions as Decision[] },
-        { key: "orders", path: "/orders/recent", fallback: currentState.orders as Order[] },
-        { key: "riskEvents", path: "/risk-events/recent", fallback: currentState.riskEvents as RiskEvent[] },
-        { key: "overview", path: "/metrics/overview", fallback: currentState.overview as MetricsOverview | null },
-        { key: "pipelineEvents", path: "/metrics/pipeline/recent", fallback: currentState.pipelineEvents as PipelineTelemetryEvent[] },
-        { key: "portfolio", path: "/portfolio/summary", fallback: currentState.portfolio as PortfolioSummary | null },
-        { key: "positions", path: "/portfolio/positions", fallback: currentState.positions as Position[] },
-        { key: "equityHistory", path: "/portfolio/equity-history?limit=1000", fallback: currentState.equityHistory as EquityHistoryPoint[] },
-        { key: "performance", path: "/metrics/performance?hours=24", fallback: currentState.performance as PerformanceReport | null },
-        {
-          key: "pairGoalPerformance",
-          path: "/metrics/performance?hours=336&strategy=pair_15m",
-          fallback: currentState.pairGoalPerformance as PerformanceReport | null,
-        },
-        {
-          key: "momentumGoalPerformance",
-          path: "/metrics/performance?hours=336&strategy=momentum_15m",
-          fallback: currentState.momentumGoalPerformance as PerformanceReport | null,
-        },
-        { key: "riskBreakdown", path: "/metrics/risk-breakdown?hours=24", fallback: currentState.riskBreakdown as RiskBreakdownReport | null },
-        { key: "discoveryFunnel", path: "/discovery/funnel?limit=16", fallback: currentState.discoveryFunnel as DiscoveryFunnelResponse | null },
+        { key: "statuses", path: "/agents/status", fallback: current.statuses },
+        { key: "portfolio", path: "/portfolio/summary", fallback: current.portfolio },
+        { key: "overview", path: "/metrics/overview", fallback: current.overview },
+        { key: "performance", path: "/metrics/performance?hours=24", fallback: current.performance },
+        { key: "pairPerformance", path: "/metrics/performance?hours=336&strategy=pair_15m", fallback: current.pairPerformance },
+        { key: "momentumPerformance", path: "/metrics/performance?hours=336&strategy=momentum_15m", fallback: current.momentumPerformance },
+        { key: "signals", path: "/signals/recent", fallback: current.signals },
+        { key: "decisions", path: "/decisions/recent", fallback: current.decisions },
+        { key: "orders", path: "/orders/recent", fallback: current.orders },
+        { key: "riskEvents", path: "/risk-events/recent", fallback: current.riskEvents },
       ] as const;
 
       const results = await Promise.allSettled(requests.map((request) => getJson(request.path)));
       if (!active) return;
 
+      const next = new Map<string, unknown>();
       const failures: string[] = [];
-      const nextData = new Map<string, unknown>();
       results.forEach((result, index) => {
         const request = requests[index];
         if (result.status === "fulfilled") {
-          nextData.set(request.key, result.value);
-          return;
+          next.set(request.key, result.value);
+        } else {
+          next.set(request.key, request.fallback);
+          failures.push(request.path);
         }
-        nextData.set(request.key, request.fallback);
-        failures.push(request.path);
       });
 
       try {
-        const statuses = (nextData.get("statuses") ?? {}) as Record<string, AgentStatus>;
-        const costs = (nextData.get("costs") ?? []) as CostSummary[];
-        const signals = (nextData.get("signals") ?? []) as Signal[];
-        const decisions = (nextData.get("decisions") ?? []) as Decision[];
-        const orders = (nextData.get("orders") ?? []) as Order[];
-        const riskEvents = (nextData.get("riskEvents") ?? []) as RiskEvent[];
-        const overview = (nextData.get("overview") ?? null) as MetricsOverview | null;
-        const pipelineEvents = (nextData.get("pipelineEvents") ?? []) as PipelineTelemetryEvent[];
-        const portfolio = (nextData.get("portfolio") ?? null) as PortfolioSummary | null;
-        const positions = (nextData.get("positions") ?? []) as Position[];
-        const equityHistoryRaw = (nextData.get("equityHistory") ?? []) as EquityHistoryPoint[];
-        const equityHistory = equityHistoryRaw.map((point) => ({
-          created_at: point.created_at,
-          total_equity: numberOr(point.total_equity),
-          total_pnl: numberOr(point.total_pnl),
-          unrealized_pnl: numberOr(point.unrealized_pnl),
-        }));
-        const performance = (nextData.get("performance") ?? null) as PerformanceReport | null;
-        const pairGoalPerformance = (nextData.get("pairGoalPerformance") ?? null) as PerformanceReport | null;
-        const momentumGoalPerformance = (nextData.get("momentumGoalPerformance") ?? null) as PerformanceReport | null;
-        const riskBreakdown = (nextData.get("riskBreakdown") ?? null) as RiskBreakdownReport | null;
-        const discoveryFunnel = (nextData.get("discoveryFunnel") ?? null) as DiscoveryFunnelResponse | null;
-
-        const newLogs: LogEntry[] = [];
-        signals.forEach(s => newLogs.push({
-          id: `sig-${s.signal_id}`,
-          time: new Date(s.created_at).toLocaleTimeString(),
-          type: "signal",
-          message: `NEW SIGNAL: ${s.asset_symbol} ${signalDirection(s)} | ${s.strategy_id}/${labelRegime(s.regime)} | Edge: ${signalEdge(s).toFixed(3)} | Conf ${asPercent(signalConfidence(s))}`,
-          raw_time: s.created_at
-        }));
-        decisions.forEach(d => newLogs.push({
-          id: `dec-${d.signal_id}-${d.created_at}`,
-          time: new Date(d.created_at).toLocaleTimeString(),
-          type: "decision",
-          message: `DECISION: ${d.asset_symbol} ${d.approved ? "APPROVED" : "REJECTED"} | Kelly: ${numberOr(d.kelly_size).toFixed(0)} | Risk: ${asPercent(numberOr(d.risk_fraction))} | ${d.notes}`,
-          raw_time: d.created_at
-        }));
-        orders.forEach(o => newLogs.push({
-          id: `ord-${o.order_id}`,
-          time: new Date(o.created_at).toLocaleTimeString(),
-          type: "order",
-          message: `ORDER: ${o.asset_symbol} ${o.direction} ${o.action ?? "entry"} | ${o.size} shares @ ${o.price_limit.toFixed(3)} | Realized: ${asCurrencySigned(o.realized_pnl_usd ?? 0)} | ${o.status}`,
-          raw_time: o.created_at
-        }));
-        riskEvents.forEach(r => newLogs.push({
-          id: `risk-${r.created_at}-${r.agent}`,
-          time: new Date(r.created_at).toLocaleTimeString(),
-          type: "risk",
-          message: `RISK BLOCK: [${r.agent}] ${r.reason}`,
-          raw_time: r.created_at
-        }));
-        pipelineEvents.forEach(event => newLogs.push({
-          id: `flow-${event.event_type}-${event.created_at}`,
-          time: new Date(event.created_at).toLocaleTimeString(),
-          type: "flow",
-          message: summarizePipelineEvent(event),
-          raw_time: event.created_at,
-        }));
-        newLogs.sort((a, b) => b.raw_time.localeCompare(a.raw_time));
-
         setState({
-          statuses,
-          costs,
-          signals,
-          decisions,
-          orders,
-          riskEvents,
-          overview,
-          pipelineEvents,
-          portfolio,
-          positions,
-          equityHistory,
-          performance,
-          pairGoalPerformance,
-          momentumGoalPerformance,
-          riskBreakdown,
-          discoveryFunnel,
-          logs: newLogs.slice(0, 120),
+          statuses: (next.get("statuses") ?? {}) as Record<string, AgentStatus>,
+          portfolio: (next.get("portfolio") ?? null) as PortfolioSummary | null,
+          overview: (next.get("overview") ?? null) as MetricsOverview | null,
+          performance: (next.get("performance") ?? null) as PerformanceReport | null,
+          pairPerformance: (next.get("pairPerformance") ?? null) as PerformanceReport | null,
+          momentumPerformance: (next.get("momentumPerformance") ?? null) as PerformanceReport | null,
+          signals: (next.get("signals") ?? []) as Signal[],
+          decisions: (next.get("decisions") ?? []) as Decision[],
+          orders: (next.get("orders") ?? []) as Order[],
+          riskEvents: (next.get("riskEvents") ?? []) as RiskEvent[],
         });
         setError(failures.length > 0 ? `Failed: ${failures.join(", ")}` : null);
         setLastUpdated(new Date().toLocaleTimeString());
@@ -731,687 +327,159 @@ export function DashboardClient() {
 
     void load();
     const interval = window.setInterval(() => void load(), 5000);
-    return () => { active = false; window.clearInterval(interval); };
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
   }, []);
 
-  const perf = state.performance;
-  const summary = perf?.summary;
-  const runningAgents = Object.values(state.statuses).filter(s => s.running).length;
-  const totalAgents = Object.keys(state.statuses).length;
+  const summary = state.performance?.summary;
   const balance = state.portfolio?.available_balance ?? 0;
   const pnl = state.portfolio?.total_pnl ?? 0;
+  const realized = state.portfolio?.realized_pnl ?? 0;
+  const unrealized = state.portfolio?.unrealized_pnl ?? 0;
   const equity = state.portfolio?.total_equity ?? 0;
-  const drawdown = equity > 0 ? ((state.portfolio?.total_exposure ?? 0) / equity * 100) : 0;
-  const sharpe = perf?.summary.sharpe_ratio ?? 0;
-  const maxDrawdown = perf?.summary.max_drawdown ?? 0;
-  const riskBreakdown = state.riskBreakdown;
-  const riskByStrategy = perf?.risk_breakdown_by_strategy ?? riskBreakdown?.by_strategy_reason ?? [];
-  const discovery = state.discoveryFunnel;
-  const discoveryRun = discovery?.run ?? null;
-  const discoveryStages = discovery?.stage_counts ?? discoveryRun?.stage_counts ?? [];
-  const discoveryDropoffs = discovery?.dropoff_counts ?? discoveryRun?.dropoff_counts ?? [];
-  const discoveryCandidates = discovery?.candidates ?? [];
-  const discoveryStageMap = Object.fromEntries(discoveryStages.map((item) => [item.label, item.count])) as Record<string, number>;
-  const discoveryChartStages = [
-    { label: "Universe", count: discoveryStageMap.universe ?? 0, detail: "raw active crypto markets", accent: "#00f3ff" },
-    { label: "Crypto Classified", count: discoveryStageMap.crypto_classified ?? 0, detail: "classifiable crypto markets", accent: "#00ff41" },
-    { label: "Deterministic Pass", count: discoveryStageMap.deterministic_passed ?? 0, detail: "threshold + strategy fit", accent: "#fbbf24" },
-    { label: "Cheap LLM Pass", count: discoveryStageMap.cheap_llm_passed ?? 0, detail: "promoted to Claude", accent: "#ff8a3d" },
-    { label: "Claude Pass", count: discoveryStageMap.claude_passed ?? 0, detail: "operationally fit", accent: "#a855f7" },
-    { label: "Operable", count: discoveryStageMap.operable ?? 0, detail: "ready for inclusion", accent: "#00ff41" },
-  ];
-  const overview = state.overview;
-  const flow = overview?.flow_summary;
-  const latestScan = overview?.latest_scan_telemetry ?? null;
-  const latestReview = overview?.latest_review_telemetry ?? null;
-  const latestExecution = overview?.latest_execution_telemetry ?? null;
-  const scanRejects = normalizeBreakdownMap(latestScan?.rejection_breakdown);
-  const scanPreRiskRejects = normalizeBreakdownMap(latestScan?.pre_risk_block_reasons);
-  const scanRiskRejects = normalizeBreakdownMap(latestScan?.risk_block_reasons);
-  const pairGoal = evaluateStrategyGoals("pair_15m", state.pairGoalPerformance);
-  const momentumGoal = evaluateStrategyGoals("momentum_15m", state.momentumGoalPerformance);
-  const equitySeries = state.equityHistory.length > 0 ? state.equityHistory : (perf?.time_series.equity ?? []);
-  const discoveryOperableCount = discoveryRun?.operable_count ?? 0;
+  const runningAgents = Object.values(state.statuses).filter((status) => status.running).length;
+  const totalAgents = Object.keys(state.statuses).length;
+  const pairGoal = evaluateStrategyGoals("pair_15m", state.pairPerformance);
+  const momentumGoal = evaluateStrategyGoals("momentum_15m", state.momentumPerformance);
+  const pairLog = buildStrategyLog("pair_15m", state.signals, state.decisions, state.orders, state.riskEvents);
+  const momentumLog = buildStrategyLog("momentum_15m", state.signals, state.decisions, state.orders, state.riskEvents);
 
   return (
-    <>
-      <div className="crt-overlay" />
-
-      {/* ── HEADER ── */}
-      <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between h-12 px-6 bg-poly-black border-b border-poly-border font-mono text-xs uppercase tracking-widest">
-        <div className="flex items-center gap-6">
-          <span className="text-lg font-black text-poly-cyan drop-glow-cyan">POLYTERM_v1.04</span>
-          <div className="flex items-center gap-1 text-poly-dim">
-            <span className={`w-1.5 h-1.5 ${runningAgents > 0 ? "bg-poly-green animate-pulse-dot" : "bg-poly-red"} rounded-full`} />
-            <span className={runningAgents > 0 ? "text-poly-green" : "text-poly-red"}>
-              {runningAgents > 0 ? "ONLINE" : "DEGRADED"}
-            </span>
-          </div>
-        </div>
-        <div className="flex items-center gap-5">
-          <div className="hidden md:flex items-center gap-4 text-poly-dim text-[10px]">
-            <span>AGENTS: <span className="text-poly-cyan">{runningAgents}/{totalAgents}</span></span>
-            <span className="opacity-30">|</span>
-            <span>SIGNALS: <span className="text-poly-green">{summary?.signals ?? 0}</span></span>
-            <span className="opacity-30">|</span>
-            <span>LLM: <span className="text-poly-amber">{asCurrency(summary?.llm_cost_usd ?? 0)}</span></span>
-          </div>
-          <div className="text-poly-dim border border-poly-border px-2 py-0.5 bg-poly-surface-dim/50 text-[10px]">
-            {error ? <span className="text-poly-red">API_ERROR</span> : <span>UPD_{lastUpdated}</span>}
-          </div>
-          <div className="text-poly-green font-bold glow-green text-sm">{asCurrency(balance)}</div>
-        </div>
-      </header>
-
-      {/* ── MAIN CANVAS (full width, no sidebar) ── */}
-      <main className="pt-12 w-full h-screen px-3 py-3 grid grid-cols-12 auto-rows-min gap-3 custom-scrollbar overflow-y-auto pb-10">
-
-        {/* ══════ ROW 1: Hero Balance + KPI Strip ══════ */}
-        <section className="col-span-5 border border-poly-border bg-poly-black p-5 flex flex-col justify-between relative overflow-hidden min-h-[180px]">
-          <div className="absolute top-0 right-0 w-48 h-full opacity-10 pointer-events-none">
-            <svg className="w-full h-full" preserveAspectRatio="none" viewBox="0 0 200 100">
-              <path d="M0,80 L20,75 L40,85 L60,40 L80,55 L100,20 L120,45 L140,10 L160,30 L180,5 L200,15" fill="none" stroke="#00FF41" strokeWidth="2" />
-            </svg>
-          </div>
-          <div>
-            <span className="font-mono text-[9px] text-poly-dim tracking-widest uppercase mb-1 block">Available_Liquidity</span>
-            <h1 className="text-5xl font-bold font-mono text-poly-green glow-green tracking-tighter">{asCurrency(balance)}</h1>
-          </div>
-          <div className="grid grid-cols-2 gap-x-6 gap-y-2 mt-4 border-t border-poly-border pt-3">
-            <Kpi label="Net_Profit" value={asCurrencySigned(pnl)} color={pnl >= 0 ? "text-poly-green" : "text-poly-red"} />
-            <Kpi label="Win_Rate" value={summary ? asPercent(summary.positive_position_rate) : "0.0%"} color="text-poly-green" />
-            <Kpi label="Realized" value={asCurrencySigned(state.portfolio?.realized_pnl ?? 0)} color={(state.portfolio?.realized_pnl ?? 0) >= 0 ? "text-poly-green" : "text-poly-red"} />
-            <Kpi label="Unrealized" value={asCurrencySigned(state.portfolio?.unrealized_pnl ?? 0)} color={(state.portfolio?.unrealized_pnl ?? 0) >= 0 ? "text-poly-cyan" : "text-poly-red"} />
-          </div>
-        </section>
-
-        {/* KPI metrics grid */}
-        <section className="col-span-7 grid grid-cols-4 gap-3">
-          <KpiCard label="Total_Equity" value={asCurrency(equity)} icon="account_balance" color="text-poly-cyan" />
-          <KpiCard label="Exposure" value={`${drawdown.toFixed(1)}%`} icon="shield" color="text-poly-amber" />
-          <KpiCard label="Open_Positions" value={`${state.portfolio?.open_positions ?? 0}`} icon="swap_vert" color="text-poly-green" />
-          <KpiCard label="Risk_Events" value={`${summary?.risk_events ?? state.riskEvents.length}`} icon="warning" color="text-poly-red" />
-          <KpiCard label="Approval_Rate" value={summary ? asPercent(summary.approval_rate) : "—"} icon="check_circle" color="text-poly-green" />
-          <KpiCard label="Exec_Rate" value={summary ? asPercent(summary.execution_rate) : "—"} icon="bolt" color="text-poly-cyan" />
-          <KpiCard label="Avg_Edge" value={summary ? summary.avg_edge.toFixed(3) : "—"} icon="trending_up" color="text-poly-green" />
-          <KpiCard label="Avg_Confidence" value={summary ? asPercent(summary.avg_confidence) : "—"} icon="psychology" color="text-poly-amber" />
-          <KpiCard label="Sharpe" value={sharpe.toFixed(2)} icon="query_stats" color="text-poly-cyan" />
-          <KpiCard label="Max_Drawdown" value={asPercent(maxDrawdown)} icon="monitoring" color="text-poly-red" />
-          <KpiCard label="Win_Rate" value={summary?.win_rate != null ? asPercent(summary.win_rate) : "—"} icon="workspace_premium" color="text-poly-green" />
-          <KpiCard label="Spend_24h" value={asCurrency(summary?.daily_spend_usd ?? 0)} icon="payments" color="text-poly-amber" />
-        </section>
-
-        {/* ══════ ROW 2: Equity Curve + Signal Feed ══════ */}
-        <section className="col-span-8 border border-poly-border bg-poly-black relative min-h-[220px] flex flex-col">
-          <div className="absolute top-3 left-3 font-mono text-[10px] text-poly-dim uppercase z-10">Equity_Performance_Matrix</div>
-          <div className="flex-1 pt-7 px-2 pb-2">
-            <EquityChart equity={equitySeries} />
-          </div>
-          <div className="absolute inset-0 bg-gradient-to-t from-poly-green/5 to-transparent pointer-events-none" />
-        </section>
-
-        <section className="col-span-4 border border-poly-border bg-poly-black flex flex-col overflow-hidden min-h-[220px]">
-          <div className="p-2.5 border-b border-poly-border font-mono text-[10px] text-poly-dim uppercase flex justify-between">
-            <span>Signal_Decision_Feed</span>
-            <span className="text-poly-cyan animate-pulse-dot">LIVE</span>
-          </div>
-          <div className="flex-1 font-mono text-[10px] overflow-y-auto custom-scrollbar">
-            <div className="space-y-0.5 p-2">
-                {state.signals.slice(0, 5).map(s => (
-                  <div key={s.signal_id} className="flex justify-between text-poly-cyan/80 bg-poly-cyan/5 px-1">
-                    <span className="truncate max-w-[68%]">{s.asset_symbol} {signalDirection(s)} [{labelRegime(s.regime)}]</span>
-                    <span>E:{signalEdge(s).toFixed(3)}</span>
-                  </div>
-                ))}
-              {state.signals.length === 0 && <div className="text-poly-dim text-center py-2">NO_SIGNALS</div>}
-            </div>
-            <div className="py-1 px-3 border-y border-poly-border bg-poly-surface-container/40 text-center text-[10px] text-poly-muted font-bold">
-              APPROVAL: {summary ? asPercent(summary.approval_rate) : "—"}
-            </div>
-            <div className="space-y-0.5 p-2">
-              {state.decisions.slice(0, 5).map(d => (
-                <div key={`${d.signal_id}-${d.created_at}`} className={`flex justify-between px-1 ${d.approved ? "text-poly-green/80 bg-poly-green/5" : "text-poly-red/80 bg-poly-red/5"}`}>
-                  <span className="truncate max-w-[60%]">{d.asset_symbol} {d.approved ? "OK" : "REJ"}</span>
-                  <span>K:{numberOr(d.kelly_size).toFixed(0)}</span>
-                </div>
-              ))}
-              {state.decisions.length === 0 && <div className="text-poly-dim text-center py-2">NO_DECISIONS</div>}
-            </div>
-          </div>
-          <div className="p-2 border-t border-poly-border mt-auto">
-            <div className="font-mono text-[8px] text-poly-dim uppercase mb-0.5">Risk_Alerts</div>
-            {state.riskEvents.slice(0, 2).map((ev, i) => (
-              <div key={i} className="font-mono text-[8px] text-poly-red/70 truncate">[{ev.agent}] {ev.reason}</div>
-            ))}
-            {state.riskEvents.length === 0 && <div className="font-mono text-[8px] text-poly-dim">CLEAR</div>}
-          </div>
-        </section>
-
-        {/* ══════ ROW 3: Scanner + Visual Flow ══════ */}
-        <section className="col-span-5 border border-poly-border bg-poly-black flex flex-col min-h-[240px]">
-          <PanelHead title="Discovery_Funnel_Live" badge={<span>{discoveryRun ? `${relativeAge(discoveryRun.created_at)} ago` : "NO_RUN"}</span>} />
-          <div className="p-3 space-y-3 border-b border-poly-border">
-            <div className="grid grid-cols-2 gap-3">
-              <KpiCard label="Universe" value={`${discoveryRun?.universe_count ?? 0}`} icon="hub" color="text-poly-cyan" />
-              <KpiCard label="Crypto_Classified" value={`${discoveryRun?.crypto_classified_count ?? 0}`} icon="token" color="text-poly-green" />
-              <KpiCard label="Deterministic_Pass" value={`${discoveryRun?.deterministic_passed_count ?? 0}`} icon="filter_alt" color="text-poly-amber" />
-              <KpiCard label="Operable" value={`${discoveryOperableCount}`} icon="verified" color="text-poly-green" />
-            </div>
-            <div className="border border-poly-border p-2">
-              <DiscoveryFunnelChart stages={discoveryChartStages} operableCount={discoveryOperableCount} />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="border border-poly-border p-3">
-                <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Dropoff_Reason</div>
-                <BreakdownMiniBar
-                  data={discoveryDropoffs.map((item) => ({ label: compactReason(item.label), count: item.count }))}
-                  color="#ff8a3d"
-                />
-              </div>
-              <div className="border border-poly-border p-3">
-                <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Final_Candidates</div>
-                <div className="space-y-1.5 max-h-[120px] overflow-y-auto custom-scrollbar">
-                  {discoveryCandidates.slice(0, 4).map((candidate) => (
-                    <div key={`${candidate.market_id}-${candidate.created_at}`} className="flex items-center justify-between font-mono text-[9px] bg-poly-surface-container/30 px-2 py-1">
-                      <span className="truncate max-w-[72%] text-poly-cyan" title={candidate.question}>
-                        {candidate.asset_symbol || "?"} [{candidate.crypto_tier || "â€”"}] {candidate.question}
-                      </span>
-                      <span className={candidate.verdict === "operable" ? "text-poly-green" : "text-poly-dim"}>
-                        {candidate.verdict.toUpperCase()}
-                      </span>
-                    </div>
-                  ))}
-                  {discoveryCandidates.length === 0 && <div className="font-mono text-[9px] text-poly-dim text-center py-2">NO_DISCOVERY_RUN</div>}
-                </div>
-              </div>
-            </div>
-            <div className="border border-poly-border p-3">
-              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Latest_Selected_Markets</div>
-              <div className="space-y-1.5">
-                {(latestScan?.selected_markets ?? []).slice(0, 3).map((market) => (
-                  <div key={`${market.market_id}-${market.asset_symbol}`} className="flex items-center justify-between font-mono text-[9px] bg-poly-surface-container/30 px-2 py-1">
-                    <span className="truncate max-w-[72%] text-poly-cyan" title={market.question}>
-                      {market.asset_symbol || "?"} [{market.crypto_tier || "â€”"}] {market.question}
-                    </span>
-                    <span className="text-poly-dim">{asCurrency(market.volume_24h ?? 0)}</span>
-                  </div>
-                ))}
-                {(latestScan?.selected_markets ?? []).length === 0 && <div className="font-mono text-[9px] text-poly-dim text-center py-2">NO_SELECTED_MARKETS</div>}
-              </div>
-            </div>
-          </div>
-          <div className="flex-1 p-3 grid grid-cols-3 gap-3">
-            <KpiCard label="Gamma_Fetched" value={`${latestScan?.gamma_markets_fetched ?? 0}`} icon="hub" color="text-poly-cyan" />
-            <KpiCard label="Crypto_Classified" value={`${latestScan?.crypto_classified ?? 0}`} icon="token" color="text-poly-green" />
-            <KpiCard label="Selected_For_Scan" value={`${latestScan?.selected_for_scan ?? 0}`} icon="filter_alt" color="text-poly-amber" />
-            <KpiCard label="RiskEngine_In" value={`${latestScan?.reached_risk_engine ?? 0}`} icon="stream" color="text-poly-cyan" />
-            <KpiCard label="PreRisk_Blocked" value={`${latestScan?.pre_risk_blocked ?? 0}`} icon="block" color="text-poly-red" />
-            <KpiCard label="Risk_Passed" value={`${latestScan?.risk_passed ?? 0}`} icon="verified" color="text-poly-green" />
-            <KpiCard label="Signals_Out" value={`${latestScan?.persisted_signals ?? 0}`} icon="outbound" color="text-poly-amber" />
-          </div>
-          <div className="grid grid-cols-3 gap-3 px-3 pb-3">
-            <div className="border border-poly-border p-3">
-              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Reject_Prefilter</div>
-              <BreakdownMiniBar data={scanRejects.map((item) => ({ label: compactReason(item.label), count: item.count }))} color="#ff3131" />
-            </div>
-            <div className="border border-poly-border p-3">
-              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Reject_PreRisk</div>
-              <BreakdownMiniBar data={scanPreRiskRejects.map((item) => ({ label: compactReason(item.label), count: item.count }))} color="#ff8a3d" />
-            </div>
-            <div className="border border-poly-border p-3">
-              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Reject_RiskEngine</div>
-              <BreakdownMiniBar data={scanRiskRejects.map((item) => ({ label: compactReason(item.label), count: item.count }))} color="#fbbf24" />
-            </div>
-          </div>
-          <div className="px-3 pb-3">
-            <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Latest_Selected_Markets</div>
-            <div className="space-y-1.5">
-              {(latestScan?.selected_markets ?? []).slice(0, 4).map((market) => (
-                <div key={`${market.market_id}-${market.asset_symbol}`} className="flex items-center justify-between font-mono text-[9px] bg-poly-surface-container/30 px-2 py-1">
-                  <span className="truncate max-w-[72%] text-poly-cyan" title={market.question}>
-                    {market.asset_symbol || "?"} [{market.crypto_tier || "—"}] {market.question}
-                  </span>
-                  <span className="text-poly-dim">{asCurrency(market.volume_24h ?? 0)}</span>
-                </div>
-              ))}
-              {(latestScan?.selected_markets ?? []).length === 0 && <div className="font-mono text-[9px] text-poly-dim text-center py-2">NO_SELECTED_MARKETS</div>}
-            </div>
-          </div>
-        </section>
-
-        <section className="col-span-7 border border-poly-border bg-poly-black flex flex-col min-h-[240px]">
-          <PanelHead title="Agent_Flow_Live" badge={<span className="text-poly-cyan">{state.pipelineEvents.length} events</span>} />
-          <div className="p-3 grid grid-cols-4 gap-3 items-start">
-            <FlowStageCard
-              title="Gamma"
-              accent="text-poly-cyan"
-              primary={`${flow?.gamma_markets_fetched ?? 0}`}
-              secondary={`upstream ${latestScan?.upstream_limit ?? 0}`}
-              age={relativeAge(latestScan?.created_at)}
-            />
-            <FlowStageCard
-              title="Claude"
-              accent="text-poly-green"
-              primary={`${flow?.reached_risk_engine ?? 0}`}
-              secondary={`signals ${flow?.persisted_signals ?? 0}`}
-              age={relativeAge(latestScan?.created_at)}
-            />
-            <FlowStageCard
-              title="Codex"
-              accent="text-poly-amber"
-              primary={`${flow?.reviewer_inbox ?? 0}`}
-              secondary={`ok ${flow?.reviewer_approved ?? 0} / rej ${flow?.reviewer_rejected ?? 0}`}
-              age={relativeAge(latestReview?.created_at)}
-            />
-            <FlowStageCard
-              title="Claw"
-              accent="text-poly-red"
-              primary={`${flow?.executor_inbox ?? 0}`}
-              secondary={`exec ${flow?.executor_executed ?? 0} / blk ${flow?.executor_blocked ?? 0}`}
-              age={relativeAge(latestExecution?.created_at)}
-            />
-          </div>
-          <div className="px-3 pb-3">
-            <div className="grid grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr] gap-2 items-center font-mono text-[9px]">
-              <FlowLink label={`classified ${flow?.crypto_classified ?? 0}`} />
-              <span className="text-poly-dim text-center">→</span>
-              <FlowLink label={`risk pass ${flow?.risk_passed ?? 0}`} />
-              <span className="text-poly-dim text-center">→</span>
-              <FlowLink label={`approved ${flow?.reviewer_approved ?? 0}`} />
-              <span className="text-poly-dim text-center">→</span>
-              <FlowLink label={`orders ${flow?.executor_executed ?? 0}`} />
-            </div>
-          </div>
-          <div className="flex-1 px-3 pb-3 grid grid-cols-2 gap-3">
-            <div className="border border-poly-border p-3">
-              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Recent_Pipeline_Events</div>
-              <div className="space-y-1.5 max-h-[120px] overflow-y-auto custom-scrollbar">
-                {state.pipelineEvents.slice(0, 8).map((event) => (
-                  <div key={`${event.event_type}-${event.created_at}`} className="font-mono text-[9px] bg-poly-surface-container/30 px-2 py-1">
-                    <div className="flex justify-between gap-2">
-                      <span className="text-poly-muted uppercase">{event.agent} / {event.event_type.split(".")[0]}</span>
-                      <span className="text-poly-dim">{relativeAge(event.created_at)}</span>
-                    </div>
-                    <div className="text-poly-text/80">{summarizePipelineEvent(event)}</div>
-                  </div>
-                ))}
-                {state.pipelineEvents.length === 0 && <div className="font-mono text-[9px] text-poly-dim text-center py-2">NO_PIPELINE_EVENTS</div>}
-              </div>
-            </div>
-            <div className="border border-poly-border p-3">
-              <div className="font-mono text-[8px] text-poly-dim uppercase mb-2">Latest_Agent_Intake</div>
-              <div className="space-y-2 font-mono text-[9px]">
-                <div className="flex justify-between bg-poly-surface-container/30 px-2 py-1">
-                  <span className="text-poly-green">Claude assets</span>
-                  <span className="text-poly-dim">{(latestScan?.selected_markets ?? []).map((item) => item.asset_symbol).filter(Boolean).join(", ") || "—"}</span>
-                </div>
-                <div className="flex justify-between bg-poly-surface-container/30 px-2 py-1">
-                  <span className="text-poly-amber">Codex inbox</span>
-                  <span className="text-poly-dim">{(latestReview?.reviewed_assets ?? []).join(", ") || "—"}</span>
-                </div>
-                <div className="flex justify-between bg-poly-surface-container/30 px-2 py-1">
-                  <span className="text-poly-red">Claw inbox</span>
-                  <span className="text-poly-dim">{(latestExecution?.reviewed_assets ?? []).join(", ") || "—"}</span>
-                </div>
-                <div className="flex justify-between bg-poly-surface-container/30 px-2 py-1">
-                  <span className="text-poly-cyan">Exit actions</span>
-                  <span className="text-poly-dim">{(latestExecution?.exit_actions ?? []).join(", ") || "—"}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* ══════ ROW 4: Pipeline + LLM Cost + Risk Breakdown ══════ */}
-        <section className="col-span-4 border border-poly-border bg-poly-black flex flex-col min-h-[200px]">
-          <PanelHead title="Pipeline_Activity_24h" badge={<Legend items={[{c:"#00ff41",l:"SIG"},{c:"#00f3ff",l:"DEC"},{c:"#fbbf24",l:"ORD"},{c:"#ff3131",l:"RSK"}]} />} />
-          <div className="flex-1 p-1">
-            <PipelineChart data={perf?.time_series.pipeline ?? []} />
-          </div>
-        </section>
-
-        <section className="col-span-4 border border-poly-border bg-poly-black flex flex-col min-h-[200px]">
-          <PanelHead title="LLM_Cost_By_Agent" badge={<span className="text-poly-amber">{asCurrency(summary?.llm_cost_usd ?? 0)}</span>} />
-          <div className="flex-1 p-1">
-            <CostBarChart data={perf?.cost_by_agent ?? state.costs} />
-          </div>
-        </section>
-
-        <section className="col-span-4 border border-poly-border bg-poly-black flex flex-col min-h-[200px]">
-          <PanelHead title="Risk_Breakdown" badge={<span className="text-poly-red">{summary?.risk_events ?? 0} events</span>} />
-          <div className="p-1 h-[110px]">
-            <RiskBreakdownChart data={riskBreakdown?.by_reason ?? perf?.risk_breakdown ?? []} />
-          </div>
-          <div className="border-t border-poly-border p-3 space-y-3">
-            <div className="font-mono text-[8px] text-poly-dim uppercase">By_Strategy_And_Reason</div>
-            {riskByStrategy.slice(0, 3).map((group) => (
-              <div key={group.label} className="space-y-1">
-                <div className="flex items-center justify-between font-mono text-[9px] uppercase">
-                  <span className="text-poly-muted">{labelStrategy(group.label)}</span>
-                  <span className="text-poly-red">{group.count}</span>
-                </div>
-                <BreakdownMiniBar
-                  data={group.reasons.map((item) => ({ label: compactReason(item.label), count: item.count }))}
-                  color="#ff3131"
-                />
-              </div>
-            ))}
-            {riskByStrategy.length === 0 && (
-              <div className="font-mono text-[9px] text-poly-dim text-center py-2">NO_STRATEGY_RISK_DATA</div>
-            )}
-          </div>
-        </section>
-
-        {/* ══════ ROW 5: Orders Table + Agents + Top Markets ══════ */}
-        <section className="col-span-12 border border-poly-border bg-poly-black flex flex-col">
-          <PanelHead title="Strategy_Go_NoGo_Gates_14d" badge={<span className="text-poly-amber">LIVE_READY_CHECK</span>} />
-          <div className="p-3 grid grid-cols-2 gap-3">
-            <StrategyGoalCard goal={pairGoal} />
-            <StrategyGoalCard goal={momentumGoal} />
-          </div>
-        </section>
-        <section className="col-span-6 border border-poly-border bg-poly-black flex flex-col max-h-[280px]">
-          <PanelHead title="Recent_Executions" badge={<span>{summary?.orders ?? state.orders.length} total</span>} />
-          <div className="flex-1 overflow-y-auto custom-scrollbar">
-            <table className="w-full font-mono text-[10px] text-left border-collapse">
-              <thead className="bg-poly-surface-container/50 text-poly-dim uppercase sticky top-0">
-                <tr>
-                  <th className="p-1.5 font-normal">TIME</th>
-                  <th className="p-1.5 font-normal">ASSET</th>
-                  <th className="p-1.5 font-normal">ACT</th>
-                  <th className="p-1.5 font-normal">DIR</th>
-                  <th className="p-1.5 font-normal text-right">SIZE</th>
-                  <th className="p-1.5 font-normal text-right">PRICE</th>
-                  <th className="p-1.5 font-normal text-right">RPNL</th>
-                  <th className="p-1.5 font-normal text-center">STS</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-poly-border-dim">
-                {state.orders.slice(0, 8).map(o => (
-                  <tr key={o.order_id} className="hover:bg-poly-surface-container/40">
-                    <td className="p-1.5 text-poly-dim">{new Date(o.created_at).toLocaleTimeString()}</td>
-                    <td className="p-1.5 font-bold text-poly-cyan">{o.asset_symbol}</td>
-                    <td className="p-1.5 text-poly-dim uppercase">{o.action ?? "entry"}</td>
-                    <td className={`p-1.5 ${o.direction === "YES" ? "text-poly-green" : "text-poly-red"}`}>{o.direction}</td>
-                    <td className="p-1.5 text-right">{o.size}</td>
-                    <td className="p-1.5 text-right">{o.price_limit.toFixed(3)}</td>
-                    <td className={`p-1.5 text-right ${(o.realized_pnl_usd ?? 0) >= 0 ? "text-poly-green" : "text-poly-red"}`}>
-                      {asCurrencySigned(o.realized_pnl_usd ?? 0)}
-                    </td>
-                    <td className="p-1.5 text-center">
-                      <span className={`px-1 text-[8px] font-bold ${o.status === "filled" || o.status === "simulated" ? "bg-poly-green text-poly-black" : o.status === "failed" ? "bg-poly-red text-white" : "bg-poly-surface-bright text-poly-muted"}`}>{o.status.toUpperCase()}</span>
-                    </td>
-                  </tr>
-                ))}
-                {state.orders.length === 0 && <tr><td colSpan={8} className="p-3 text-center text-poly-dim">AWAITING...</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section className="col-span-2 border border-poly-border bg-poly-surface-dim/20 flex flex-col max-h-[280px]">
-          <PanelHead title="Agent_Status" badge={<span className="text-poly-green">{runningAgents}/{totalAgents}</span>} />
-          <div className="flex-1 p-2 font-mono text-[10px] overflow-y-auto custom-scrollbar">
-            {Object.entries(state.statuses).map(([name, status]) => (
-              <div key={name} className="flex justify-between border-b border-poly-border-dim py-1.5">
-                <span className="flex items-center gap-1.5">
-                  <span className={`w-1.5 h-1.5 rounded-full ${status.running ? "bg-poly-green animate-pulse" : "bg-poly-red"}`} />
-                  <span className="text-poly-muted truncate max-w-[80px]">{name}</span>
+    <main className="min-h-screen p-4 md:p-6">
+      <div className="mx-auto flex max-w-6xl flex-col gap-4">
+        <section className="border border-poly-border bg-poly-black p-4 md:p-5">
+          <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.3em] text-poly-dim">POLYTERM_V1.04</div>
+              <div className="mt-2 flex items-center gap-2 font-mono text-sm">
+                <span className={`h-2 w-2 rounded-full ${runningAgents > 0 ? "bg-poly-green animate-pulse-dot" : "bg-poly-red"}`} />
+                <span className={runningAgents > 0 ? "text-poly-green" : "text-poly-red"}>
+                  {runningAgents > 0 ? "ONLINE" : "DEGRADED"}
                 </span>
-                <span className={status.running ? "text-poly-green" : "text-poly-dim"}>{status.running ? "ON" : "OFF"}</span>
               </div>
-            ))}
-            {totalAgents === 0 && <div className="text-poly-dim text-center py-3">NO_AGENTS</div>}
+              <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <Metric label="Balance" value={asCurrency(balance)} tone="text-poly-green" />
+                <Metric label="PnL" value={asCurrencySigned(pnl)} tone={pnl >= 0 ? "text-poly-green" : "text-poly-red"} />
+                <Metric label="Realized" value={asCurrencySigned(realized)} tone={realized >= 0 ? "text-poly-cyan" : "text-poly-red"} />
+                <Metric label="Unrealized" value={asCurrencySigned(unrealized)} tone={unrealized >= 0 ? "text-poly-amber" : "text-poly-red"} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-right font-mono text-[10px] uppercase text-poly-dim md:min-w-[300px]">
+              <div className="border border-poly-border px-3 py-2">
+                <div>Win%</div>
+                <div className="text-poly-cyan text-sm normal-case">{summary?.win_rate != null ? asPercent(summary.win_rate) : "—"}</div>
+              </div>
+              <div className="border border-poly-border px-3 py-2">
+                <div>Equity</div>
+                <div className="text-poly-cyan text-sm normal-case">{asCurrency(equity)}</div>
+              </div>
+              <div className="border border-poly-border px-3 py-2">
+                <div>Agents</div>
+                <div className="text-poly-cyan text-sm normal-case">{runningAgents}/{totalAgents}</div>
+              </div>
+              <div className="border border-poly-border px-3 py-2">
+                <div>Updated</div>
+                <div className="text-poly-cyan text-sm normal-case">{error ? "API_ERROR" : lastUpdated}</div>
+              </div>
+            </div>
           </div>
         </section>
 
-        <section className="col-span-4 border border-poly-border bg-poly-black flex flex-col max-h-[280px]">
-          <PanelHead title="Top_Markets" badge={<span>{perf?.top_markets?.length ?? 0} tracked</span>} />
-          <div className="flex-1 overflow-y-auto custom-scrollbar">
-            <table className="w-full font-mono text-[9px] text-left border-collapse">
-              <thead className="bg-poly-surface-container/50 text-poly-dim uppercase sticky top-0">
-                <tr>
-                  <th className="p-1.5 font-normal">ASSET</th>
-                  <th className="p-1.5 font-normal text-right">SIGS</th>
-                  <th className="p-1.5 font-normal text-right">ORDS</th>
-                  <th className="p-1.5 font-normal text-right">EDGE</th>
-                  <th className="p-1.5 font-normal text-right">CONF</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-poly-border-dim">
-                {(perf?.top_markets ?? []).slice(0, 8).map(m => (
-                  <tr key={m.market_id} className="hover:bg-poly-surface-container/40">
-                    <td className="p-1.5 text-poly-cyan truncate max-w-[120px]" title={m.market_question}>{m.asset_symbol}</td>
-                    <td className="p-1.5 text-right text-poly-green">{m.signal_count}</td>
-                    <td className="p-1.5 text-right text-poly-amber">{m.order_count}</td>
-                    <td className="p-1.5 text-right">{m.avg_edge.toFixed(3)}</td>
-                    <td className="p-1.5 text-right">{asPercent(m.avg_confidence)}</td>
-                  </tr>
-                ))}
-                {(perf?.top_markets ?? []).length === 0 && <tr><td colSpan={5} className="p-3 text-center text-poly-dim">NO_DATA</td></tr>}
-              </tbody>
-            </table>
-          </div>
+        <section className="grid gap-4 lg:grid-cols-2">
+          <StrategyGoalCard goal={pairGoal} />
+          <StrategyGoalCard goal={momentumGoal} />
         </section>
 
-
-        {/* ══════ ROW 8: Positions ══════ */}
-        <section className="col-span-12 border border-poly-border bg-poly-black flex flex-col">
-          <PanelHead title="Open_Positions" badge={<span>{state.positions.length} ACTIVE</span>} />
-          <div className="flex-1 overflow-y-auto custom-scrollbar">
-            <table className="w-full font-mono text-[10px] text-left border-collapse">
-              <thead className="bg-poly-surface-container/50 text-poly-dim uppercase sticky top-0">
-                <tr>
-                  <th className="p-2 font-normal">MARKET</th>
-                  <th className="p-2 font-normal">STRAT</th>
-                  <th className="p-2 font-normal">REGIME</th>
-                  <th className="p-2 font-normal">DIR</th>
-                  <th className="p-2 font-normal text-right">SIZE</th>
-                  <th className="p-2 font-normal text-right">ENTRY</th>
-                  <th className="p-2 font-normal text-right">MARK</th>
-                  <th className="p-2 font-normal text-right">TP/SL</th>
-                  <th className="p-2 font-normal text-right">VALUE</th>
-                  <th className="p-2 font-normal text-right">P&L</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-poly-border-dim">
-                {state.positions.map(pos => (
-                  <tr key={pos.position_key ?? `${pos.market_id}-${pos.direction}-${pos.opened_at ?? "open"}`} className="hover:bg-poly-surface-container/40">
-                    <td className="p-2 text-poly-cyan truncate max-w-[300px]" title={pos.market_question}>{pos.asset_symbol ?? "?"} <span className="text-poly-dim">{pos.market_question}</span></td>
-                    <td className="p-2 text-poly-muted">{labelStrategy(pos.strategy_id)}</td>
-                    <td className="p-2 text-poly-amber">{labelRegime(pos.regime)}</td>
-                    <td className={`p-2 ${pos.direction === "YES" ? "text-poly-green" : "text-poly-red"}`}>{pos.direction}</td>
-                    <td className="p-2 text-right">{pos.size}</td>
-                    <td className="p-2 text-right">{pos.average_price.toFixed(3)}</td>
-                    <td className="p-2 text-right">{pos.current_price.toFixed(3)}</td>
-                    <td className="p-2 text-right text-poly-dim">
-                      {(pos.take_profit_price ?? 0).toFixed(3)}/{(pos.stop_loss_price ?? 0).toFixed(3)}
-                    </td>
-                    <td className="p-2 text-right text-poly-muted">{asCurrency(pos.current_value_usd)}</td>
-                    <td className={`p-2 text-right font-bold ${pos.unrealized_pnl >= 0 ? "text-poly-green" : "text-poly-red"}`}>{asCurrencySigned(pos.unrealized_pnl)}</td>
-                  </tr>
-                ))}
-                {state.positions.length === 0 && <tr><td colSpan={10} className="p-4 text-center text-poly-dim">SCANNING_FOR_ENTRIES...</td></tr>}
-              </tbody>
-            </table>
-          </div>
+        <section className="grid gap-4 lg:grid-cols-2">
+          <LogPanel title="Pair_15m_Log" items={pairLog} />
+          <LogPanel title="Momentum_15m_Log" items={momentumLog} />
         </section>
 
-        {/* ══════ ROW 9: Log Terminal ══════ */}
-        <section className="col-span-12 border border-poly-border bg-poly-black flex flex-col max-h-[300px]">
-          <PanelHead title="System_Log_Terminal" badge={<span className="text-poly-cyan animate-pulse-dot">LIVE</span>} />
-          <LogTerminal logs={state.logs} />
-        </section>
-      </main>
-
-      {/* ── FOOTER ── */}
-      <footer className="fixed bottom-0 left-0 w-full bg-poly-surface-dim border-t border-poly-border h-6 flex items-center px-4 z-50 overflow-hidden">
-        <div className="flex-1 flex gap-6 font-mono text-[9px] items-center">
-          <div className="flex items-center gap-1">
-            <span className={`w-1.5 h-1.5 ${runningAgents > 0 ? "bg-poly-green animate-pulse-dot" : "bg-poly-red"} rounded-full`} />
-            <span className={runningAgents > 0 ? "text-poly-green" : "text-poly-red"}>
-              {runningAgents > 0 ? "SYSTEM_ONLINE" : "DEGRADED"}
-            </span>
+        <section className="border border-poly-border bg-poly-black p-4 font-mono text-[10px] text-poly-dim">
+          <div className="flex flex-wrap gap-4">
+            <span>Orders: <span className="text-poly-cyan">{summary?.orders ?? 0}</span></span>
+            <span>Signals: <span className="text-poly-green">{summary?.signals ?? 0}</span></span>
+            <span>Risk: <span className="text-poly-red">{summary?.risk_events ?? 0}</span></span>
+            <span>Open: <span className="text-poly-amber">{state.portfolio?.open_positions ?? 0}</span></span>
+            <span>Risk/Signal: <span className="text-poly-cyan">{summary && summary.signals > 0 ? (summary.risk_events / summary.signals).toFixed(1) : "—"}</span></span>
           </div>
-          <span className="text-poly-dim opacity-30">|</span>
-          <span className="text-poly-cyan">AGENTS:{runningAgents}/{totalAgents}</span>
-          <span className="text-poly-dim opacity-30">|</span>
-          <span className="text-poly-dim">NOTIONAL:{asCurrency(summary?.total_order_notional ?? 0)}</span>
-          <span className="text-poly-dim opacity-30">|</span>
-          <span className="text-poly-dim">LOGS:{state.logs.length}</span>
+        </section>
+      </div>
+
+      <div className="pointer-events-none fixed inset-0 crt-overlay" />
+      <div className="fixed bottom-0 left-0 right-0 border-t border-poly-border bg-poly-surface-dim/90 px-4 py-1 font-mono text-[9px] text-poly-dim">
+        <div className="mx-auto flex max-w-6xl items-center justify-between">
+          <span>GO focus: balance, pnl, win%, strategy gates</span>
+          <span>{clock}</span>
         </div>
-        <div className="flex items-center gap-4 font-mono text-[9px]">
-          {state.riskEvents.length > 0 && (
-            <div className="bg-poly-red text-white px-2 animate-pulse font-bold text-[8px]">RISK:{state.riskEvents.length}</div>
-          )}
-          <span className="text-poly-muted">{clock}</span>
-        </div>
-      </footer>
-    </>
+      </div>
+    </main>
   );
 }
 
-function Kpi({ label, value, color }: { label: string; value: string; color: string }) {
+function Metric({ label, value, tone }: { label: string; value: string; tone: string }) {
   return (
-    <div>
-      <span className="font-mono text-[8px] text-poly-dim uppercase block">{label}</span>
-      <span className={`text-base font-bold font-mono ${color}`}>{value}</span>
+    <div className="border border-poly-border px-3 py-2">
+      <div className="font-mono text-[8px] uppercase text-poly-dim">{label}</div>
+      <div className={`mt-1 font-mono text-sm font-bold ${tone}`}>{value}</div>
     </div>
   );
 }
 
 function StrategyGoalCard({ goal }: { goal: StrategyGoalStatus }) {
-  const strategyLabel = labelStrategy(goal.strategy).toUpperCase();
-  const statusLabel = goal.go ? "GO" : "NO-GO";
+  const title = labelStrategy(goal.strategy).toUpperCase();
   return (
-    <div className="border border-poly-border bg-poly-surface-dim/20 p-3 space-y-3">
-      <div className="flex items-center justify-between">
+    <section className="border border-poly-border bg-poly-black p-4">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="font-mono text-[9px] text-poly-dim uppercase">{strategyLabel}</div>
-          <div className="font-mono text-[8px] text-poly-dim uppercase">{goal.windowHours}h window | score {goal.score}</div>
+          <div className="font-mono text-[10px] uppercase tracking-[0.25em] text-poly-dim">{title}</div>
+          <div className="mt-1 font-mono text-xs text-poly-dim">score {goal.score}</div>
         </div>
-        <span
-          className={`px-2 py-1 font-mono text-[9px] font-bold ${
-            goal.go ? "bg-poly-green text-poly-black" : "bg-poly-red text-white"
-          }`}
-        >
-          {statusLabel}
+        <span className={`px-3 py-1 font-mono text-xs font-bold ${goal.go ? "bg-poly-green text-poly-black" : "bg-poly-red text-white"}`}>
+          {goal.go ? "GO" : "NO-GO"}
         </span>
       </div>
-      <div className="grid grid-cols-2 gap-2">
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
         {goal.checks.map((check) => (
-          <div key={`${goal.strategy}-${check.id}`} className="border border-poly-border px-2 py-1.5">
-            <div className="font-mono text-[8px] text-poly-dim uppercase">{check.label}</div>
-            <div className="flex items-center justify-between mt-1">
-              <span className="font-mono text-[10px] text-poly-text">{check.value}</span>
-              <span className={`font-mono text-[9px] font-bold ${check.ok ? "text-poly-green" : "text-poly-red"}`}>
+          <div key={`${goal.strategy}-${check.label}`} className="border border-poly-border px-3 py-2">
+            <div className="font-mono text-[8px] uppercase text-poly-dim">{check.label}</div>
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <span className="font-mono text-sm text-poly-text">{check.value}</span>
+              <span className={`font-mono text-[10px] font-bold ${check.ok ? "text-poly-green" : "text-poly-red"}`}>
                 {check.ok ? "OK" : "FAIL"}
               </span>
             </div>
           </div>
         ))}
       </div>
-    </div>
+    </section>
   );
 }
 
-function KpiCard({ label, value, icon, color }: { label: string; value: string; icon: string; color: string }) {
+function LogPanel({ title, items }: { title: string; items: Array<{ time: string; text: string }> }) {
   return (
-    <div className="border border-poly-border bg-poly-black p-3 flex flex-col justify-between min-h-[80px]">
-      <div className="flex items-center justify-between">
-        <span className="font-mono text-[8px] text-poly-dim uppercase">{label}</span>
-        <Icon name={icon} className={`text-sm ${color} opacity-40`} />
-      </div>
-      <span className={`text-lg font-bold font-mono ${color}`}>{value}</span>
-    </div>
-  );
-}
-
-function FlowStageCard({
-  title,
-  accent,
-  primary,
-  secondary,
-  age,
-}: {
-  title: string;
-  accent: string;
-  primary: string;
-  secondary: string;
-  age: string;
-}) {
-  return (
-    <div className="border border-poly-border bg-poly-surface-dim/20 p-3 min-h-[96px]">
-      <div className="flex items-center justify-between font-mono text-[8px] uppercase text-poly-dim">
+    <section className="border border-poly-border bg-poly-black p-4">
+      <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.25em] text-poly-dim">
         <span>{title}</span>
-        <span>{age}</span>
+        <span className="text-poly-cyan">{items.length}</span>
       </div>
-      <div className={`mt-2 text-2xl font-bold font-mono ${accent}`}>{primary}</div>
-      <div className="mt-2 font-mono text-[9px] text-poly-muted">{secondary}</div>
-    </div>
+      <div className="mt-3 space-y-2">
+        {items.length > 0 ? (
+          items.map((item, index) => (
+            <div key={`${title}-${index}-${item.time}`} className="border border-poly-border px-3 py-2">
+              <div className="flex items-center justify-between gap-3 font-mono text-[9px] text-poly-dim">
+                <span>{new Date(item.time).toLocaleTimeString()}</span>
+                <span className="text-poly-cyan">LIVE</span>
+              </div>
+              <div className="mt-1 font-mono text-[11px] text-poly-text">{item.text}</div>
+            </div>
+          ))
+        ) : (
+          <div className="border border-poly-border px-3 py-4 text-center font-mono text-[10px] text-poly-dim">NO_LOGS</div>
+        )}
+      </div>
+    </section>
   );
 }
-
-function FlowLink({ label }: { label: string }) {
-  return (
-    <div className="border border-poly-border bg-poly-surface-container/30 px-2 py-2 font-mono text-[9px] text-center text-poly-dim">
-      {label}
-    </div>
-  );
-}
-
-function PanelHead({ title, badge }: { title: string; badge?: React.ReactNode }) {
-  return (
-    <div className="p-2.5 border-b border-poly-border font-mono text-[10px] text-poly-dim uppercase flex justify-between items-center">
-      <span>{title}</span>
-      {badge && <span className="text-[9px]">{badge}</span>}
-    </div>
-  );
-}
-
-function Legend({ items }: { items: Array<{ c: string; l: string }> }) {
-  return (
-    <div className="flex gap-2">
-      {items.map(i => (
-        <span key={i.l} className="flex items-center gap-0.5 text-[8px]">
-          <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ backgroundColor: i.c }} />
-          {i.l}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function LogTerminal({ logs }: { logs: LogEntry[] }) {
-  const terminalRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (terminalRef.current) {
-      terminalRef.current.scrollTop = 0;
-    }
-  }, [logs]);
-
-  const tagColor: Record<string, string> = {
-    signal: "text-poly-cyan border-poly-cyan",
-    decision: "text-poly-amber border-poly-amber",
-    order: "text-poly-green border-poly-green",
-    risk: "text-poly-red border-poly-red",
-    flow: "text-poly-muted border-poly-border",
-  };
-
-  return (
-    <div className="flex-1 overflow-y-auto custom-scrollbar p-2 bg-poly-black" ref={terminalRef}>
-      {logs.map((log) => (
-        <div key={log.id} className="font-mono text-[10px] leading-5 whitespace-pre-wrap break-all">
-          <span className="text-poly-dim">[{log.time}]</span>{" "}
-          <span className={`px-1 border font-bold text-[8px] uppercase ${tagColor[log.type] ?? "text-poly-dim border-poly-dim"}`}>{log.type}</span>{" "}
-          <span className="text-poly-text/80">{log.message}</span>
-        </div>
-      ))}
-      {logs.length === 0 && <div className="font-mono text-[10px] text-poly-dim text-center py-8">Waiting_for_system_logs...</div>}
-    </div>
-  );
-}
-
-
-

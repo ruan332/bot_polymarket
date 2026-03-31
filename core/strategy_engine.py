@@ -40,6 +40,11 @@ class StrategyEngine:
         history = await self._recent_market_history(str(market.get("id") or ""))
         price_yes = float(market.get("price_yes") or 0.0)
         price_no = float(market.get("price_no") or max(1 - price_yes, 0.0))
+        momentum_min_edge = max(float(self.context.settings.momentum_min_edge), 0.10)
+        momentum_min_volume = max(float(self.context.settings.momentum_min_volume_24h), 750.0)
+        volume_24h = float(market.get("volume_24h") or 0.0)
+        if volume_24h < momentum_min_volume:
+            return None
         yes_book = market.get("orderbook_summary_yes") or {}
         no_book = market.get("orderbook_summary_no") or {}
         avg_spread_bps = fmean(
@@ -96,6 +101,9 @@ class StrategyEngine:
             model_probability = 1 - posterior_yes
             market_probability = price_no
             edge = (1 - posterior_yes) - price_no - (expected_slippage_bps / 10000)
+
+        if edge < momentum_min_edge:
+            return None
 
         confidence = clamp(
             0.52
@@ -189,7 +197,7 @@ class StrategyEngine:
     ) -> Regime:
         if avg_spread_bps >= 180 or liquidity_score < 0.4:
             return "illiquid_choppy"
-        if abs(momentum_short) >= 0.03 or abs(momentum_medium) >= 0.05:
+        if abs(momentum_short) >= 0.035 or abs(momentum_medium) >= 0.055:
             return "trend"
         return "mean_revert"
 

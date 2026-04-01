@@ -38,6 +38,34 @@ type Order = {
   created_at: string;
 };
 
+type OpenPosition = {
+  market_id: string;
+  position_key: string;
+  token_id: string;
+  market_question: string;
+  asset_symbol: string;
+  crypto_tier: string;
+  strategy_id: string;
+  regime?: string;
+  trade_group_id?: string;
+  cycle_slug?: string;
+  leg_role?: string;
+  direction: "YES" | "NO";
+  size: number;
+  average_price: number;
+  current_price: number;
+  cost_basis_usd: number;
+  current_value_usd: number;
+  unrealized_pnl: number;
+  take_profit_price?: number | null;
+  stop_loss_price?: number | null;
+  time_stop_minutes?: number | null;
+  opened_at: string;
+  scaled_out_count: number;
+  latest_spread_bps?: number;
+  updated_at: string;
+};
+
 type RiskEvent = {
   reason: string;
   agent: string;
@@ -88,19 +116,27 @@ type MetricsOverview = {
   latest_execution_telemetry?: { reviewed_assets?: string[]; exit_actions?: string[] } | null;
 };
 
+type LogTone = "positive" | "negative" | "neutral" | "warning";
+
 type LogLine = {
   time: string;
-  text: string;
+  tone: LogTone;
+  tag: string;
+  title: string;
+  detail?: string;
+  meta?: string;
 };
 
 type StrategyGoalCheck = {
   label: string;
   value: string;
+  target: string;
   ok: boolean;
 };
 
 type StrategyGoalStatus = {
   strategy: "pair_15m" | "momentum_15m";
+  subtitle: string;
   go: boolean;
   score: string;
   checks: StrategyGoalCheck[];
@@ -116,6 +152,7 @@ type DashboardState = {
   signals: Signal[];
   decisions: Decision[];
   orders: Order[];
+  positions: OpenPosition[];
   riskEvents: RiskEvent[];
 };
 
@@ -156,13 +193,89 @@ function labelStrategy(value?: string) {
 }
 
 function signalDirection(signal: Signal) {
-  return signal.direction ?? "—";
+  return signal.direction ?? "-";
 }
 
-function signalLog(signal: Signal) {
+function toneForSignal(signal: Signal): LogTone {
   const edge = numberOr(signal.edge);
   const confidence = numberOr(signal.confidence);
-  return `${signal.asset_symbol} ${signalDirection(signal)} | ${labelStrategy(signal.strategy_id)} | edge ${edge.toFixed(3)} | conf ${asPercent(confidence)}`;
+  if (edge >= 0.12 && confidence >= 0.7) return "positive";
+  if (edge <= 0.08 || confidence < 0.6) return "negative";
+  return "neutral";
+}
+
+function toneForDecision(decision: Decision): LogTone {
+  return decision.approved ? "positive" : "negative";
+}
+
+function toneForOrder(order: Order): LogTone {
+  const pnl = numberOr(order.realized_pnl_usd);
+  if (pnl > 0) return "positive";
+  if (pnl < 0) return "negative";
+  return order.action === "close" ? "warning" : "neutral";
+}
+
+function toneForRiskEvent(event: RiskEvent): LogTone {
+  const reason = event.reason.toLowerCase();
+  if (reason.includes("approved") || reason.includes("passed") || reason.includes("ok")) return "positive";
+  if (reason.includes("blocked") || reason.includes("exceeds") || reason.includes("fail") || reason.includes("rejected")) {
+    return "negative";
+  }
+  return "warning";
+}
+
+function toneForPosition(position: OpenPosition): LogTone {
+  const pnl = numberOr(position.unrealized_pnl);
+  if (pnl > 0) return "positive";
+  if (pnl < 0) return "negative";
+  return "neutral";
+}
+
+function logToneClass(tone: LogTone) {
+  switch (tone) {
+    case "positive":
+      return {
+        badge: "bg-poly-green text-poly-black",
+        border: "border-poly-green/40",
+        panel: "bg-poly-green/5",
+        text: "text-poly-green",
+      };
+    case "negative":
+      return {
+        badge: "bg-poly-red text-white",
+        border: "border-poly-red/40",
+        panel: "bg-poly-red/5",
+        text: "text-poly-red",
+      };
+    case "warning":
+      return {
+        badge: "bg-poly-amber text-poly-black",
+        border: "border-poly-amber/40",
+        panel: "bg-poly-amber/5",
+        text: "text-poly-amber",
+      };
+    case "neutral":
+    default:
+      return {
+        badge: "bg-poly-cyan text-poly-black",
+        border: "border-poly-cyan/30",
+        panel: "bg-poly-cyan/5",
+        text: "text-poly-cyan",
+      };
+  }
+}
+
+function signalLog(signal: Signal): LogLine {
+  const edge = numberOr(signal.edge);
+  const confidence = numberOr(signal.confidence);
+  return {
+    time: signal.created_at,
+    tone: toneForSignal(signal),
+    tag: "ANL",
+    title: `${signal.asset_symbol} ${signalDirection(signal)} ${labelStrategy(signal.strategy_id)}`,
+    detail: `edge ${edge.toFixed(3)} | conf ${asPercent(confidence)}${signal.regime ? ` | regime ${signal.regime}` : ""}`,
+    meta: "analysis",
+  };
 }
 
 function buildStrategyLog(
@@ -172,41 +285,50 @@ function buildStrategyLog(
   orders: Order[],
   riskEvents: RiskEvent[],
 ) {
-  const lines: Array<{ time: string; text: string }> = [];
+  const lines: LogLine[] = [];
 
   signals
     .filter((signal) => signal.strategy_id === strategy)
     .slice(0, 3)
-    .forEach((signal) => lines.push({ time: signal.created_at, text: `SIG | ${signalLog(signal)}` }));
+    .forEach((signal) => lines.push(signalLog(signal)));
 
   decisions
     .filter((decision) => signals.some((signal) => signal.signal_id === decision.signal_id && signal.strategy_id === strategy))
     .slice(0, 2)
-    .forEach((decision) =>
+    .forEach((decision) => {
       lines.push({
         time: decision.created_at,
-        text: `DEC | ${decision.asset_symbol} ${decision.approved ? "APPROVED" : "REJECTED"} | ${decision.notes}`,
-      }),
-    );
+        tone: toneForDecision(decision),
+        tag: "DEC",
+        title: `${decision.asset_symbol} ${decision.approved ? "APPROVED" : "REJECTED"}`,
+        detail: decision.notes,
+        meta: `${decision.kelly_size ?? 0} units | risk ${asPercent(decision.risk_fraction ?? 0)}`,
+      });
+    });
 
   orders
     .filter((order) => order.strategy_id === strategy)
     .slice(0, 2)
-    .forEach((order) =>
+    .forEach((order) => {
       lines.push({
         time: order.created_at,
-        text: `ORD | ${order.asset_symbol} ${order.direction} ${order.action ?? "entry"} | ${asCurrencySigned(order.realized_pnl_usd ?? 0)}`,
-      }),
-    );
+        tone: toneForOrder(order),
+        tag: "ORD",
+        title: `${order.asset_symbol} ${order.direction} ${order.action ?? "entry"}`,
+        detail: `realized ${asCurrencySigned(order.realized_pnl_usd ?? 0)}`,
+        meta: order.status.toUpperCase(),
+      });
+    });
 
-  riskEvents
-    .slice(0, 2)
-    .forEach((event) =>
-      lines.push({
-        time: event.created_at,
-        text: `RSK | [${event.agent}] ${event.reason}`,
-      }),
-    );
+  riskEvents.slice(0, 2).forEach((event) => {
+    lines.push({
+      time: event.created_at,
+      tone: toneForRiskEvent(event),
+      tag: "RSK",
+      title: `[${event.agent}] ${event.reason}`,
+      detail: "risk pipeline",
+    });
+  });
 
   return lines.sort((a, b) => b.time.localeCompare(a.time)).slice(0, 6);
 }
@@ -214,7 +336,6 @@ function buildStrategyLog(
 function evaluateStrategyGoals(strategy: "pair_15m" | "momentum_15m", report: PerformanceReport | null): StrategyGoalStatus {
   const summary = report?.summary;
   const signals = numberOr(summary?.signals);
-  const orders = numberOr(summary?.orders);
   const realized = numberOr(summary?.realized_pnl_window);
   const notional = numberOr(summary?.total_order_notional);
   const winRate = numberOr(summary?.win_rate);
@@ -225,12 +346,13 @@ function evaluateStrategyGoals(strategy: "pair_15m" | "momentum_15m", report: Pe
   const pnlPerNotional = notional > 0 ? realized / notional : 0;
 
   const checks: StrategyGoalCheck[] = [
-    { label: "PnL/Notional", value: asPercent(pnlPerNotional), ok: pnlPerNotional >= 0.01 },
-    { label: "Win%", value: asPercent(winRate), ok: winRate >= 0.48 },
-    { label: "Max DD", value: asPercent(maxDrawdown), ok: maxDrawdown <= 0.03 },
+    { label: "PnL/Notional", value: asPercent(pnlPerNotional), target: ">= 1.0%", ok: pnlPerNotional >= 0.01 },
+    { label: "Win%", value: asPercent(winRate), target: ">= 48.0%", ok: winRate >= 0.48 },
+    { label: "Max DD", value: asPercent(maxDrawdown), target: "<= 3.0%", ok: maxDrawdown <= 0.03 },
     {
       label: "Risk/Signal",
-      value: Number.isFinite(riskPerSignal) ? riskPerSignal.toFixed(1) : "—",
+      value: Number.isFinite(riskPerSignal) ? riskPerSignal.toFixed(1) : "-",
+      target: strategy === "momentum_15m" ? "< 40.0" : "< 20.0",
       ok: Number.isFinite(riskPerSignal) && riskPerSignal < riskLimit,
     },
   ];
@@ -238,10 +360,22 @@ function evaluateStrategyGoals(strategy: "pair_15m" | "momentum_15m", report: Pe
   const passed = checks.filter((check) => check.ok).length;
   return {
     strategy,
+    subtitle:
+      strategy === "pair_15m"
+        ? "pairing discipline, symmetric legs, and edge quality"
+        : "trend edge, noise control, and execution quality",
     go: passed === checks.length,
     score: `${passed}/${checks.length}`,
     checks,
   };
+}
+
+function positionHeadline(position: OpenPosition) {
+  return `${position.asset_symbol} ${position.direction} ${labelStrategy(position.strategy_id)}`;
+}
+
+function positionDetail(position: OpenPosition) {
+  return `size ${position.size} | avg ${asCurrency(position.average_price)} | mark ${asCurrency(position.current_price)} | spread ${numberOr(position.latest_spread_bps).toFixed(1)} bps`;
 }
 
 export function DashboardClient() {
@@ -255,6 +389,7 @@ export function DashboardClient() {
     signals: [],
     decisions: [],
     orders: [],
+    positions: [],
     riskEvents: [],
   });
   const [error, setError] = useState<string | null>(null);
@@ -280,6 +415,7 @@ export function DashboardClient() {
       const requests = [
         { key: "statuses", path: "/agents/status", fallback: current.statuses },
         { key: "portfolio", path: "/portfolio/summary", fallback: current.portfolio },
+        { key: "positions", path: "/portfolio/positions", fallback: current.positions },
         { key: "overview", path: "/metrics/overview", fallback: current.overview },
         { key: "performance", path: "/metrics/performance?hours=24", fallback: current.performance },
         { key: "pairPerformance", path: "/metrics/performance?hours=336&strategy=pair_15m", fallback: current.pairPerformance },
@@ -316,6 +452,7 @@ export function DashboardClient() {
           signals: (next.get("signals") ?? []) as Signal[],
           decisions: (next.get("decisions") ?? []) as Decision[],
           orders: (next.get("orders") ?? []) as Order[],
+          positions: (next.get("positions") ?? []) as OpenPosition[],
           riskEvents: (next.get("riskEvents") ?? []) as RiskEvent[],
         });
         setError(failures.length > 0 ? `Failed: ${failures.join(", ")}` : null);
@@ -345,17 +482,20 @@ export function DashboardClient() {
   const momentumGoal = evaluateStrategyGoals("momentum_15m", state.momentumPerformance);
   const pairLog = buildStrategyLog("pair_15m", state.signals, state.decisions, state.orders, state.riskEvents);
   const momentumLog = buildStrategyLog("momentum_15m", state.signals, state.decisions, state.orders, state.riskEvents);
+  const openPositions = [...state.positions].sort((a, b) => numberOr(b.unrealized_pnl) - numberOr(a.unrealized_pnl));
+  const positivePositions = openPositions.filter((position) => numberOr(position.unrealized_pnl) > 0).length;
+  const negativePositions = openPositions.filter((position) => numberOr(position.unrealized_pnl) < 0).length;
 
   return (
-    <main className="min-h-screen p-4 md:p-6">
-      <div className="mx-auto flex max-w-6xl flex-col gap-4">
-        <section className="border border-poly-border bg-poly-black p-4 md:p-5">
+    <main className="min-h-screen overflow-y-auto overflow-x-hidden p-4 md:p-6 custom-scrollbar">
+      <div className="mx-auto flex max-w-7xl flex-col gap-4">
+        <section className="border border-poly-border bg-[radial-gradient(circle_at_top,rgba(0,243,255,0.08),transparent_28%),radial-gradient(circle_at_bottom,rgba(0,255,65,0.06),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.01),transparent)] p-4 md:p-5">
           <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div>
               <div className="font-mono text-[10px] uppercase tracking-[0.3em] text-poly-dim">POLYTERM_V1.04</div>
               <div className="mt-2 flex items-center gap-2 font-mono text-sm">
                 <span className={`h-2 w-2 rounded-full ${runningAgents > 0 ? "bg-poly-green animate-pulse-dot" : "bg-poly-red"}`} />
-                <span className={runningAgents > 0 ? "text-poly-green" : "text-poly-red"}>
+                <span className={runningAgents > 0 ? "text-poly-green glow-green" : "text-poly-red glow-red"}>
                   {runningAgents > 0 ? "ONLINE" : "DEGRADED"}
                 </span>
               </div>
@@ -366,22 +506,22 @@ export function DashboardClient() {
                 <Metric label="Unrealized" value={asCurrencySigned(unrealized)} tone={unrealized >= 0 ? "text-poly-amber" : "text-poly-red"} />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-2 text-right font-mono text-[10px] uppercase text-poly-dim md:min-w-[300px]">
+            <div className="grid grid-cols-2 gap-2 text-right font-mono text-[10px] uppercase text-poly-dim md:min-w-[330px]">
               <div className="border border-poly-border px-3 py-2">
                 <div>Win%</div>
-                <div className="text-poly-cyan text-sm normal-case">{summary?.win_rate != null ? asPercent(summary.win_rate) : "—"}</div>
+                <div className="text-sm normal-case text-poly-cyan">{summary?.win_rate != null ? asPercent(summary.win_rate) : "-"}</div>
               </div>
               <div className="border border-poly-border px-3 py-2">
                 <div>Equity</div>
-                <div className="text-poly-cyan text-sm normal-case">{asCurrency(equity)}</div>
+                <div className="text-sm normal-case text-poly-cyan">{asCurrency(equity)}</div>
               </div>
               <div className="border border-poly-border px-3 py-2">
                 <div>Agents</div>
-                <div className="text-poly-cyan text-sm normal-case">{runningAgents}/{totalAgents}</div>
+                <div className="text-sm normal-case text-poly-cyan">{runningAgents}/{totalAgents}</div>
               </div>
               <div className="border border-poly-border px-3 py-2">
                 <div>Updated</div>
-                <div className="text-poly-cyan text-sm normal-case">{error ? "API_ERROR" : lastUpdated}</div>
+                <div className="text-sm normal-case text-poly-cyan">{error ? "API_ERROR" : lastUpdated}</div>
               </div>
             </div>
           </div>
@@ -392,26 +532,42 @@ export function DashboardClient() {
           <StrategyGoalCard goal={momentumGoal} />
         </section>
 
-        <section className="grid gap-4 lg:grid-cols-2">
-          <LogPanel title="Pair_15m_Log" items={pairLog} />
-          <LogPanel title="Momentum_15m_Log" items={momentumLog} />
+        <section className="grid gap-4 xl:grid-cols-[1.12fr_1fr_1fr]">
+          <OpenPositionsPanel
+            positions={openPositions}
+            positivePositions={positivePositions}
+            negativePositions={negativePositions}
+          />
+          <LogPanel title="Pair_15M_Log" items={pairLog} />
+          <LogPanel title="Momentum_15M_Log" items={momentumLog} />
         </section>
 
         <section className="border border-poly-border bg-poly-black p-4 font-mono text-[10px] text-poly-dim">
           <div className="flex flex-wrap gap-4">
-            <span>Orders: <span className="text-poly-cyan">{summary?.orders ?? 0}</span></span>
-            <span>Signals: <span className="text-poly-green">{summary?.signals ?? 0}</span></span>
-            <span>Risk: <span className="text-poly-red">{summary?.risk_events ?? 0}</span></span>
-            <span>Open: <span className="text-poly-amber">{state.portfolio?.open_positions ?? 0}</span></span>
-            <span>Risk/Signal: <span className="text-poly-cyan">{summary && summary.signals > 0 ? (summary.risk_events / summary.signals).toFixed(1) : "—"}</span></span>
+            <span>
+              Orders: <span className="text-poly-cyan">{summary?.orders ?? 0}</span>
+            </span>
+            <span>
+              Signals: <span className="text-poly-green">{summary?.signals ?? 0}</span>
+            </span>
+            <span>
+              Risk: <span className="text-poly-red">{summary?.risk_events ?? 0}</span>
+            </span>
+            <span>
+              Open: <span className="text-poly-amber">{state.portfolio?.open_positions ?? 0}</span>
+            </span>
+            <span>
+              Risk/Signal:{" "}
+              <span className="text-poly-cyan">{summary && summary.signals > 0 ? (summary.risk_events / summary.signals).toFixed(1) : "-"}</span>
+            </span>
           </div>
         </section>
       </div>
 
       <div className="pointer-events-none fixed inset-0 crt-overlay" />
       <div className="fixed bottom-0 left-0 right-0 border-t border-poly-border bg-poly-surface-dim/90 px-4 py-1 font-mono text-[9px] text-poly-dim">
-        <div className="mx-auto flex max-w-6xl items-center justify-between">
-          <span>GO focus: balance, pnl, win%, strategy gates</span>
+        <div className="mx-auto flex max-w-7xl items-center justify-between">
+          <span>GO focus: balance, pnl, win%, strategy gates, open operations</span>
           <span>{clock}</span>
         </div>
       </div>
@@ -435,6 +591,7 @@ function StrategyGoalCard({ goal }: { goal: StrategyGoalStatus }) {
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="font-mono text-[10px] uppercase tracking-[0.25em] text-poly-dim">{title}</div>
+          <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.2em] text-poly-muted">{goal.subtitle}</div>
           <div className="mt-1 font-mono text-xs text-poly-dim">score {goal.score}</div>
         </div>
         <span className={`px-3 py-1 font-mono text-xs font-bold ${goal.go ? "bg-poly-green text-poly-black" : "bg-poly-red text-white"}`}>
@@ -446,7 +603,10 @@ function StrategyGoalCard({ goal }: { goal: StrategyGoalStatus }) {
           <div key={`${goal.strategy}-${check.label}`} className="border border-poly-border px-3 py-2">
             <div className="font-mono text-[8px] uppercase text-poly-dim">{check.label}</div>
             <div className="mt-1 flex items-center justify-between gap-2">
-              <span className="font-mono text-sm text-poly-text">{check.value}</span>
+              <div>
+                <div className="font-mono text-sm text-poly-text">{check.value}</div>
+                <div className="font-mono text-[8px] uppercase text-poly-dim">meta {check.target}</div>
+              </div>
               <span className={`font-mono text-[10px] font-bold ${check.ok ? "text-poly-green" : "text-poly-red"}`}>
                 {check.ok ? "OK" : "FAIL"}
               </span>
@@ -458,24 +618,101 @@ function StrategyGoalCard({ goal }: { goal: StrategyGoalStatus }) {
   );
 }
 
-function LogPanel({ title, items }: { title: string; items: Array<{ time: string; text: string }> }) {
+function OpenPositionsPanel({
+  positions,
+  positivePositions,
+  negativePositions,
+}: {
+  positions: OpenPosition[];
+  positivePositions: number;
+  negativePositions: number;
+}) {
+  const totalPnL = positions.reduce((sum, position) => sum + numberOr(position.unrealized_pnl), 0);
+
   return (
     <section className="border border-poly-border bg-poly-black p-4">
-      <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.25em] text-poly-dim">
+      <div className="flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.25em] text-poly-dim">
+        <span>OPEN_OPERATIONS</span>
+        <span className="text-poly-cyan">{positions.length}</span>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-3 font-mono text-[9px] text-poly-dim">
+        <span>
+          Positive: <span className="text-poly-green">{positivePositions}</span>
+        </span>
+        <span>
+          Negative: <span className="text-poly-red">{negativePositions}</span>
+        </span>
+        <span>
+          Unrealized: <span className={totalPnL >= 0 ? "text-poly-green" : "text-poly-red"}>{asCurrencySigned(totalPnL)}</span>
+        </span>
+      </div>
+      <div className="mt-3 space-y-2">
+        {positions.length > 0 ? (
+          positions.slice(0, 7).map((position) => {
+            const tone = logToneClass(toneForPosition(position));
+            return (
+              <div key={position.position_key} className={`border ${tone.border} ${tone.panel} px-3 py-2`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-mono text-[10px] uppercase tracking-[0.15em] text-poly-dim">{positionHeadline(position)}</div>
+                    <div className="mt-1 font-mono text-[9px] text-poly-muted">{position.market_question}</div>
+                  </div>
+                  <div className={`font-mono text-[10px] font-bold ${tone.text}`}>{asCurrencySigned(position.unrealized_pnl)}</div>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[9px] text-poly-dim">
+                  <span>{positionDetail(position)}</span>
+                  <span>value {asCurrency(position.current_value_usd)}</span>
+                  <span>opened {new Date(position.opened_at).toLocaleTimeString()}</span>
+                </div>
+              </div>
+            );
+          })
+        ) : (
+          <div className="border border-poly-border px-3 py-4 text-center font-mono text-[10px] text-poly-dim">NO_OPEN_POSITIONS</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function LogPanel({ title, items }: { title: string; items: LogLine[] }) {
+  const positive = items.filter((item) => item.tone === "positive").length;
+  const negative = items.filter((item) => item.tone === "negative").length;
+  const warning = items.filter((item) => item.tone === "warning").length;
+
+  return (
+    <section className="border border-poly-border bg-poly-black p-4">
+      <div className="flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.25em] text-poly-dim">
         <span>{title}</span>
         <span className="text-poly-cyan">{items.length}</span>
       </div>
+      <div className="mt-2 flex flex-wrap gap-3 font-mono text-[9px] text-poly-dim">
+        <span>
+          + <span className="text-poly-green">{positive}</span>
+        </span>
+        <span>
+          - <span className="text-poly-red">{negative}</span>
+        </span>
+        <span>
+          ~ <span className="text-poly-amber">{warning}</span>
+        </span>
+      </div>
       <div className="mt-3 space-y-2">
         {items.length > 0 ? (
-          items.map((item, index) => (
-            <div key={`${title}-${index}-${item.time}`} className="border border-poly-border px-3 py-2">
-              <div className="flex items-center justify-between gap-3 font-mono text-[9px] text-poly-dim">
-                <span>{new Date(item.time).toLocaleTimeString()}</span>
-                <span className="text-poly-cyan">LIVE</span>
+          items.map((item, index) => {
+            const tone = logToneClass(item.tone);
+            return (
+              <div key={`${title}-${index}-${item.time}`} className={`border ${tone.border} ${tone.panel} px-3 py-2`}>
+                <div className="flex items-center justify-between gap-3 font-mono text-[9px] text-poly-dim">
+                  <span>{new Date(item.time).toLocaleTimeString()}</span>
+                  <span className={`px-2 py-0.5 ${tone.badge}`}>{item.tag}</span>
+                </div>
+                <div className={`mt-1 font-mono text-[11px] ${tone.text}`}>{item.title}</div>
+                {item.detail ? <div className="mt-1 font-mono text-[10px] text-poly-text">{item.detail}</div> : null}
+                {item.meta ? <div className="mt-1 font-mono text-[9px] uppercase text-poly-dim">{item.meta}</div> : null}
               </div>
-              <div className="mt-1 font-mono text-[11px] text-poly-text">{item.text}</div>
-            </div>
-          ))
+            );
+          })
         ) : (
           <div className="border border-poly-border px-3 py-4 text-center font-mono text-[10px] text-poly-dim">NO_LOGS</div>
         )}

@@ -487,7 +487,7 @@ export function DashboardClient() {
   const negativePositions = openPositions.filter((position) => numberOr(position.unrealized_pnl) < 0).length;
 
   return (
-    <main className="min-h-screen overflow-y-auto overflow-x-hidden p-4 md:p-6 custom-scrollbar">
+    <main className="min-h-screen overflow-y-auto overflow-x-hidden px-4 pb-16 pt-4 md:px-6 md:pb-20 md:pt-6 custom-scrollbar">
       <div className="mx-auto flex max-w-7xl flex-col gap-4">
         <section className="border border-poly-border bg-[radial-gradient(circle_at_top,rgba(0,243,255,0.08),transparent_28%),radial-gradient(circle_at_bottom,rgba(0,255,65,0.06),transparent_24%),linear-gradient(180deg,rgba(255,255,255,0.01),transparent)] p-4 md:p-5">
           <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">

@@ -34,7 +34,8 @@
 html {
   min-height: 100%;
   background: var(--color-poly-black);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 body {
@@ -43,7 +44,8 @@ body {
   background-color: var(--color-poly-black);
   color: var(--color-poly-text);
   font-family: var(--font-family-display);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   user-select: none;
 }
 

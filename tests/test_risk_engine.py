@@ -320,7 +320,7 @@ async def test_build_execution_guard_allows_missing_news_validation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_build_execution_guard_blocks_opposite_position_same_market() -> None:
+async def test_build_execution_guard_blocks_opposite_position_same_market_and_strategy() -> None:
     existing_signal = make_signal(
         symbol="BTC",
         tier="btc",
@@ -354,12 +354,12 @@ async def test_build_execution_guard_blocks_opposite_position_same_market() -> N
         )
     )
 
-    with pytest.raises(RiskBlockedError, match="opposite position already open for this market"):
+    with pytest.raises(RiskBlockedError, match="opposite position already open for this market and strategy"):
         await risk.build_execution_guard(make_review(incoming_signal))
 
 
 @pytest.mark.asyncio
-async def test_build_execution_guard_blocks_when_pair_position_exists_for_same_market() -> None:
+async def test_build_execution_guard_allows_pair_and_momentum_coexistence_same_market() -> None:
     incoming_signal = make_signal(
         symbol="BTC",
         tier="btc",
@@ -369,11 +369,12 @@ async def test_build_execution_guard_blocks_when_pair_position_exists_for_same_m
         volume_24h=100000.0,
     )
     incoming_signal.strategy_id = "momentum_15m"
+    incoming_signal.market_id = "market-btc"
     risk = RiskEngine(
         make_context(
             positions=[
                 {
-                    "market_id": incoming_signal.market_id,
+                    "market_id": "market-btc",
                     "direction": "YES",
                     "asset_symbol": "BTC",
                     "strategy_id": "pair_15m",
@@ -383,7 +384,38 @@ async def test_build_execution_guard_blocks_when_pair_position_exists_for_same_m
         )
     )
 
-    with pytest.raises(RiskBlockedError, match="pair position already open for this market"):
+    guard = await risk.build_execution_guard(make_review(incoming_signal))
+
+    assert guard.notional_usd == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_blocks_duplicate_same_strategy_same_market() -> None:
+    incoming_signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.40,
+        confidence=0.80,
+        price=0.40,
+        volume_24h=100000.0,
+    )
+    incoming_signal.strategy_id = "momentum_15m"
+    incoming_signal.market_id = "market-btc"
+    risk = RiskEngine(
+        make_context(
+            positions=[
+                {
+                    "market_id": "market-btc",
+                    "direction": "YES",
+                    "asset_symbol": "BTC",
+                    "strategy_id": "momentum_15m",
+                    "cost_basis_usd": 20.0,
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(RiskBlockedError, match="position already open for this market and strategy"):
         await risk.build_execution_guard(make_review(incoming_signal))
 
 
@@ -460,7 +492,7 @@ async def test_validate_pair_signal_accepts_opposite_legs_inside_cycle() -> None
 
 
 @pytest.mark.asyncio
-async def test_build_pair_execution_guard_blocks_non_pair_position_same_market() -> None:
+async def test_build_pair_execution_guard_allows_pair_with_other_strategy_same_market() -> None:
     signal = make_pair_signal()
     risk = RiskEngine(
         make_context(
@@ -469,14 +501,36 @@ async def test_build_pair_execution_guard_blocks_non_pair_position_same_market()
                     "market_id": signal.market_id,
                     "direction": "YES",
                     "asset_symbol": "BTC",
-                    "strategy_id": "trend_follow_bayes",
+                    "strategy_id": "momentum_15m",
                     "cost_basis_usd": 30.0,
                 }
             ]
         )
     )
 
-    with pytest.raises(RiskBlockedError, match="non-pair position already open for this market"):
+    guard = await risk.build_pair_execution_guard(make_pair_review(signal))
+
+    assert guard.total_notional_usd == pytest.approx(1.7)
+
+
+@pytest.mark.asyncio
+async def test_build_pair_execution_guard_blocks_existing_pair_position_same_market() -> None:
+    signal = make_pair_signal()
+    risk = RiskEngine(
+        make_context(
+            positions=[
+                {
+                    "market_id": signal.market_id,
+                    "direction": "YES",
+                    "asset_symbol": "BTC",
+                    "strategy_id": "pair_15m",
+                    "cost_basis_usd": 30.0,
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(RiskBlockedError, match="pair position already open for this market and strategy"):
         await risk.build_pair_execution_guard(make_pair_review(signal))
 
 

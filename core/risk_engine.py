@@ -186,41 +186,27 @@ class RiskEngine:
             raise RiskBlockedError("single position notional exceeds max_single_position_usd")
         if portfolio.total_exposure + notional > self.config.max_total_exposure_usd:
             raise RiskBlockedError("portfolio exposure exceeds max_total_exposure_usd")
-        pair_position = next(
+        same_strategy_position = next(
             (
                 item
                 for item in positions
-                if str(item.get("market_id")) == signal.market_id and str(item.get("strategy_id") or "") == "pair_15m"
+                if str(item.get("market_id")) == signal.market_id
+                and str(item.get("strategy_id") or "") == signal.strategy_id
             ),
             None,
         )
-        if pair_position is not None:
-            raise RiskBlockedError("pair position already open for this market")
-        existing_position = next(
-            (
-                item
-                for item in positions
-                if str(item.get("market_id")) == signal.market_id and str(item.get("direction")) == signal.direction
-            ),
-            None,
-        )
-        opposite_position = next(
-            (
-                item
-                for item in positions
-                if str(item.get("market_id")) == signal.market_id and str(item.get("direction")) != signal.direction
-            ),
-            None,
-        )
-        if opposite_position is not None:
-            raise RiskBlockedError("opposite position already open for this market")
+        if same_strategy_position is not None:
+            same_direction = str(same_strategy_position.get("direction")) == signal.direction
+            if same_direction:
+                raise RiskBlockedError("position already open for this market and strategy")
+            raise RiskBlockedError("opposite position already open for this market and strategy")
         if signal.strategy_id == "momentum_15m":
             momentum_positions = sum(
                 1 for item in positions if str(item.get("strategy_id") or "") == "momentum_15m"
             )
-            if momentum_positions >= int(getattr(self.context.settings, "momentum_max_positions", 2) or 2) and existing_position is None:
+            if momentum_positions >= int(getattr(self.context.settings, "momentum_max_positions", 2) or 2) and same_strategy_position is None:
                 raise RiskBlockedError("momentum max positions reached")
-        if portfolio.open_positions >= self.config.max_open_positions and existing_position is None:
+        if portfolio.open_positions >= self.config.max_open_positions and same_strategy_position is None:
             raise RiskBlockedError("max_open_positions reached")
         effective_daily_limit = self.config.max_daily_spend_usd
         # Treat zero or negative values as "no daily spend cap".
@@ -286,10 +272,11 @@ class RiskEngine:
         conflicting_positions = [
             item
             for item in positions
-            if str(item.get("market_id")) == signal.market_id and str(item.get("strategy_id") or "") != "pair_15m"
+            if str(item.get("market_id")) == signal.market_id
+            and str(item.get("strategy_id") or "") == "pair_15m"
         ]
         if conflicting_positions:
-            raise RiskBlockedError("non-pair position already open for this market")
+            raise RiskBlockedError("pair position already open for this market and strategy")
         return PairExecutionGuard(
             primary_position_key=f"{review.trade_group_id}:{review.approved_primary_leg.direction}",
             hedge_position_key=f"{review.trade_group_id}:{review.approved_hedge_leg.direction}",

@@ -377,7 +377,8 @@ class PairTradingEngine:
                 continue
             stats["strategy_candidates"] += 1
             stats["reached_risk_engine"] += 1
-            if predictor_signal.confidence < self.context.settings.copytrade_signal_confidence_threshold:
+            confidence_floor = max(float(self.context.settings.copytrade_signal_confidence_threshold), 0.60)
+            if predictor_signal.confidence < confidence_floor:
                 self._increment_reason(stats, "confidence_below_threshold")
                 await self.context.repository.upsert_pair_cycle(cycle.to_payload())
                 continue
@@ -420,6 +421,7 @@ class PairTradingEngine:
             )
         if snapshots:
             await self.context.repository.record_market_snapshots(snapshots)
+        market_coexistence = await self._market_coexistence_summary()
         await self.context.repository.record_pipeline_telemetry(
             str(uuid4()),
             "claude",
@@ -427,6 +429,7 @@ class PairTradingEngine:
             {
                 **stats,
                 "selected_markets": stats["selected_markets"][:6],
+                "market_coexistence": market_coexistence,
                 "news_validation_enabled": False,
                 "feed_error": self.feed_error or "",
             },
@@ -679,6 +682,65 @@ class PairTradingEngine:
     def _reserve_cycle_side(cycle: PairCycleRuntime, direction: Literal["YES", "NO"]) -> None:
         side_key = direction.lower()
         cycle.side_counts[side_key] = int(cycle.side_counts.get(side_key, 0)) + 1
+
+    async def _market_coexistence_summary(self) -> dict[str, Any]:
+        repository = self.context.repository
+        if not hasattr(repository, "get_open_positions"):
+            return {
+                "open_position_count": 0,
+                "coexistence_market_count": 0,
+                "coexistence_position_count": 0,
+                "coexistence_markets": [],
+                "has_momentum_pair_coexistence": False,
+            }
+        positions = await repository.get_open_positions()
+        markets: dict[str, dict[str, Any]] = {}
+        for item in positions:
+            market_id = str(item.get("market_id") or "").strip()
+            if not market_id:
+                continue
+            entry = markets.setdefault(
+                market_id,
+                {
+                    "market_id": market_id,
+                    "asset_symbol": str(item.get("asset_symbol") or "").strip(),
+                    "position_count": 0,
+                    "strategy_ids": set(),
+                },
+            )
+            entry["position_count"] += 1
+            strategy_id = str(item.get("strategy_id") or "").strip()
+            if strategy_id:
+                entry["strategy_ids"].add(strategy_id)
+            asset_symbol = str(item.get("asset_symbol") or "").strip()
+            if asset_symbol and not entry["asset_symbol"]:
+                entry["asset_symbol"] = asset_symbol
+
+        coexistence_markets = []
+        momentum_pair_markets = []
+        for entry in markets.values():
+            strategy_ids = sorted(entry["strategy_ids"])
+            if len(strategy_ids) < 2:
+                continue
+            market_payload = {
+                "market_id": entry["market_id"],
+                "asset_symbol": entry["asset_symbol"],
+                "position_count": entry["position_count"],
+                "strategy_ids": strategy_ids,
+            }
+            coexistence_markets.append(market_payload)
+            if "momentum_15m" in strategy_ids and "pair_15m" in strategy_ids:
+                momentum_pair_markets.append(market_payload)
+
+        return {
+            "open_position_count": len(positions),
+            "coexistence_market_count": len(coexistence_markets),
+            "coexistence_position_count": sum(item["position_count"] for item in coexistence_markets),
+            "coexistence_markets": coexistence_markets[:6],
+            "momentum_pair_market_count": len(momentum_pair_markets),
+            "momentum_pair_markets": momentum_pair_markets[:6],
+            "has_momentum_pair_coexistence": bool(momentum_pair_markets),
+        }
 
     def _extract_quotes(self, payload: Any) -> list[tuple[str, Quote]]:
         if isinstance(payload, list):

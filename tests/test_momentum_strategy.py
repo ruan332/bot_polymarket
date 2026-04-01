@@ -148,6 +148,90 @@ async def test_momentum_engine_publishes_signal_for_valid_market() -> None:
 
 
 @pytest.mark.asyncio
+async def test_momentum_engine_records_coexistence_summary_in_telemetry() -> None:
+    repository = FakeRepository()
+    bus = FakeBus()
+    context = SimpleNamespace(
+        settings=SimpleNamespace(
+            momentum_enabled=True,
+            momentum_markets=["BTC"],
+            momentum_trading_enabled=True,
+            momentum_signal_confidence_threshold=0.55,
+            momentum_min_history_points=6,
+            momentum_cooldown_minutes=20,
+            momentum_wait_for_next_market_start=False,
+            live_trading=False,
+            news_validation_enabled=False,
+        ),
+        risk_config=SimpleNamespace(
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_spread_bps=250,
+            max_slippage_bps=150,
+            max_order_price=0.9,
+            min_market_volume_24h=1000.0,
+        ),
+        crypto_config=SimpleNamespace(major_assets=["ETH", "SOL"]),
+        repository=repository,
+        bus=bus,
+    )
+    engine = MomentumTradingEngine(context, FakeConnector())  # type: ignore[arg-type]
+    engine.risk = FakeRisk()  # type: ignore[assignment]
+
+    async def ensure_feed():
+        return None
+
+    async def get_open_positions():
+        return [
+            {
+                "market_id": "market-btc-15m",
+                "asset_symbol": "BTC",
+                "strategy_id": "momentum_15m",
+                "direction": "YES",
+            },
+            {
+                "market_id": "market-btc-15m",
+                "asset_symbol": "BTC",
+                "strategy_id": "pair_15m",
+                "direction": "NO",
+            },
+            {
+                "market_id": "market-eth-15m",
+                "asset_symbol": "ETH",
+                "strategy_id": "momentum_15m",
+                "direction": "YES",
+            },
+        ]
+
+    repository.get_open_positions = get_open_positions  # type: ignore[attr-defined,method-assign]
+    engine._ensure_feed = ensure_feed  # type: ignore[method-assign,assignment]
+
+    async def analyze_market(_market):
+        return {
+            "direction": "YES",
+            "regime": "trend",
+            "model_probability": 0.63,
+            "market_probability": 0.54,
+            "edge": 0.08,
+            "confidence": 0.74,
+            "expected_slippage_bps": 15.0,
+            "expected_holding_minutes": 45,
+            "features_summary": {"momentum_short": 0.03, "momentum_medium": 0.05, "orderbook_bias": 0.12},
+        }
+
+    engine._analyze_market = analyze_market  # type: ignore[method-assign,assignment]
+
+    stats = await engine.tick()
+
+    assert stats["persisted_signals"] == 1
+    telemetry = repository.pipeline[0]["market_coexistence"]
+    assert telemetry["has_momentum_pair_coexistence"] is True
+    assert telemetry["momentum_pair_market_count"] == 1
+    assert telemetry["momentum_pair_markets"][0]["market_id"] == "market-btc-15m"
+    assert set(telemetry["momentum_pair_markets"][0]["strategy_ids"]) == {"momentum_15m", "pair_15m"}
+
+
+@pytest.mark.asyncio
 async def test_momentum_engine_blocks_low_confidence_before_publish() -> None:
     repository = FakeRepository()
     bus = FakeBus()
@@ -250,6 +334,68 @@ async def test_momentum_analysis_rejects_shallow_or_wide_book() -> None:
 
     assert decision.decision is None
     assert decision.pre_risk_reason and "spread too wide" in decision.pre_risk_reason
+
+
+@pytest.mark.asyncio
+async def test_momentum_analysis_rejects_marginal_edge_below_quality_floor() -> None:
+    class QualityFloorConnector(FakeConnector):
+        def __init__(self) -> None:
+            super().__init__()
+            self.yes_summary = {"best_bid": 0.51, "best_ask": 0.52, "spread_bps": 100.0, "bid_depth": 900.0, "ask_depth": 850.0}
+            self.no_summary = {"best_bid": 0.47, "best_ask": 0.48, "spread_bps": 100.0, "bid_depth": 900.0, "ask_depth": 850.0}
+
+    class QualityFloorRepository(FakeRepository):
+        async def get_market_snapshots(self, market_id: str, limit: int = 12):
+            return [
+                {"price_yes": 0.45},
+                {"price_yes": 0.47},
+                {"price_yes": 0.48},
+                {"price_yes": 0.49},
+                {"price_yes": 0.50},
+                {"price_yes": 0.51},
+            ]
+
+    repository = QualityFloorRepository()
+    context = SimpleNamespace(
+        settings=SimpleNamespace(
+            momentum_enabled=True,
+            momentum_markets=["BTC"],
+            momentum_trading_enabled=True,
+            momentum_signal_confidence_threshold=0.55,
+            momentum_min_history_points=6,
+            momentum_cooldown_minutes=20,
+            momentum_wait_for_next_market_start=False,
+            live_trading=False,
+            news_validation_enabled=False,
+            momentum_min_edge=0.10,
+            momentum_min_volume_24h=1000.0,
+        ),
+        risk_config=SimpleNamespace(
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_spread_bps=250,
+            max_slippage_bps=150,
+            max_order_price=0.9,
+            min_market_volume_24h=1000.0,
+        ),
+        crypto_config=SimpleNamespace(major_assets=["ETH", "SOL"]),
+        repository=repository,
+        bus=FakeBus(),
+    )
+    engine = MomentumTradingEngine(context, QualityFloorConnector())  # type: ignore[arg-type]
+
+    decision = await engine._analyze_market(
+        {
+            "id": "market-btc-15m",
+            "price_yes": 0.51,
+            "price_no": 0.49,
+            "orderbook_summary_yes": engine.connector.yes_summary,
+            "orderbook_summary_no": engine.connector.no_summary,
+        }
+    )
+
+    assert decision.decision is None
+    assert decision.pre_risk_reason and "quality floor" in decision.pre_risk_reason
 
 
 @pytest.mark.asyncio

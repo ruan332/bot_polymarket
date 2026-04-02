@@ -26,6 +26,7 @@ O projeto roda em `paper trading` ou `live trading` com esta topologia:
 - Script de deploy VPS: [C:\Projetos\bot_polymarket\scripts\deploy-vps.sh](C:\Projetos\bot_polymarket\scripts\deploy-vps.sh)
 - Script de validacao pos-deploy: [C:\Projetos\bot_polymarket\scripts\post-deploy-check.sh](C:\Projetos\bot_polymarket\scripts\post-deploy-check.sh)
 - Script de replay: [C:\Projetos\bot_polymarket\scripts\replay_history.py](C:\Projetos\bot_polymarket\scripts\replay_history.py)
+- Script de backtest: [C:\Projetos\bot_polymarket\scripts\backtest_history.py](C:\Projetos\bot_polymarket\scripts\backtest_history.py)
 - Caddyfile: [C:\Projetos\bot_polymarket\ops\Caddyfile](C:\Projetos\bot_polymarket\ops\Caddyfile)
 
 Na VPS, o diretorio esperado e:
@@ -159,6 +160,35 @@ Toggle de momentum:
 - `MOMENTUM_MARKETS=BTC,ETH`: define os ativos 15m monitorados pelo motor de momentum
 - `MOMENTUM_SIGNAL_CONFIDENCE_THRESHOLD`: filtro minimo de confianca para publicacao do sinal
 - `MOMENTUM_COOLDOWN_MINUTES`: evita republicacao imediata de sinais equivalentes
+
+## Backtest e Analise
+
+Replay simples:
+
+```bash
+python scripts/replay_history.py --hours 24 --export-json .tmp/replay.json
+```
+
+Backtest com cenarios e walk-forward:
+
+```bash
+python scripts/backtest_history.py --hours 24 --walk-forward-slices 3 --export-json .tmp/backtest.json
+```
+
+Opcoes uteis:
+
+- `--strategy pair_15m` ou `--strategy momentum_15m`
+- `--asset BTC`
+- `--tier btc`
+- `--regime trend`
+- `--stress-suite`
+- `--llm-analysis`
+
+Observacoes:
+
+- a analise LLM roda apenas pos-backtest e nao entra no loop deterministico
+- os custos da analise ficam registrados em `llm_calls`
+- o objetivo e usar o LLM para rotular falhas, sugerir hipoteses e orientar novos experimentos
 
 ## Configuracoes de Estrategia
 
@@ -517,6 +547,56 @@ Razoes comuns:
 - garantir credenciais Polymarket completas
 
 ## Validacao Local de Desenvolvimento
+
+### Stack local recomendado
+
+Para validar alteracoes antes da VPS, use este fluxo:
+
+1. Criar o `.env` de desenvolvimento com os defaults locais:
+
+```powershell
+.\scripts\Create-LocalEnv.ps1
+```
+
+2. Preparar o dashboard local, se ele for executado fora do Docker:
+
+- copiar `dashboard/.env.local.example` para `dashboard/.env.local`
+- manter `NEXT_PUBLIC_API_URL=http://localhost:8000`
+
+3. Subir Postgres e Redis locais com os scripts do projeto:
+
+```powershell
+.\scripts\Start-LocalPostgres.ps1
+.\scripts\Start-LocalRedis.ps1
+```
+
+4. Validar API, agentes e dashboard com o mesmo runtime que o projeto usa no dia a dia:
+
+```powershell
+.\scripts\Run-LocalSmoke.ps1 -StartServices
+.\scripts\Run-LocalValidation.ps1
+```
+
+Para validar o stack inteiro em um unico comando:
+
+```powershell
+.\scripts\Run-LocalValidation.ps1 -WithLocalStack
+```
+
+Se quiser subir e derrubar tudo em um passo unico:
+
+```powershell
+.\scripts\Start-LocalStack.ps1
+.\scripts\Stop-LocalStack.ps1
+```
+
+Observacao:
+
+- `Run-LocalValidation.ps1` usa o Python do `.venv` quando ele existe e cai para o `python` do PATH se necessario;
+- isso evita depender da pasta `.tools`, que nao faz parte deste repositorio local;
+- com `-WithLocalStack`, o `Run-LocalValidation.ps1` sobe a stack local, executa os checks e encerra os processos ao final;
+- `Start-LocalStack.ps1` grava logs em `.tmp/local-stack` e encerra os processos em ordem segura quando voce rodar `Stop-LocalStack.ps1`;
+- para rodar tudo via Docker, `docker compose up --build` continua sendo a opcao mais simples.
 
 ### Testes Python
 

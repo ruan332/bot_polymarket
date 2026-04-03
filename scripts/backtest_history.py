@@ -154,10 +154,12 @@ async def main() -> None:
 
         if args.export_json:
             json_path = Path(args.export_json)
+            _prepare_output_path(json_path)
             json_path.write_text(json.dumps(output, indent=2, default=str), encoding="utf-8")
             print(f"json_export={json_path}")
         if args.export_csv:
             csv_path = Path(args.export_csv)
+            _prepare_output_path(csv_path)
             with csv_path.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(
                     handle,
@@ -261,6 +263,11 @@ def _parse_created_at(value: Any) -> datetime:
 def _parse_datetime(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _prepare_output_path(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 if __name__ == "__main__":

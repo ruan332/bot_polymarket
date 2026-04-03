@@ -241,6 +241,7 @@ async def live_bootstrap_status(refresh: bool = False, sync_allowance: bool | No
             context.live_bootstrap_status = await runtime_connector.get_live_bootstrap_status(
                 sync_allowance=should_sync_allowance,
             )
+            context.live_bootstrap_status["fail_open"] = bool(context.settings.polymarket_live_bootstrap_fail_open)
         finally:
             await runtime_connector.close()
     return context.live_bootstrap_status

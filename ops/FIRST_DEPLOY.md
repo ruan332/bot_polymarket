@@ -25,7 +25,8 @@ Preencha no minimo:
 - `DATABASE_URL`
 - chaves de IA
 - `LIVE_TRADING=false`
-- `SMOKE_TEST_MODE=true`
+- `SMOKE_TEST_MODE=false`
+- `DATABASE_URL=postgresql://trading:<senha>@postgres:5432/trading_prod`
 
 ## 3. Subir a stack
 ```bash
@@ -53,6 +54,24 @@ docker compose -f docker-compose.prod.yml logs -f caddy
 3. `SMOKE_TEST_MODE=false`, `LIVE_TRADING=false`
 4. Confirmar leitura real de mercados
 5. So depois considerar `LIVE_TRADING=true`
+
+## 6. Separar paper e prod na mesma VPS
+
+Quando quiser preservar o historico paper e iniciar live limpo:
+
+```bash
+cd /opt/polymarket-bot
+FUNDER_ADDRESS=0x64d1C8A99308ca35f1B4F34e009B01F8165E1f96 bash scripts/migrate-live-env.sh
+APP_ENV_FILE=.env bash scripts/deploy-vps.sh
+DOMAIN=bot.codifica.tec.br bash scripts/post-deploy-check.sh
+```
+
+O script:
+- faz backup do banco atual
+- clona o banco atual para `trading_paper`
+- cria `trading_prod` vazio com o schema da aplicacao
+- gera `.env.paper`
+- atualiza `.env` principal para live conservador com Redis separado
 
 ## 7. Quando adicionar dominio
 Neste projeto, use `bot.codifica.tec.br` desde o inicio.

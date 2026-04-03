@@ -65,7 +65,7 @@ cd /opt/polymarket-bot
 - `POSTGRES_PASSWORD`
 - `POSTGRES_DB`
 - `POSTGRES_USER`
-- `DATABASE_URL`
+- `DATABASE_URL=postgresql://trading:<senha>@postgres:5432/trading_prod`
 - `REDIS_URL`
 - `DOMAIN=bot.codifica.tec.br`
 - `LIVE_TRADING=false` inicialmente
@@ -83,6 +83,13 @@ cd /opt/polymarket-bot
 ```bash
 chmod +x scripts/deploy-vps.sh
 APP_DIR=/opt/polymarket-bot BRANCH=main ./scripts/deploy-vps.sh
+```
+
+Para preservar o ambiente paper em paralelo:
+
+```bash
+cd /opt/polymarket-bot
+SOURCE_TEMPLATE=.env.paper.example ./scripts/prepare-prod-env.sh .env.paper
 ```
 
 ## Estrategia de manutencao
@@ -112,6 +119,19 @@ APP_DIR=/opt/polymarket-bot ./scripts/backup-postgres.sh
 2. `SMOKE_TEST_MODE=false`, `LIVE_TRADING=false`
 3. Validar mercado real em leitura
 4. So depois `LIVE_TRADING=true`
+
+## Cutover para live com historico paper preservado
+
+```bash
+cd /opt/polymarket-bot
+FUNDER_ADDRESS=0x64d1C8A99308ca35f1B4F34e009B01F8165E1f96 bash scripts/migrate-live-env.sh
+APP_ENV_FILE=.env bash scripts/deploy-vps.sh
+DOMAIN=bot.codifica.tec.br bash scripts/post-deploy-check.sh
+```
+
+Padrao adotado:
+- `.env` principal: `trading_prod` + `redis://redis:6379/0`
+- `.env.paper`: `trading_paper` + `redis://redis:6379/1`
 
 ## Observacao sobre IP sem dominio
 - Para este projeto, use o subdominio `bot.codifica.tec.br`

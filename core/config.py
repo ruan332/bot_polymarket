@@ -193,6 +193,7 @@ class AppSettings(BaseSettings):
     polymarket_chain_id: int = 137
     polymarket_live_min_usdc_balance: float = 5.0
     polymarket_sync_balance_allowance_on_startup: bool = False
+    polymarket_live_bootstrap_fail_open: bool = False
     startup_max_retries: int = 10
     startup_retry_delay_seconds: float = 2.0
     polymarket_gamma_url: str = "https://gamma-api.polymarket.com"

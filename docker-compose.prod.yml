@@ -32,7 +32,7 @@ services:
       dockerfile: Dockerfile.prod
     restart: unless-stopped
     env_file:
-      - .env
+      - ${APP_ENV_FILE:-.env}
     volumes:
       - ./config:/app/config
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000
@@ -51,7 +51,7 @@ services:
       dockerfile: Dockerfile.prod
     restart: unless-stopped
     env_file:
-      - .env
+      - ${APP_ENV_FILE:-.env}
     volumes:
       - ./config:/app/config
     command: python run_agents.py

@@ -17,6 +17,9 @@ from core.schemas import (
     PortfolioSummary,
 )
 
+EXECUTED_ORDER_STATUSES = ("simulated", "live_submitted", "live_filled")
+FILLED_ORDER_STATUSES = ("simulated", "live_filled")
+
 
 SCHEMA_SQL = """
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -629,8 +632,9 @@ class TradingRepository:
             """
             SELECT COALESCE(SUM((payload->>'realized_pnl_usd')::double precision), 0) AS realized_pnl
             FROM paper_orders
-            WHERE status = 'simulated'
-            """
+            WHERE status = ANY($1::text[])
+            """,
+            list(FILLED_ORDER_STATUSES),
         )
         realized_pnl = float(realized_row["realized_pnl"] or 0.0) if realized_row else 0.0
         if not rows:
@@ -729,10 +733,11 @@ class TradingRepository:
             """
             SELECT payload, created_at
             FROM paper_orders
-            WHERE created_at >= $1 AND status = 'simulated'
+            WHERE created_at >= $1 AND status = ANY($2::text[])
             ORDER BY created_at ASC
             """,
             window_start,
+            list(EXECUTED_ORDER_STATUSES),
         )
         payloads = [self._decode_record(row) for row in rows]
         daily_spend_usd = sum(
@@ -1324,11 +1329,16 @@ class TradingRepository:
         signal_metrics = [self._signal_metrics(item) for item in signals_filtered]
         signal_edges = [item["edge"] for item in signal_metrics]
         signal_confidences = [item["confidence"] for item in signal_metrics]
-        simulated_orders = [item for item in orders_filtered if str(item.get("status")) == "simulated"]
-        entry_orders = [item for item in simulated_orders if str(item.get("action") or "entry") in {"entry", "scale_in"}]
-        exit_orders = [item for item in simulated_orders if str(item.get("action") or "") in {"scale_out", "close"}]
-        total_notional = sum(float(item.get("notional_usd") or 0.0) for item in simulated_orders)
-        avg_notional = total_notional / len(simulated_orders) if simulated_orders else 0.0
+        tracked_orders = [item for item in orders_filtered if str(item.get("status")) in EXECUTED_ORDER_STATUSES]
+        filled_orders = [item for item in orders_filtered if str(item.get("status")) in FILLED_ORDER_STATUSES]
+        live_orders = [item for item in tracked_orders if str(item.get("status")).startswith("live_")]
+        live_submitted_orders = [item for item in tracked_orders if str(item.get("status")) == "live_submitted"]
+        live_filled_orders = [item for item in tracked_orders if str(item.get("status")) == "live_filled"]
+        paper_orders = [item for item in tracked_orders if str(item.get("status")).startswith("simulated")]
+        entry_orders = [item for item in tracked_orders if str(item.get("action") or "entry") in {"entry", "scale_in"}]
+        exit_orders = [item for item in filled_orders if str(item.get("action") or "") in {"scale_out", "close"}]
+        total_notional = sum(float(item.get("notional_usd") or 0.0) for item in tracked_orders)
+        avg_notional = total_notional / len(tracked_orders) if tracked_orders else 0.0
         realized_pnl = sum(float(item.get("realized_pnl_usd") or 0.0) for item in exit_orders)
         win_rate = (
             round(sum(1 for item in exit_orders if float(item.get("realized_pnl_usd") or 0.0) > 0) / len(exit_orders), 4)
@@ -1337,7 +1347,7 @@ class TradingRepository:
         )
 
         order_count_by_market: dict[str, int] = {}
-        for item in simulated_orders:
+        for item in tracked_orders:
             market_id = str(item.get("market_id") or "")
             if market_id:
                 order_count_by_market[market_id] = order_count_by_market.get(market_id, 0) + 1
@@ -1354,7 +1364,7 @@ class TradingRepository:
         )
         asset_breakdown = self._count_by_key(signals_filtered, "asset_symbol", limit=8)
         tier_breakdown = self._count_by_key(signals_filtered, "crypto_tier", limit=3)
-        strategy_breakdown = self._strategy_breakdown(signals_filtered, simulated_orders)
+        strategy_breakdown = self._strategy_breakdown(signals_filtered, tracked_orders)
         regime_breakdown = self._count_by_key(signals_filtered, "regime", limit=6)
         exit_reason_breakdown = self._count_by_key(exit_orders, "exit_reason", limit=6)
         news_breakdown = self._news_breakdown(signals_filtered)
@@ -1362,7 +1372,7 @@ class TradingRepository:
         news_fallback_breakdown = self._news_fallback_breakdown(signals_filtered)
         last_news_provider = self._last_news_provider(signals_filtered)
         pair_trade_summary = self._pair_trade_summary(
-            simulated_orders,
+            tracked_orders,
             pending_count=len(pending_pair_orders),
         )
         time_series = self._build_pipeline_time_series(
@@ -1392,6 +1402,10 @@ class TradingRepository:
                 "signals": signals,
                 "decisions": decisions,
                 "orders": orders,
+                "paper_orders": len(paper_orders),
+                "live_orders": len(live_orders),
+                "live_submitted_orders": len(live_submitted_orders),
+                "live_filled_orders": len(live_filled_orders),
                 "risk_events": risk_events,
                 "approval_rate": round(decisions / signals, 4) if signals else 0.0,
                 "execution_rate": round(orders / decisions, 4) if decisions else 0.0,

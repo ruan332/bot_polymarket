@@ -134,11 +134,18 @@ Observacao:
 Arquivo base de exemplo:
 
 - [.env.production.example](C:\Projetos\bot_polymarket\.env.production.example)
+- [.env.paper.example](C:\Projetos\bot_polymarket\.env.paper.example)
 
 Para gerar `.env` inicial:
 
 ```bash
 ./scripts/prepare-prod-env.sh
+```
+
+Para gerar o ambiente paper preservado:
+
+```bash
+SOURCE_TEMPLATE=.env.paper.example ./scripts/prepare-prod-env.sh .env.paper
 ```
 
 Notas operacionais importantes:
@@ -147,6 +154,22 @@ Notas operacionais importantes:
 - atualizar `.env.production.example` nao altera o `.env` real ja existente
 - `scripts/prepare-prod-env.sh` nao sobrescreve `.env` existente
 - `scripts/deploy-vps.sh` agora aborta se `.env` estiver ausente, para evitar subir o stack sem configuracao valida
+- `scripts/deploy-vps.sh` aceita `APP_ENV_FILE=.env.paper` para subir a stack usando outro arquivo de ambiente
+- `docker-compose.prod.yml` passou a ler `APP_ENV_FILE`, mantendo `.env` como padrao
+
+Separacao recomendada de runtime:
+
+- producao live: `DATABASE_URL=.../trading_prod` e `REDIS_URL=redis://redis:6379/0`
+- paper preservado: `DATABASE_URL=.../trading_paper` e `REDIS_URL=redis://redis:6379/1`
+
+Migracao assistida:
+
+```bash
+cd /opt/polymarket-bot
+FUNDER_ADDRESS=0x64d1C8A99308ca35f1B4F34e009B01F8165E1f96 bash scripts/migrate-live-env.sh
+APP_ENV_FILE=.env bash scripts/deploy-vps.sh
+DOMAIN=bot.codifica.tec.br bash scripts/post-deploy-check.sh
+```
 
 Toggle de noticias:
 
@@ -242,6 +265,13 @@ Parametros mais sensiveis:
 ```bash
 cd /opt/polymarket-bot
 bash scripts/deploy-vps.sh
+```
+
+### Deploy com ambiente alternativo
+
+```bash
+cd /opt/polymarket-bot
+APP_ENV_FILE=.env.paper bash scripts/deploy-vps.sh
 ```
 
 O script:

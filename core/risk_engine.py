@@ -322,7 +322,8 @@ class RiskEngine:
             daily_orders = [
                 item
                 for item in orders
-                if self._as_utc(item.get("created_at")) >= start_of_day and str(item.get("status")) == "simulated"
+                if self._as_utc(item.get("created_at")) >= start_of_day
+                and str(item.get("status")) in {"simulated", "live_submitted", "live_filled"}
             ]
             consecutive_losses = 0
             for item in reversed(daily_orders):

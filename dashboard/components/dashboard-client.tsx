@@ -85,6 +85,10 @@ type PerformanceSummary = {
   signals: number;
   decisions: number;
   orders: number;
+  paper_orders?: number;
+  live_orders?: number;
+  live_submitted_orders?: number;
+  live_filled_orders?: number;
   risk_events: number;
   approval_rate: number;
   execution_rate: number;
@@ -145,6 +149,12 @@ type StrategyGoalStatus = {
 type DashboardState = {
   statuses: Record<string, AgentStatus>;
   portfolio: PortfolioSummary | null;
+  liveBootstrap: {
+    mode?: string;
+    ready?: boolean;
+    reason?: string;
+    fail_open?: boolean;
+  } | null;
   overview: MetricsOverview | null;
   performance: PerformanceReport | null;
   pairPerformance: PerformanceReport | null;
@@ -382,6 +392,7 @@ export function DashboardClient() {
   const [state, setState] = useState<DashboardState>({
     statuses: {},
     portfolio: null,
+    liveBootstrap: null,
     overview: null,
     performance: null,
     pairPerformance: null,
@@ -415,6 +426,7 @@ export function DashboardClient() {
       const requests = [
         { key: "statuses", path: "/agents/status", fallback: current.statuses },
         { key: "portfolio", path: "/portfolio/summary", fallback: current.portfolio },
+        { key: "liveBootstrap", path: "/live/bootstrap-status", fallback: current.liveBootstrap },
         { key: "positions", path: "/portfolio/positions", fallback: current.positions },
         { key: "overview", path: "/metrics/overview", fallback: current.overview },
         { key: "performance", path: "/metrics/performance?hours=24", fallback: current.performance },
@@ -445,6 +457,7 @@ export function DashboardClient() {
         setState({
           statuses: (next.get("statuses") ?? {}) as Record<string, AgentStatus>,
           portfolio: (next.get("portfolio") ?? null) as PortfolioSummary | null,
+          liveBootstrap: (next.get("liveBootstrap") ?? null) as DashboardState["liveBootstrap"],
           overview: (next.get("overview") ?? null) as MetricsOverview | null,
           performance: (next.get("performance") ?? null) as PerformanceReport | null,
           pairPerformance: (next.get("pairPerformance") ?? null) as PerformanceReport | null,
@@ -485,6 +498,11 @@ export function DashboardClient() {
   const openPositions = [...state.positions].sort((a, b) => numberOr(b.unrealized_pnl) - numberOr(a.unrealized_pnl));
   const positivePositions = openPositions.filter((position) => numberOr(position.unrealized_pnl) > 0).length;
   const negativePositions = openPositions.filter((position) => numberOr(position.unrealized_pnl) < 0).length;
+  const liveOrders = numberOr(summary?.live_orders);
+  const paperOrders = numberOr(summary?.paper_orders);
+  const liveSubmittedOrders = numberOr(summary?.live_submitted_orders);
+  const liveFilledOrders = numberOr(summary?.live_filled_orders);
+  const liveFailOpen = Boolean(state.liveBootstrap?.fail_open);
 
   return (
     <main className="min-h-screen overflow-y-auto overflow-x-hidden px-4 pb-16 pt-4 md:px-6 md:pb-20 md:pt-6 custom-scrollbar">
@@ -498,6 +516,11 @@ export function DashboardClient() {
                 <span className={runningAgents > 0 ? "text-poly-green glow-green" : "text-poly-red glow-red"}>
                   {runningAgents > 0 ? "ONLINE" : "DEGRADED"}
                 </span>
+                {state.liveBootstrap?.mode === "live" ? (
+                  <span className={`border px-2 py-0.5 text-[10px] uppercase ${liveFailOpen ? "border-poly-amber text-poly-amber" : "border-poly-cyan text-poly-cyan"}`}>
+                    {liveFailOpen ? "LIVE_FAIL_OPEN" : "LIVE"}
+                  </span>
+                ) : null}
               </div>
               <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
                 <Metric label="Balance" value={asCurrency(balance)} tone="text-poly-green" />
@@ -525,6 +548,11 @@ export function DashboardClient() {
               </div>
             </div>
           </div>
+          {state.liveBootstrap?.mode === "live" ? (
+            <div className={`mt-4 border px-3 py-2 font-mono text-[10px] uppercase ${liveFailOpen ? "border-poly-amber text-poly-amber" : "border-poly-cyan text-poly-cyan"}`}>
+              bootstrap {state.liveBootstrap.ready ? "ready" : "degraded"} | {state.liveBootstrap.reason ?? "live mode"}
+            </div>
+          ) : null}
         </section>
 
         <section className="grid gap-4 lg:grid-cols-2">
@@ -546,6 +574,18 @@ export function DashboardClient() {
           <div className="flex flex-wrap gap-4">
             <span>
               Orders: <span className="text-poly-cyan">{summary?.orders ?? 0}</span>
+            </span>
+            <span>
+              Live: <span className="text-poly-amber">{liveOrders}</span>
+            </span>
+            <span>
+              Paper: <span className="text-poly-cyan">{paperOrders}</span>
+            </span>
+            <span>
+              Live submitted: <span className="text-poly-amber">{liveSubmittedOrders}</span>
+            </span>
+            <span>
+              Live filled: <span className="text-poly-green">{liveFilledOrders}</span>
             </span>
             <span>
               Signals: <span className="text-poly-green">{summary?.signals ?? 0}</span>

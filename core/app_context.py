@@ -69,13 +69,16 @@ class AppContext:
             finally:
                 await connector.close()
             if not bool(context.live_bootstrap_status.get("ready")):
-                reason = str(context.live_bootstrap_status.get("reason") or "live bootstrap failed")
-                raise RuntimeError(reason)
+                context.live_bootstrap_status["fail_open"] = bool(settings.polymarket_live_bootstrap_fail_open)
+                if not settings.polymarket_live_bootstrap_fail_open:
+                    reason = str(context.live_bootstrap_status.get("reason") or "live bootstrap failed")
+                    raise RuntimeError(reason)
         else:
             context.live_bootstrap_status = {
                 "mode": "paper",
                 "ready": True,
                 "reason": "live trading disabled",
+                "fail_open": False,
             }
         return context
 

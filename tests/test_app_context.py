@@ -47,3 +47,13 @@ def test_apply_runtime_risk_overrides_syncs_env_controls() -> None:
 
     assert risk.max_daily_spend_usd == pytest.approx(25.0)
     assert risk.max_single_position_usd == pytest.approx(80.0)
+
+
+def test_apply_runtime_risk_overrides_preserves_yaml_when_env_is_disabled() -> None:
+    settings = SimpleNamespace(max_daily_spend_usd=0.0, max_single_position_usd=0.0)
+    risk = SimpleNamespace(max_daily_spend_usd=5.0, max_single_position_usd=100.0)
+
+    _apply_runtime_risk_overrides(settings, risk)
+
+    assert risk.max_daily_spend_usd == pytest.approx(5.0)
+    assert risk.max_single_position_usd == pytest.approx(100.0)

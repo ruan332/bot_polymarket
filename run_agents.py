@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 
 from agents.claude_agent import ClaudeAgent
 from agents.claw_agent import ClawAgent
@@ -13,7 +14,11 @@ async def main() -> None:
     codex = CodexAgent(context)
     claw = ClawAgent(context)
     news_validator = NewsValidatorAgent(context) if context.settings.news_validation_enabled else None
+    agents = [claude, codex, claw]
+    if news_validator is not None:
+        agents.append(news_validator)
 
+    tasks: list[asyncio.Task[None]] = []
     try:
         print("Iniciando agentes...")
         print(f"  Claude -> {claude.provider.model}")
@@ -25,20 +30,25 @@ async def main() -> None:
         print(f"  Claw   -> {claw.provider.model}")
         claude_interval = 1 if context.settings.copytrade_enabled else 10
         tasks = [
-            claude.run_loop(interval_seconds=claude_interval),
-            codex.run_loop(interval_seconds=2),
-            claw.run_loop(interval_seconds=2),
+            asyncio.create_task(claude.run_loop(interval_seconds=claude_interval), name="claude.run_loop"),
+            asyncio.create_task(codex.run_loop(interval_seconds=2), name="codex.run_loop"),
+            asyncio.create_task(claw.run_loop(interval_seconds=2), name="claw.run_loop"),
         ]
         if news_validator is not None:
-            tasks.append(news_validator.run_loop(interval_seconds=3))
+            tasks.append(asyncio.create_task(news_validator.run_loop(interval_seconds=3), name="news_validator.run_loop"))
         await asyncio.gather(*tasks)
     finally:
-        await claude.close()
-        if news_validator is not None:
-            await news_validator.close()
-        await codex.close()
-        await claw.close()
-        await context.close()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        for agent in agents:
+            with suppress(Exception, asyncio.CancelledError):
+                await asyncio.shield(agent.close())
+
+        with suppress(Exception, asyncio.CancelledError):
+            await asyncio.shield(context.close())
 
 
 if __name__ == "__main__":

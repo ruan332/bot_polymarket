@@ -163,32 +163,16 @@ Toggle de momentum:
 
 ## Backtest e Analise
 
-Replay simples:
+Documentacao completa da implementacao:
 
-```bash
-python scripts/replay_history.py --hours 24 --export-json .tmp/replay.json
-```
+- [C:\Projetos\bot_polymarket\docs\BACKTEST.md](C:\Projetos\bot_polymarket\docs\BACKTEST.md)
 
-Backtest com cenarios e walk-forward:
+Resumo rapido:
 
-```bash
-python scripts/backtest_history.py --hours 24 --walk-forward-slices 3 --export-json .tmp/backtest.json
-```
-
-Opcoes uteis:
-
-- `--strategy pair_15m` ou `--strategy momentum_15m`
-- `--asset BTC`
-- `--tier btc`
-- `--regime trend`
-- `--stress-suite`
-- `--llm-analysis`
-
-Observacoes:
-
+- `scripts/replay_history.py` faz replay simples de snapshot e ordens persistidas
+- `scripts/backtest_history.py` executa backtest deterministico com stress suite, walk-forward e analise LLM opcional
 - a analise LLM roda apenas pos-backtest e nao entra no loop deterministico
 - os custos da analise ficam registrados em `llm_calls`
-- o objetivo e usar o LLM para rotular falhas, sugerir hipoteses e orientar novos experimentos
 
 ## Configuracoes de Estrategia
 

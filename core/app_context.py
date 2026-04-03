@@ -127,5 +127,8 @@ async def _retry_async(
 
 def _apply_runtime_risk_overrides(settings: AppSettings, risk_config: RiskSettings) -> None:
     # Keep env-driven paper controls in sync with the risk engine runtime.
-    risk_config.max_daily_spend_usd = settings.max_daily_spend_usd
-    risk_config.max_single_position_usd = settings.max_single_position_usd
+    # A positive env override wins; zero or negative values preserve the YAML baseline.
+    if settings.max_daily_spend_usd > 0:
+        risk_config.max_daily_spend_usd = settings.max_daily_spend_usd
+    if settings.max_single_position_usd > 0:
+        risk_config.max_single_position_usd = settings.max_single_position_usd

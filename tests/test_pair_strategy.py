@@ -305,3 +305,141 @@ async def test_pair_engine_blocks_low_confidence_before_publish(monkeypatch: pyt
     assert telemetry["momentum_pair_market_count"] == 1
     assert telemetry["momentum_pair_markets"][0]["market_id"] == "market-btc-15m"
     assert set(telemetry["momentum_pair_markets"][0]["strategy_ids"]) == {"momentum_15m", "pair_15m"}
+
+
+@pytest.mark.asyncio
+async def test_pair_engine_blocks_same_direction_during_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.signals: list[dict] = []
+            self.pipeline: list[dict] = []
+            self.snapshots: list[dict] = []
+
+        async def get_market_snapshots(self, market_id: str, limit: int = 12):
+            return [{"price_yes": 0.48}]
+
+        async def get_pair_cycle(self, asset_symbol: str):
+            cycle_start = floor_cycle_start(datetime.now(UTC))
+            return {
+                "asset_name": "Bitcoin",
+                "crypto_tier": "btc",
+                "cycle_slug": cycle_slug_for(asset_symbol, cycle_start),
+                "cycle_start": cycle_start,
+                "market_id": "market-btc-15m",
+                "market_question": "Will BTC be above current price in 15 minutes?",
+                "token_id_yes": "token-yes",
+                "token_id_no": "token-no",
+                "predictor_state": None,
+                "side_counts": {"yes": 0, "no": 0},
+                "max_buy_counts_per_side": 1,
+                "price_yes": 0.48,
+                "price_no": 0.52,
+                "status": "active",
+                "last_signal_direction": "YES",
+                "last_signal_at": datetime.now(UTC),
+                "last_quote_at": datetime.now(UTC),
+                "metadata": {"volume_24h": 25000.0, "end_date": "2026-03-24T13:30:00Z"},
+            }
+
+        async def has_recent_signal_duplicate(self, **kwargs):
+            return False
+
+        async def record_signal(self, signal_id: str, event_type: str, payload: dict):
+            self.signals.append(payload)
+
+        async def upsert_pair_cycle(self, payload):
+            self.snapshots.append(payload.model_dump(mode="json"))
+
+        async def record_market_snapshots(self, snapshots):
+            self.snapshots.extend(snapshot.model_dump(mode="json") for snapshot in snapshots)
+
+        async def record_pipeline_telemetry(self, event_id: str, agent: str, event_type: str, payload: dict):
+            self.pipeline.append(payload)
+
+        async def get_open_positions(self):
+            return []
+
+    class FakeBus:
+        async def publish_event(self, stream: str, payload: dict):
+            return "1-0"
+
+    class FakeConnector:
+        async def resolve_copytrade_market(self, asset_symbol: str, cycle_start: datetime):
+            return {
+                "id": "market-btc-15m",
+                "slug": "btc-updown-15m-1774271700",
+                "question": "Will BTC be above current price in 15 minutes?",
+                "asset_name": "Bitcoin",
+                "token_id_yes": "token-yes",
+                "token_id_no": "token-no",
+                "volume_24h": 25000.0,
+                "end_date": "2026-03-24T13:30:00Z",
+            }
+
+        async def get_orderbook_summary(self, token_id: str):
+            if token_id == "token-yes":
+                return {"best_bid": 0.47, "best_ask": 0.48, "spread_bps": 18.0, "bid_depth": 900.0, "ask_depth": 850.0}
+            return {"best_bid": 0.51, "best_ask": 0.52, "spread_bps": 18.0, "bid_depth": 900.0, "ask_depth": 850.0}
+
+        async def stream_market(self, asset_ids):
+            if False:
+                yield {}
+
+    class FakeRisk:
+        def __init__(self) -> None:
+            self.blocks: list[str] = []
+
+        async def validate_signal(self, signal):
+            return None
+
+        async def record_block(self, agent: str, reason: str, details: dict):
+            self.blocks.append(reason)
+
+    repository = FakeRepository()
+    context = SimpleNamespace(
+        settings=SimpleNamespace(
+            copytrade_markets=["BTC"],
+            copytrade_shares=2,
+            copytrade_price_buffer=0.01,
+            copytrade_second_leg_base_price=0.98,
+            copytrade_signal_confidence_threshold=0.62,
+            copytrade_noise_threshold=0.03,
+            copytrade_min_history_points=8,
+            copytrade_signal_cooldown_minutes=30,
+            copytrade_max_buy_counts_per_side=1,
+            copytrade_wait_for_next_market_start=False,
+            live_trading=False,
+            news_validation_enabled=False,
+            copytrade_enabled=True,
+        ),
+        risk_config=SimpleNamespace(max_order_price=0.9, max_spread_bps=250, max_slippage_bps=150),
+        crypto_config=SimpleNamespace(major_assets=["ETH", "SOL"]),
+        repository=repository,
+        bus=FakeBus(),
+    )
+    engine = PairTradingEngine(context, FakeConnector())  # type: ignore[arg-type]
+    engine.risk = FakeRisk()  # type: ignore[assignment]
+
+    async def ensure_feed():
+        return None
+
+    engine._ensure_feed = ensure_feed  # type: ignore[method-assign,assignment]
+    monkeypatch.setattr(
+        AdaptivePricePredictor,
+        "observe",
+        lambda self, price: PredictorSignal(
+            predicted_price=0.51,
+            pole_price=0.48,
+            direction="up",
+            signal="BUY_UP",
+            confidence=0.72,
+            features={},
+            stats={"accuracy": 0.5, "history_points": 8.0},
+        ),
+    )
+
+    stats = await engine.tick()
+
+    assert stats["persisted_signals"] == 0
+    assert stats["risk_blocked"] == 1
+    assert stats["risk_block_reasons"]["signal_cooldown_active"] == 1

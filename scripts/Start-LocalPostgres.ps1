@@ -1,6 +1,7 @@
 param(
   [string]$PgBinDir = "",
-  [string]$DataDir = ".local\postgres-data",
+  [string]$DataDir = ".local\postgres-data\data",
+  [string]$LogDir = ".local\postgres-logs",
   [int]$Port = 5432,
   [string]$DbName = "trading",
   [string]$DbUser = "trading",
@@ -27,13 +28,15 @@ if (-not $pgCtl -or -not $initDb -or -not $psql) {
 }
 
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 if (-not (Test-Path (Join-Path $DataDir "PG_VERSION"))) {
-  $pwFile = Join-Path $DataDir "pgpass.txt"
+  $pwFile = Join-Path $env:TEMP ("pgpass-" + [guid]::NewGuid().ToString("N") + ".txt")
   Set-Content -Path $pwFile -Value $DbPassword -Encoding ASCII
   & $initDb -D $DataDir -U $DbUser --pwfile=$pwFile
+  Remove-Item $pwFile -Force -ErrorAction SilentlyContinue
 }
 
-& $pgCtl -D $DataDir -o "-p $Port" -l (Join-Path $DataDir "postgres.log") start
+& $pgCtl -D $DataDir -o "-p $Port" -l (Join-Path $LogDir "postgres.log") start
 Start-Sleep -Seconds 3
 
 $env:PGPASSWORD = $DbPassword

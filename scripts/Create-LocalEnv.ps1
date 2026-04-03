@@ -9,6 +9,7 @@ GOOGLE_API_KEY=
 
 DATABASE_URL=postgresql://trading:trading@localhost:5432/trading
 REDIS_URL=redis://localhost:6379/0
+NEXT_PUBLIC_API_URL=http://localhost:8000
 
 POLYMARKET_PRIVATE_KEY=
 POLYMARKET_API_KEY=

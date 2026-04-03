@@ -371,8 +371,10 @@ class NewsProvider:
         }
 
     async def close(self) -> None:
-        if self.session and not self.session.closed:
-            await self.session.close()
+        session = self.session
+        self.session = None
+        if session and not session.closed:
+            await session.close()
 
     async def fetch_news(
         self,

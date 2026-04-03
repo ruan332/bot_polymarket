@@ -443,7 +443,7 @@ class MomentumTradingEngine:
         expected_slippage_bps = round(max(spread_bps * 0.35, 8.0), 2)
         edge = model_probability - market_probability - (expected_slippage_bps / 10000)
         quality_edge_floor = max(
-            float(getattr(self.context.settings, "momentum_min_edge", 0.10) or 0.10),
+            float(getattr(self.context.settings, "momentum_min_edge", 0.085) or 0.085),
             0.11 + min(spread_bps / 50000.0, 0.015),
         )
         if edge < quality_edge_floor:

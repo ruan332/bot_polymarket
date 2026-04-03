@@ -127,12 +127,18 @@ class RiskEngine:
 
     def build_exit_plan(self, signal: SignalPayload) -> dict[str, float | int]:
         edge_buffer = max(signal.edge, 0.03)
-        take_profit = clamp(signal.price + max(edge_buffer * 0.75, 0.04), 0.02, 0.98)
-        stop_loss = clamp(signal.price - max(edge_buffer * 0.55, 0.03), 0.01, 0.96)
         time_stop = max(int(signal.expected_holding_minutes or 90), 30)
-        if signal.regime == "mean_revert":
+        if signal.regime == "trend":
+            take_profit = clamp(signal.price + max(edge_buffer * 1.05, 0.055), 0.02, 0.99)
+            stop_loss = clamp(signal.price - max(edge_buffer * 0.42, 0.024), 0.01, 0.96)
+            time_stop = max(int(time_stop * 0.95), 60)
+        elif signal.regime == "mean_revert":
             take_profit = clamp(signal.price + max(edge_buffer * 0.55, 0.03), 0.02, 0.98)
-            time_stop = max(int(time_stop * 0.75), 30)
+            stop_loss = clamp(signal.price - max(edge_buffer * 0.45, 0.025), 0.01, 0.96)
+            time_stop = max(int(time_stop * 0.7), 30)
+        else:
+            take_profit = clamp(signal.price + max(edge_buffer * 0.65, 0.035), 0.02, 0.98)
+            stop_loss = clamp(signal.price - max(edge_buffer * 0.5, 0.03), 0.01, 0.96)
         return {
             "take_profit_price": round(take_profit, 4),
             "stop_loss_price": round(stop_loss, 4),

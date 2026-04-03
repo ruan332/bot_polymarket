@@ -162,6 +162,10 @@ def test_app_settings_copytrade_defaults(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.copytrade_shares == 2
     assert settings.copytrade_price_buffer == pytest.approx(0.01)
     assert settings.copytrade_second_leg_base_price == pytest.approx(0.98)
+    assert settings.copytrade_signal_confidence_threshold == pytest.approx(0.68)
+    assert settings.copytrade_noise_threshold == pytest.approx(0.04)
+    assert settings.copytrade_min_history_points == 10
+    assert settings.copytrade_signal_cooldown_minutes == 45
 
 
 def test_app_settings_momentum_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,9 +187,9 @@ def test_app_settings_momentum_defaults(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.momentum_enabled is False
     assert settings.momentum_markets == []
     assert settings.momentum_trading_enabled is False
-    assert settings.momentum_min_edge == pytest.approx(0.085)
+    assert settings.momentum_min_edge == pytest.approx(0.068)
     assert settings.momentum_min_volume_24h == pytest.approx(500.0)
-    assert settings.momentum_signal_confidence_threshold == pytest.approx(0.62)
+    assert settings.momentum_signal_confidence_threshold == pytest.approx(0.58)
     assert settings.momentum_min_history_points == 6
     assert settings.momentum_cooldown_minutes == 20
     assert settings.momentum_max_positions == 2
@@ -198,6 +202,7 @@ def test_app_settings_copytrade_env_parses_csv(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("COPYTRADE_MAX_BUY_COUNTS_PER_SIDE", "2")
     monkeypatch.setenv("COPYTRADE_WAIT_FOR_NEXT_MARKET_START", "true")
     monkeypatch.setenv("COPYTRADE_PRICE_BUFFER", "0.015")
+    monkeypatch.setenv("COPYTRADE_SIGNAL_COOLDOWN_MINUTES", "45")
 
     settings = AppSettings(_env_file=None)
 
@@ -207,6 +212,7 @@ def test_app_settings_copytrade_env_parses_csv(monkeypatch: pytest.MonkeyPatch) 
     assert settings.copytrade_max_buy_counts_per_side == 2
     assert settings.copytrade_wait_for_next_market_start is True
     assert settings.copytrade_price_buffer == pytest.approx(0.015)
+    assert settings.copytrade_signal_cooldown_minutes == 45
 
 
 def test_app_settings_momentum_env_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:

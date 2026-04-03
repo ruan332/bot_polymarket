@@ -219,14 +219,15 @@ class AppSettings(BaseSettings):
     copytrade_wait_for_next_market_start: bool = False
     copytrade_price_buffer: float = 0.01
     copytrade_second_leg_base_price: float = 0.98
-    copytrade_signal_confidence_threshold: float = 0.55
-    copytrade_noise_threshold: float = 0.025
-    copytrade_min_history_points: int = 7
+    copytrade_signal_confidence_threshold: float = 0.68
+    copytrade_noise_threshold: float = 0.04
+    copytrade_min_history_points: int = 10
+    copytrade_signal_cooldown_minutes: int = 45
     momentum_enabled: bool = False
     momentum_markets: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    momentum_min_edge: float = 0.10
-    momentum_min_volume_24h: float = 750.0
-    momentum_signal_confidence_threshold: float = 0.66
+    momentum_min_edge: float = 0.068
+    momentum_min_volume_24h: float = 500.0
+    momentum_signal_confidence_threshold: float = 0.58
     momentum_min_history_points: int = 6
     momentum_cooldown_minutes: int = 20
     momentum_max_positions: int = 2
@@ -268,7 +269,14 @@ class AppSettings(BaseSettings):
             raise ValueError("value must be between 0 and 1")
         return value
 
-    @field_validator("momentum_min_volume_24h", "momentum_min_history_points", "momentum_cooldown_minutes", "momentum_max_positions")
+    @field_validator(
+        "momentum_min_volume_24h",
+        "momentum_min_history_points",
+        "momentum_cooldown_minutes",
+        "momentum_max_positions",
+        "copytrade_signal_cooldown_minutes",
+        "copytrade_min_history_points",
+    )
     @classmethod
     def validate_positive_momentum_settings(cls, value: int | float) -> int | float:
         if value < 0:

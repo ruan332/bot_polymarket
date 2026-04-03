@@ -377,12 +377,22 @@ class PairTradingEngine:
                 continue
             stats["strategy_candidates"] += 1
             stats["reached_risk_engine"] += 1
-            confidence_floor = max(float(self.context.settings.copytrade_signal_confidence_threshold), 0.60)
+            confidence_floor = max(float(self.context.settings.copytrade_signal_confidence_threshold), 0.70)
             if predictor_signal.confidence < confidence_floor:
                 self._increment_reason(stats, "confidence_below_threshold")
                 await self.context.repository.upsert_pair_cycle(cycle.to_payload())
                 continue
             primary_direction: Literal["YES", "NO"] = "YES" if predictor_signal.signal == "BUY_UP" else "NO"
+            cooldown_minutes = max(int(getattr(self.context.settings, "copytrade_signal_cooldown_minutes", 30) or 30), 0)
+            if (
+                cooldown_minutes > 0
+                and cycle.last_signal_at is not None
+                and cycle.last_signal_direction == primary_direction
+                and (datetime.now(UTC) - cycle.last_signal_at).total_seconds() < cooldown_minutes * 60
+            ):
+                self._increment_reason(stats, "signal_cooldown_active")
+                await self.context.repository.upsert_pair_cycle(cycle.to_payload())
+                continue
             side_key = primary_direction.lower()
             if int(cycle.side_counts.get(side_key, 0)) >= cycle.max_buy_counts_per_side:
                 cycle.status = "paused"
@@ -590,6 +600,11 @@ class PairTradingEngine:
         hedge_direction: Literal["YES", "NO"] = "NO" if primary_direction == "YES" else "YES"
         hedge_token_id = cycle.token_id_no if hedge_direction == "NO" else cycle.token_id_yes
         hedge_reference = primary_quote.best_ask
+        accuracy = float(predictor_signal.stats.get("accuracy") or 0.5)
+        confidence_floor = max(float(getattr(self.context.settings, "copytrade_signal_confidence_threshold", 0.68) or 0.68), 0.70)
+        confidence_headroom = clamp((predictor_signal.confidence - confidence_floor) / max(0.95 - confidence_floor, 1e-6), 0.0, 1.0)
+        accuracy_headroom = clamp((accuracy - 0.35) / 0.35, 0.0, 1.0)
+        sizing_factor = 0.48 + (confidence_headroom * 0.26) + (accuracy_headroom * 0.10)
         primary_target = clamp(
             primary_quote.best_ask + self.context.settings.copytrade_price_buffer,
             0.01,
@@ -600,7 +615,7 @@ class PairTradingEngine:
             0.01,
             0.97,
         )
-        shares = max(self.context.settings.copytrade_shares, 1)
+        shares = max(1, int(round(max(self.context.settings.copytrade_shares, 1) * sizing_factor)))
         primary_leg = PairLegPlan(
             market_id=cycle.market_id,
             token_id=primary_quote.token_id,

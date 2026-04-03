@@ -40,8 +40,11 @@ class StrategyEngine:
         history = await self._recent_market_history(str(market.get("id") or ""))
         price_yes = float(market.get("price_yes") or 0.0)
         price_no = float(market.get("price_no") or max(1 - price_yes, 0.0))
-        momentum_min_edge = max(float(self.context.settings.momentum_min_edge), 0.10)
-        momentum_min_volume = max(float(self.context.settings.momentum_min_volume_24h), 750.0)
+        momentum_min_edge = float(getattr(self.context.settings, "momentum_min_edge", 0.068) or 0.068)
+        momentum_min_volume = max(
+            float(getattr(self.context.settings, "momentum_min_volume_24h", 500.0) or 500.0),
+            500.0,
+        )
         volume_24h = float(market.get("volume_24h") or 0.0)
         if volume_24h < momentum_min_volume:
             return None
@@ -102,7 +105,11 @@ class StrategyEngine:
             market_probability = price_no
             edge = (1 - posterior_yes) - price_no - (expected_slippage_bps / 10000)
 
-        if edge < momentum_min_edge:
+        quality_edge_floor = max(
+            momentum_min_edge,
+            0.065 + min(avg_spread_bps / 150000.0, 0.01),
+        )
+        if edge < quality_edge_floor:
             return None
 
         confidence = clamp(

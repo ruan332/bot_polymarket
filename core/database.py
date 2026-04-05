@@ -303,6 +303,61 @@ CREATE TABLE IF NOT EXISTS market_discovery_candidates (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS weather_copytrade_runs (
+    run_id UUID PRIMARY KEY,
+    category TEXT NOT NULL DEFAULT 'WEATHER',
+    leaderboard_limit INTEGER NOT NULL DEFAULT 0,
+    universe_count INTEGER NOT NULL DEFAULT 0,
+    shortlisted_count INTEGER NOT NULL DEFAULT 0,
+    selected_count INTEGER NOT NULL DEFAULT 0,
+    selected_proxy_wallet TEXT NOT NULL DEFAULT '',
+    selected_user_name TEXT NOT NULL DEFAULT '',
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    stage_counts JSONB NOT NULL DEFAULT '[]'::jsonb,
+    rejected_breakdown JSONB NOT NULL DEFAULT '{}'::jsonb,
+    model_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    selection_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    scan_stats JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS weather_copytrade_candidates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id UUID NOT NULL REFERENCES weather_copytrade_runs (run_id) ON DELETE CASCADE,
+    rank INTEGER NOT NULL DEFAULT 0,
+    proxy_wallet TEXT NOT NULL DEFAULT '',
+    user_name TEXT NOT NULL DEFAULT '',
+    verified_badge BOOLEAN NOT NULL DEFAULT FALSE,
+    profile JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
+    score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    rationale TEXT NOT NULL DEFAULT '',
+    selected BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS weather_copytrade_state (
+    category TEXT PRIMARY KEY,
+    run_id UUID,
+    selected_proxy_wallet TEXT NOT NULL DEFAULT '',
+    selected_user_name TEXT NOT NULL DEFAULT '',
+    selected_profile JSONB NOT NULL DEFAULT '{}'::jsonb,
+    selection JSONB NOT NULL DEFAULT '{}'::jsonb,
+    report JSONB NOT NULL DEFAULT '{}'::jsonb,
+    approved BOOLEAN NOT NULL DEFAULT FALSE,
+    active BOOLEAN NOT NULL DEFAULT FALSE,
+    paused BOOLEAN NOT NULL DEFAULT TRUE,
+    approved_at TIMESTAMPTZ,
+    activated_at TIMESTAMPTZ,
+    last_trade_seen_at TIMESTAMPTZ,
+    last_trade_seen_hash TEXT NOT NULL DEFAULT '',
+    processed_trade_hashes JSONB NOT NULL DEFAULT '[]'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS settlement_events (
     id UUID PRIMARY KEY,
     position_key TEXT NOT NULL,
@@ -351,6 +406,15 @@ ON market_discovery_candidates (run_id, score DESC, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_market_discovery_candidates_verdict
 ON market_discovery_candidates (verdict, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_weather_copytrade_runs_created_at
+ON weather_copytrade_runs (created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_weather_copytrade_candidates_run_id
+ON weather_copytrade_candidates (run_id, score DESC, rank ASC, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_weather_copytrade_state_active
+ON weather_copytrade_state (active, paused, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_settlement_events_created_at
 ON settlement_events (created_at DESC);
@@ -1350,6 +1414,260 @@ class TradingRepository:
             },
             "candidates": candidates,
         }
+
+    async def record_weather_copytrade_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        row = await self.db.fetchrow(
+            """
+            INSERT INTO weather_copytrade_runs (
+                run_id,
+                category,
+                leaderboard_limit,
+                universe_count,
+                shortlisted_count,
+                selected_count,
+                selected_proxy_wallet,
+                selected_user_name,
+                candidate_count,
+                stage_counts,
+                rejected_breakdown,
+                model_summary,
+                selection_summary,
+                scan_stats,
+                metadata,
+                created_at
+            )
+            VALUES (
+                $1::uuid,
+                $2,
+                $3,
+                $4,
+                $5,
+                $6,
+                $7,
+                $8,
+                $9,
+                $10::jsonb,
+                $11::jsonb,
+                $12::jsonb,
+                $13::jsonb,
+                $14::jsonb,
+                $15::jsonb,
+                $16
+            )
+            RETURNING *
+            """,
+            payload["run_id"],
+            payload.get("category", "WEATHER"),
+            int(payload.get("leaderboard_limit", 0) or 0),
+            int(payload.get("universe_count", 0) or 0),
+            int(payload.get("shortlisted_count", 0) or 0),
+            int(payload.get("selected_count", 0) or 0),
+            str(payload.get("selected_proxy_wallet") or ""),
+            str(payload.get("selected_user_name") or ""),
+            int(payload.get("candidate_count", 0) or 0),
+            _as_json(payload.get("stage_counts", [])),
+            _as_json(payload.get("rejected_breakdown", {})),
+            _as_json(payload.get("model_summary", {})),
+            _as_json(payload.get("selection_summary", {})),
+            _as_json(payload.get("scan_stats", {})),
+            _as_json(payload.get("metadata", {})),
+            payload.get("created_at", datetime.now(UTC)),
+        )
+        assert row is not None
+        return self._json_value(dict(row))
+
+    async def record_weather_copytrade_candidates(self, candidates: list[dict[str, Any]]) -> None:
+        if not candidates:
+            return
+        await self.db.execute(
+            """
+            INSERT INTO weather_copytrade_candidates (
+                run_id,
+                rank,
+                proxy_wallet,
+                user_name,
+                verified_badge,
+                profile,
+                metrics,
+                score,
+                rationale,
+                selected,
+                created_at
+            )
+            SELECT
+                payload.run_id::uuid,
+                payload.rank,
+                payload.proxy_wallet,
+                payload.user_name,
+                payload.verified_badge,
+                payload.profile::jsonb,
+                payload.metrics::jsonb,
+                payload.score,
+                payload.rationale,
+                payload.selected,
+                payload.created_at
+            FROM jsonb_to_recordset($1::jsonb) AS payload(
+                run_id TEXT,
+                rank INTEGER,
+                proxy_wallet TEXT,
+                user_name TEXT,
+                verified_badge BOOLEAN,
+                profile TEXT,
+                metrics TEXT,
+                score DOUBLE PRECISION,
+                rationale TEXT,
+                selected BOOLEAN,
+                created_at TIMESTAMPTZ
+            )
+            """,
+            _as_json(candidates),
+        )
+
+    async def upsert_weather_copytrade_state(self, payload: dict[str, Any]) -> dict[str, Any]:
+        row = await self.db.fetchrow(
+            """
+            INSERT INTO weather_copytrade_state (
+                category,
+                run_id,
+                selected_proxy_wallet,
+                selected_user_name,
+                selected_profile,
+                selection,
+                report,
+                approved,
+                active,
+                paused,
+                approved_at,
+                activated_at,
+                last_trade_seen_at,
+                last_trade_seen_hash,
+                processed_trade_hashes,
+                metadata,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                $1,
+                $2::uuid,
+                $3,
+                $4,
+                $5::jsonb,
+                $6::jsonb,
+                $7::jsonb,
+                $8,
+                $9,
+                $10,
+                $11,
+                $12,
+                $13,
+                $14,
+                $15::jsonb,
+                $16::jsonb,
+                $17,
+                $18
+            )
+            ON CONFLICT (category) DO UPDATE
+            SET run_id = EXCLUDED.run_id,
+                selected_proxy_wallet = EXCLUDED.selected_proxy_wallet,
+                selected_user_name = EXCLUDED.selected_user_name,
+                selected_profile = EXCLUDED.selected_profile,
+                selection = EXCLUDED.selection,
+                report = EXCLUDED.report,
+                approved = EXCLUDED.approved,
+                active = EXCLUDED.active,
+                paused = EXCLUDED.paused,
+                approved_at = EXCLUDED.approved_at,
+                activated_at = EXCLUDED.activated_at,
+                last_trade_seen_at = EXCLUDED.last_trade_seen_at,
+                last_trade_seen_hash = EXCLUDED.last_trade_seen_hash,
+                processed_trade_hashes = EXCLUDED.processed_trade_hashes,
+                metadata = EXCLUDED.metadata,
+                updated_at = EXCLUDED.updated_at
+            RETURNING *
+            """,
+            str(payload.get("category") or "WEATHER"),
+            payload.get("run_id"),
+            str(payload.get("selected_proxy_wallet") or ""),
+            str(payload.get("selected_user_name") or ""),
+            _as_json(payload.get("selected_profile", {})),
+            _as_json(payload.get("selection", {})),
+            _as_json(payload.get("report", {})),
+            bool(payload.get("approved", False)),
+            bool(payload.get("active", False)),
+            bool(payload.get("paused", True)),
+            payload.get("approved_at"),
+            payload.get("activated_at"),
+            payload.get("last_trade_seen_at"),
+            str(payload.get("last_trade_seen_hash") or ""),
+            _as_json(payload.get("processed_trade_hashes", [])),
+            _as_json(payload.get("metadata", {})),
+            payload.get("created_at", datetime.now(UTC)),
+            payload.get("updated_at", datetime.now(UTC)),
+        )
+        assert row is not None
+        return self._json_value(dict(row))
+
+    async def get_weather_copytrade_state(self, category: str = "WEATHER") -> dict[str, Any] | None:
+        row = await self.db.fetchrow(
+            """
+            SELECT *
+            FROM weather_copytrade_state
+            WHERE category = $1
+            """,
+            category,
+        )
+        if row is None:
+            return None
+        return self._json_value(dict(row))
+
+    async def get_latest_weather_copytrade_summary(self, *, limit: int = 12) -> dict[str, Any] | None:
+        run_row = await self.db.fetchrow(
+            """
+            SELECT run_id, category, leaderboard_limit, universe_count, shortlisted_count, selected_count,
+                   selected_proxy_wallet, selected_user_name, candidate_count, stage_counts,
+                   rejected_breakdown, model_summary, selection_summary, scan_stats, metadata, created_at
+            FROM weather_copytrade_runs
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        )
+        if run_row is None:
+            return {
+                "run": None,
+                "candidates": [],
+                "state": await self.get_weather_copytrade_state(),
+            }
+        candidate_rows = await self.db.fetch(
+            """
+            SELECT run_id, rank, proxy_wallet, user_name, verified_badge, profile, metrics, score, rationale, selected, created_at
+            FROM weather_copytrade_candidates
+            WHERE run_id = $1::uuid
+            ORDER BY score DESC, rank ASC, created_at DESC
+            LIMIT $2
+            """,
+            run_row["run_id"],
+            limit,
+        )
+        state = await self.get_weather_copytrade_state(str(run_row["category"] or "WEATHER"))
+        return {
+            "run": self._json_value(dict(run_row)),
+            "candidates": [self._json_value(dict(row)) for row in candidate_rows],
+            "state": state,
+        }
+
+    async def get_recent_weather_copytrade_runs(self, *, limit: int = 12) -> list[dict[str, Any]]:
+        rows = await self.db.fetch(
+            """
+            SELECT run_id, category, leaderboard_limit, universe_count, shortlisted_count, selected_count,
+                   selected_proxy_wallet, selected_user_name, candidate_count, stage_counts,
+                   rejected_breakdown, model_summary, selection_summary, scan_stats, metadata, created_at
+            FROM weather_copytrade_runs
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+        return [self._json_value(dict(row)) for row in rows]
 
     async def get_recent_settlement_events(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = await self.db.fetch(

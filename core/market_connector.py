@@ -12,7 +12,7 @@ import aiohttp
 import websockets
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, AssetType, BalanceAllowanceParams, OrderArgs, OrderType
-from py_clob_client.order_builder.constants import BUY
+from py_clob_client.order_builder.constants import BUY, SELL
 
 if TYPE_CHECKING:
     from core.app_context import AppContext
@@ -395,6 +395,124 @@ class MarketConnector:
                 return trades
         return []
 
+    async def get_trader_leaderboard(
+        self,
+        *,
+        category: str = "WEATHER",
+        time_period: str = "ALL",
+        order_by: str = "PNL",
+        limit: int = 50,
+        offset: int = 0,
+        user: str | None = None,
+    ) -> list[dict[str, Any]]:
+        session = await self._client()
+        params: dict[str, Any] = {
+            "category": category,
+            "timePeriod": time_period,
+            "orderBy": order_by,
+            "limit": min(max(limit, 1), 50),
+            "offset": max(offset, 0),
+        }
+        if user:
+            params["user"] = user
+        async with session.get(f"{self.context.settings.polymarket_data_api_url}/v1/leaderboard", params=params) as response:
+            if response.status >= 400:
+                return []
+            payload = await response.json()
+        return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+    async def get_public_profile(self, address: str) -> dict[str, Any] | None:
+        if not address:
+            return None
+        session = await self._client()
+        async with session.get(f"{self.context.settings.polymarket_gamma_url}/public-profile", params={"address": address}) as response:
+            if response.status >= 400:
+                return None
+            payload = await response.json()
+        return self._mapping_from_object(payload)
+
+    async def get_current_positions(
+        self,
+        address: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        size_threshold: float = 1,
+        redeemable: bool = False,
+        mergeable: bool = False,
+    ) -> list[dict[str, Any]]:
+        session = await self._client()
+        params: dict[str, Any] = {
+            "user": address,
+            "limit": min(max(limit, 1), 500),
+            "offset": max(offset, 0),
+            "sizeThreshold": max(size_threshold, 0),
+            "redeemable": str(bool(redeemable)).lower(),
+            "mergeable": str(bool(mergeable)).lower(),
+        }
+        async with session.get(f"{self.context.settings.polymarket_data_api_url}/positions", params=params) as response:
+            if response.status >= 400:
+                return []
+            payload = await response.json()
+        return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+    async def get_closed_positions(
+        self,
+        address: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        session = await self._client()
+        params = {"user": address, "limit": min(max(limit, 1), 500), "offset": max(offset, 0)}
+        async with session.get(f"{self.context.settings.polymarket_data_api_url}/closed-positions", params=params) as response:
+            if response.status >= 400:
+                return []
+            payload = await response.json()
+        return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+    async def get_user_trades(
+        self,
+        address: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        market: list[str] | None = None,
+        event_id: list[int] | None = None,
+        side: str | None = None,
+        taker_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        session = await self._client()
+        params: dict[str, Any] = {
+            "user": address,
+            "limit": min(max(limit, 1), 10_000),
+            "offset": max(offset, 0),
+            "takerOnly": str(bool(taker_only)).lower(),
+        }
+        if market:
+            params["market"] = ",".join(market)
+        if event_id:
+            params["eventId"] = ",".join(str(item) for item in event_id)
+        if side:
+            params["side"] = side.upper()
+        async with session.get(f"{self.context.settings.polymarket_data_api_url}/trades", params=params) as response:
+            if response.status >= 400:
+                return []
+            payload = await response.json()
+        return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+    async def get_total_position_value(self, address: str) -> float | None:
+        session = await self._client()
+        async with session.get(f"{self.context.settings.polymarket_data_api_url}/value", params={"user": address}) as response:
+            if response.status >= 400:
+                return None
+            payload = await response.json()
+        value = self._find_value_for_keys(self._mapping_from_object(payload), ("value", "totalValue", "total_value"))
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
     @staticmethod
     def _normalize_trade_history_payload(payload: Any) -> list[dict[str, Any]]:
         if payload is None:
@@ -423,6 +541,7 @@ class MarketConnector:
         size: int,
         price_limit: float,
         open_position: bool = True,
+        side: str | None = None,
     ) -> dict[str, Any]:
         order = {
             "market_id": market_id,
@@ -435,14 +554,14 @@ class MarketConnector:
         }
         if self.context.settings.live_trading:
             client = await self._get_live_client()
-            side = BUY if direction in {"YES", "BUY"} else BUY
+            live_side = side.upper() if side else (BUY if direction in {"YES", "BUY"} else SELL)
             signed_order = await to_thread(
                 client.create_order,
                 OrderArgs(
                     token_id=token_id,
                     price=price_limit,
                     size=size,
-                    side=side,
+                    side=live_side,
                 ),
             )
             response = await to_thread(client.post_order, signed_order, OrderType.GTC)

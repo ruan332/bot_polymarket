@@ -140,6 +140,80 @@ type PerformanceReport = {
   strategy_breakdown?: Array<{ label: string; signals: number; orders: number; realized_pnl_usd: number }>;
 };
 
+type WeatherCopytradeReport = {
+  summary: string;
+  why: string;
+  risks: string[];
+  selection_reason: string;
+  selected_proxy_wallet: string;
+  selected_user_name: string;
+  model: string;
+  provider: string;
+  fallback_used: boolean;
+};
+
+type WeatherCopytradeCandidate = {
+  run_id?: string;
+  rank: number;
+  proxy_wallet: string;
+  user_name: string;
+  verified_badge?: boolean;
+  profile: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  score: number;
+  rationale: string;
+  selected?: boolean;
+  created_at?: string;
+  passed?: boolean;
+  reject_reason?: string;
+};
+
+type WeatherCopytradeRun = {
+  run_id: string;
+  category: string;
+  leaderboard_limit: number;
+  universe_count: number;
+  shortlisted_count: number;
+  selected_count: number;
+  selected_proxy_wallet: string;
+  selected_user_name: string;
+  candidate_count: number;
+  stage_counts: Array<{ label: string; count: number }>;
+  rejected_breakdown: Record<string, number>;
+  model_summary: WeatherCopytradeReport;
+  selection_summary: Record<string, unknown>;
+  scan_stats: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+type WeatherCopytradeState = {
+  category: string;
+  run_id?: string;
+  selected_proxy_wallet: string;
+  selected_user_name: string;
+  selected_profile: Record<string, unknown>;
+  selection: Record<string, unknown>;
+  report: WeatherCopytradeReport;
+  approved: boolean;
+  active: boolean;
+  paused: boolean;
+  approved_at?: string | null;
+  activated_at?: string | null;
+  last_trade_seen_at?: string | null;
+  last_trade_seen_hash?: string;
+  processed_trade_hashes?: string[];
+  metadata?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+};
+
+type WeatherCopytradeSummary = {
+  run: WeatherCopytradeRun | null;
+  candidates: WeatherCopytradeCandidate[];
+  state: WeatherCopytradeState | null;
+};
+
 type MetricsOverview = {
   flow_summary?: {
     reviewer_approved: number;
@@ -194,6 +268,8 @@ type DashboardState = {
   performance: PerformanceReport | null;
   pairPerformance: PerformanceReport | null;
   momentumPerformance: PerformanceReport | null;
+  weatherCopytradeSummary: WeatherCopytradeSummary | null;
+  weatherCopytradeMetrics: PerformanceReport | null;
   signals: Signal[];
   decisions: Decision[];
   orders: Order[];
@@ -210,6 +286,21 @@ async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`Failed to fetch ${path}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function postJson<T>(path: string, body: unknown = {}): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(detail ? `Failed to POST ${path}: ${detail}` : `Failed to POST ${path}`);
   }
   return response.json() as Promise<T>;
 }
@@ -471,6 +562,8 @@ export function DashboardClient() {
     performance: null,
     pairPerformance: null,
     momentumPerformance: null,
+    weatherCopytradeSummary: null,
+    weatherCopytradeMetrics: null,
     signals: [],
     decisions: [],
     orders: [],
@@ -482,6 +575,9 @@ export function DashboardClient() {
   const [lastUpdated, setLastUpdated] = useState("booting");
   const [clock, setClock] = useState("--:--:--");
   const [signalMetricsFilter, setSignalMetricsFilter] = useState<SignalMetricsFilter>("all");
+  const [weatherActionBusy, setWeatherActionBusy] = useState(false);
+  const [weatherActionNote, setWeatherActionNote] = useState<string | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
   const stateRef = useRef(state);
 
   useEffect(() => {
@@ -508,6 +604,8 @@ export function DashboardClient() {
         { key: "performance", path: "/metrics/performance?hours=24", fallback: current.performance },
         { key: "pairPerformance", path: "/metrics/performance?hours=336&strategy=pair_15m", fallback: current.pairPerformance },
         { key: "momentumPerformance", path: "/metrics/performance?hours=336&strategy=momentum_15m", fallback: current.momentumPerformance },
+        { key: "weatherCopytradeSummary", path: "/weather-copytrade/summary?limit=12", fallback: current.weatherCopytradeSummary },
+        { key: "weatherCopytradeMetrics", path: "/weather-copytrade/metrics?hours=720", fallback: current.weatherCopytradeMetrics },
         { key: "signals", path: "/signals/recent", fallback: current.signals },
         { key: "decisions", path: "/decisions/recent", fallback: current.decisions },
         { key: "orders", path: "/orders/recent", fallback: current.orders },
@@ -539,6 +637,8 @@ export function DashboardClient() {
           performance: (next.get("performance") ?? null) as PerformanceReport | null,
           pairPerformance: (next.get("pairPerformance") ?? null) as PerformanceReport | null,
           momentumPerformance: (next.get("momentumPerformance") ?? null) as PerformanceReport | null,
+          weatherCopytradeSummary: (next.get("weatherCopytradeSummary") ?? null) as WeatherCopytradeSummary | null,
+          weatherCopytradeMetrics: (next.get("weatherCopytradeMetrics") ?? null) as PerformanceReport | null,
           signals: (next.get("signals") ?? []) as Signal[],
           decisions: (next.get("decisions") ?? []) as Decision[],
           orders: (next.get("orders") ?? []) as Order[],
@@ -559,7 +659,7 @@ export function DashboardClient() {
       active = false;
       window.clearInterval(interval);
     };
-  }, []);
+  }, [refreshTick]);
 
   const summary = state.performance?.summary;
   const balance = state.portfolio?.available_balance ?? 0;
@@ -594,6 +694,50 @@ export function DashboardClient() {
   const liveSubmittedOrders = numberOr(summary?.live_submitted_orders);
   const liveFilledOrders = numberOr(summary?.live_filled_orders);
   const liveFailOpen = Boolean(state.liveBootstrap?.fail_open);
+  const weatherSummary = state.weatherCopytradeSummary;
+  const weatherRun = weatherSummary?.run ?? null;
+  const weatherCandidates = [...(weatherSummary?.candidates ?? [])].sort((a, b) => a.rank - b.rank || b.score - a.score);
+  const weatherState = weatherSummary?.state ?? null;
+  const weatherSelected =
+    weatherCandidates.find((candidate) => candidate.proxy_wallet === weatherState?.selected_proxy_wallet) ??
+    weatherCandidates.find((candidate) => candidate.selected) ??
+    (weatherCandidates.length > 0 ? weatherCandidates[0] : null);
+  const weatherReport = weatherState?.report ?? weatherRun?.model_summary ?? null;
+  const weatherMetrics = state.weatherCopytradeMetrics ?? null;
+  const weatherBusyLabel = weatherActionBusy ? "WORKING" : weatherState?.active ? "ACTIVE" : weatherState?.paused ? "PAUSED" : "IDLE";
+
+  async function refreshWeatherCopytrade() {
+    setWeatherActionNote(null);
+    setRefreshTick((value) => value + 1);
+  }
+
+  async function handleWeatherAction(
+    action: "run" | "approve" | "pause" | "resume",
+    payload: Record<string, unknown> = {},
+  ) {
+    setWeatherActionBusy(true);
+    setWeatherActionNote(null);
+    try {
+      if (action === "run") {
+        await postJson("/weather-copytrade/run", { limit: 40, ...payload });
+        setWeatherActionNote("Nova analise executada com sucesso.");
+      } else if (action === "approve") {
+        await postJson("/weather-copytrade/approve", payload);
+        setWeatherActionNote("Usuario aprovado e configurado para copytrade.");
+      } else if (action === "pause") {
+        await postJson("/weather-copytrade/pause", { paused: true });
+        setWeatherActionNote("Copytrade pausado.");
+      } else if (action === "resume") {
+        await postJson("/weather-copytrade/pause", { paused: false });
+        setWeatherActionNote("Copytrade reativado.");
+      }
+      await refreshWeatherCopytrade();
+    } catch (error) {
+      setWeatherActionNote(error instanceof Error ? error.message : "Falha ao executar acao.");
+    } finally {
+      setWeatherActionBusy(false);
+    }
+  }
 
   return (
     <main className="min-h-screen overflow-y-auto overflow-x-hidden px-4 pb-16 pt-4 md:px-6 md:pb-20 md:pt-6 custom-scrollbar">
@@ -745,6 +889,213 @@ export function DashboardClient() {
           />
           <LogPanel title="Pair_15M_Log" items={pairLog} />
           <LogPanel title="Momentum_15M_Log" items={momentumLog} />
+        </section>
+
+        <section className="border border-poly-border bg-[radial-gradient(circle_at_top_left,rgba(0,243,255,0.10),transparent_30%),radial-gradient(circle_at_bottom_right,rgba(0,255,65,0.08),transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.01),transparent)] p-4 md:p-5">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.28em] text-poly-dim">WEATHER_COPYTRADE</div>
+              <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em] text-poly-muted">
+                scan conservador de traders PUBLICOS, shortlist deterministica, e ativacao manual antes de copiar
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 font-mono text-[9px] uppercase text-poly-dim">
+              <span className={`border px-2 py-1 ${weatherBusyLabel === "ACTIVE" ? "border-poly-green text-poly-green" : weatherBusyLabel === "PAUSED" ? "border-poly-amber text-poly-amber" : "border-poly-cyan text-poly-cyan"}`}>
+                {weatherBusyLabel}
+              </span>
+              <button
+                type="button"
+                disabled={weatherActionBusy}
+                onClick={() => void handleWeatherAction("run")}
+                className="border border-poly-cyan px-3 py-1 text-poly-cyan transition hover:bg-poly-cyan hover:text-poly-black disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Nova análise
+              </button>
+              <button
+                type="button"
+                disabled={weatherActionBusy || !weatherSelected}
+                onClick={() =>
+                  void handleWeatherAction("approve", {
+                    run_id: weatherRun?.run_id,
+                    proxy_wallet: weatherSelected?.proxy_wallet,
+                  })
+                }
+                className="border border-poly-green px-3 py-1 text-poly-green transition hover:bg-poly-green hover:text-poly-black disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Aprovar e ativar
+              </button>
+              <button
+                type="button"
+                disabled={weatherActionBusy || !weatherState}
+                onClick={() => void handleWeatherAction(weatherState?.paused ? "resume" : "pause")}
+                className="border border-poly-amber px-3 py-1 text-poly-amber transition hover:bg-poly-amber hover:text-poly-black disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {weatherState?.paused ? "Retomar" : "Pausar"}
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-[1.1fr_0.95fr_0.95fr]">
+            <div className="border border-poly-border bg-poly-black p-4">
+              <div className="flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.2em] text-poly-dim">
+                <span>Última análise</span>
+                <span className="text-poly-cyan">{weatherRun ? weatherRun.run_id.slice(0, 8) : "sem_run"}</span>
+              </div>
+              <div className="mt-3 grid gap-2 text-[10px] font-mono text-poly-dim sm:grid-cols-2">
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Universo</div>
+                  <div className="mt-1 text-poly-cyan">{weatherRun?.universe_count ?? 0}</div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Shortlist</div>
+                  <div className="mt-1 text-poly-cyan">{weatherRun?.shortlisted_count ?? 0}</div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Selecionado</div>
+                  <div className="mt-1 text-poly-green">{weatherRun?.selected_user_name ?? weatherState?.selected_user_name ?? "-"}</div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Model</div>
+                  <div className="mt-1 text-poly-cyan">{weatherReport?.model ?? "deterministic"}</div>
+                </div>
+              </div>
+              <div className="mt-3 border border-poly-border bg-poly-surface-dim/20 p-3">
+                <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-poly-dim">Resumo do modelo</div>
+                <div className="mt-2 space-y-2 font-mono text-[10px] text-poly-text">
+                  <div>
+                    <span className="text-poly-dim">summary:</span> {weatherReport?.summary ?? "aguardando nova analise"}
+                  </div>
+                  <div>
+                    <span className="text-poly-dim">why:</span> {weatherReport?.why ?? "sem justificativa ainda"}
+                  </div>
+                  <div>
+                    <span className="text-poly-dim">risks:</span>{" "}
+                    {weatherReport?.risks?.length ? weatherReport.risks.join(" | ") : "sem riscos registrados"}
+                  </div>
+                  <div>
+                    <span className="text-poly-dim">reason:</span> {weatherReport?.selection_reason ?? "sem reason"}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2 font-mono text-[9px] uppercase text-poly-dim">
+                <span className="border border-poly-border px-2 py-1">
+                  Approved: <span className={weatherState?.approved ? "text-poly-green" : "text-poly-red"}>{String(Boolean(weatherState?.approved))}</span>
+                </span>
+                <span className="border border-poly-border px-2 py-1">
+                  Active: <span className={weatherState?.active ? "text-poly-green" : "text-poly-red"}>{String(Boolean(weatherState?.active))}</span>
+                </span>
+                <span className="border border-poly-border px-2 py-1">
+                  Paused: <span className={weatherState?.paused ? "text-poly-amber" : "text-poly-green"}>{String(Boolean(weatherState?.paused))}</span>
+                </span>
+              </div>
+              {weatherActionNote ? (
+                <div className="mt-3 border border-poly-amber/40 bg-poly-amber/5 px-3 py-2 font-mono text-[10px] text-poly-amber">
+                  {weatherActionNote}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="border border-poly-border bg-poly-black p-4">
+              <div className="flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.2em] text-poly-dim">
+                <span>Candidatos</span>
+                <span className="text-poly-cyan">{weatherCandidates.length}</span>
+              </div>
+              <div className="mt-3 space-y-2">
+                {weatherCandidates.length > 0 ? (
+                  weatherCandidates.slice(0, 6).map((candidate) => {
+                    const isSelected = candidate.proxy_wallet === weatherState?.selected_proxy_wallet || candidate.selected;
+                    return (
+                      <div
+                        key={`${candidate.proxy_wallet}-${candidate.rank}`}
+                        className={`border px-3 py-2 ${isSelected ? "border-poly-green bg-poly-green/5" : "border-poly-border bg-poly-surface-dim/20"}`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-poly-dim">
+                              #{candidate.rank} {candidate.user_name}
+                            </div>
+                            <div className="mt-1 break-all font-mono text-[9px] text-poly-muted">{candidate.proxy_wallet}</div>
+                          </div>
+                          <div className="text-right font-mono text-[10px]">
+                            <div className={isSelected ? "text-poly-green" : "text-poly-cyan"}>{candidate.score.toFixed(2)}</div>
+                            <div className="text-[9px] uppercase text-poly-dim">{isSelected ? "selected" : candidate.passed === false ? "rejected" : "candidate"}</div>
+                          </div>
+                        </div>
+                        <div className="mt-2 grid gap-1 font-mono text-[9px] text-poly-dim">
+                          <div>{candidate.rationale}</div>
+                          <div className="flex flex-wrap gap-2">
+                            <span>pnl30d {numberOr(candidate.metrics?.pnl_30d).toFixed(2)}</span>
+                            <span>dd {asPercent(numberOr(candidate.metrics?.max_drawdown))}</span>
+                            <span>pf {numberOr(candidate.metrics?.profit_factor).toFixed(2)}</span>
+                            <span>trades {numberOr(candidate.metrics?.trades_30d)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="border border-dashed border-poly-border px-3 py-4 text-center font-mono text-[10px] text-poly-dim">
+                    aguarde uma analise para preencher a shortlist
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="border border-poly-border bg-poly-black p-4">
+              <div className="flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.2em] text-poly-dim">
+                <span>Operação copiada</span>
+                <span className="text-poly-cyan">{weatherMetrics ? "live" : "sem_metricas"}</span>
+              </div>
+              <div className="mt-3 grid gap-2 text-[10px] font-mono text-poly-dim sm:grid-cols-2">
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Orders</div>
+                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.orders ?? 0}</div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Signals</div>
+                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.signals ?? 0}</div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Execução</div>
+                  <div className="mt-1 text-poly-green">
+                    {weatherMetrics?.summary.execution_rate != null ? asPercent(weatherMetrics.summary.execution_rate) : "-"}
+                  </div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Win%</div>
+                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.win_rate != null ? asPercent(weatherMetrics.summary.win_rate) : "-"}</div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">PnL</div>
+                  <div className={`mt-1 ${numberOr(weatherMetrics?.summary.realized_pnl_window) >= 0 ? "text-poly-green" : "text-poly-red"}`}>
+                    {weatherMetrics?.summary.realized_pnl_window != null ? asCurrencySigned(weatherMetrics.summary.realized_pnl_window) : "-"}
+                  </div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">DD</div>
+                  <div className="mt-1 text-poly-amber">{weatherMetrics?.summary.max_drawdown != null ? asPercent(weatherMetrics.summary.max_drawdown) : "-"}</div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Risk</div>
+                  <div className="mt-1 text-poly-red">{weatherMetrics?.summary.risk_events ?? 0}</div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Approval</div>
+                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.approval_rate != null ? asPercent(weatherMetrics.summary.approval_rate) : "-"}</div>
+                </div>
+              </div>
+              <div className="mt-3 border border-poly-border bg-poly-surface-dim/20 p-3 font-mono text-[10px] text-poly-dim">
+                <div className="uppercase tracking-[0.2em]">Selecionado</div>
+                <div className="mt-2 text-poly-text">
+                  {weatherSelected ? `${weatherSelected.user_name} · ${weatherSelected.proxy_wallet}` : "nenhum usuario selecionado"}
+                </div>
+                <div className="mt-1 text-[9px] uppercase text-poly-muted">
+                  copy_trade_fraction{" "}
+                  {String(weatherRun?.metadata?.["copy_trade_fraction"] ?? weatherState?.metadata?.["copy_trade_fraction"] ?? "-")}
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section>

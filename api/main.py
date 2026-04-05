@@ -11,7 +11,9 @@ from core.cost_tracker import CostTracker
 from core.discovery_service import DiscoveryService
 from core.market_connector import MarketConnector
 from core.schemas import ModelSwapRequest
+from core.schemas import WeatherCopytradeApproveRequest, WeatherCopytradePauseRequest, WeatherCopytradeRunRequest
 from core.settlement import SettlementService
+from core.weather_copytrade_service import WeatherCopytradeService
 
 
 @asynccontextmanager
@@ -366,3 +368,66 @@ async def discovery_funnel_run(limit: int = 24) -> dict[str, object]:
         return await service.run(limit=limit)
     finally:
         await service.close()
+
+
+@app.get("/weather-copytrade/summary")
+async def weather_copytrade_summary(limit: int = 12) -> dict[str, object]:
+    context = get_context()
+    service = WeatherCopytradeService(context)
+    try:
+        return await service.summary()
+    finally:
+        await service.close()
+
+
+@app.post("/weather-copytrade/run")
+async def weather_copytrade_run(req: WeatherCopytradeRunRequest) -> dict[str, object]:
+    context = get_context()
+    service = WeatherCopytradeService(context)
+    try:
+        return await service.run_analysis(limit=req.limit)
+    finally:
+        await service.close()
+
+
+@app.post("/weather-copytrade/approve")
+async def weather_copytrade_approve(req: WeatherCopytradeApproveRequest) -> dict[str, object]:
+    context = get_context()
+    service = WeatherCopytradeService(context)
+    try:
+        return await service.approve_selection(run_id=req.run_id, proxy_wallet=req.proxy_wallet)
+    finally:
+        await service.close()
+
+
+@app.post("/weather-copytrade/pause")
+async def weather_copytrade_pause(req: WeatherCopytradePauseRequest) -> dict[str, object]:
+    context = get_context()
+    service = WeatherCopytradeService(context)
+    try:
+        return await service.pause(paused=req.paused)
+    finally:
+        await service.close()
+
+
+@app.post("/weather-copytrade/sync")
+async def weather_copytrade_sync() -> dict[str, object]:
+    context = get_context()
+    service = WeatherCopytradeService(context)
+    try:
+        return await service.sync_mirror_trades()
+    finally:
+        await service.close()
+
+
+@app.get("/weather-copytrade/metrics")
+async def weather_copytrade_metrics(
+    hours: int = 720,
+    cutoff_name: str | None = None,
+) -> dict[str, object]:
+    context = get_context()
+    return await context.repository.get_performance_report(
+        hours=hours,
+        strategy="weather_copytrade",
+        cutoff_name=cutoff_name,
+    )

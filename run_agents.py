@@ -6,6 +6,7 @@ from agents.claw_agent import ClawAgent
 from agents.codex_agent import CodexAgent
 from agents.flow_analyzer_agent import FlowAnalyzerAgent
 from agents.news_validator_agent import NewsValidatorAgent
+from agents.weather_copytrade_agent import WeatherCopytradeAgent
 from core.app_context import AppContext
 
 
@@ -15,8 +16,9 @@ async def main() -> None:
     codex = CodexAgent(context)
     flow_analyzer = FlowAnalyzerAgent(context)
     claw = ClawAgent(context)
+    weather_copytrade = WeatherCopytradeAgent(context)
     news_validator = NewsValidatorAgent(context) if context.settings.news_validation_enabled else None
-    agents = [claude, flow_analyzer, codex, claw]
+    agents = [claude, flow_analyzer, codex, claw, weather_copytrade]
     if news_validator is not None:
         agents.append(news_validator)
 
@@ -31,12 +33,14 @@ async def main() -> None:
             print("  News   -> disabled")
         print(f"  Codex  -> {codex.provider.model}")
         print(f"  Claw   -> {claw.provider.model}")
+        print(f"  Weather-> {weather_copytrade.provider.model}")
         claude_interval = 1 if context.settings.copytrade_enabled else 10
         tasks = [
             asyncio.create_task(claude.run_loop(interval_seconds=claude_interval), name="claude.run_loop"),
             asyncio.create_task(flow_analyzer.run_loop(interval_seconds=2), name="flow_analyzer.run_loop"),
             asyncio.create_task(codex.run_loop(interval_seconds=2), name="codex.run_loop"),
             asyncio.create_task(claw.run_loop(interval_seconds=2), name="claw.run_loop"),
+            asyncio.create_task(weather_copytrade.run_loop(interval_seconds=20), name="weather_copytrade.run_loop"),
         ]
         if news_validator is not None:
             tasks.append(asyncio.create_task(news_validator.run_loop(interval_seconds=3), name="news_validator.run_loop"))

@@ -110,7 +110,7 @@ async def test_place_order_uses_py_clob_client_when_live_enabled(monkeypatch) ->
 
     assert result["status"] == "live_submitted"
     assert created["order_args"].token_id == "token-1"
-    assert created["order_args"].side == "BUY"
+    assert created["order_args"].side == "SELL"
     assert created["post"]["signed_order"]["signed"] is True
 
 

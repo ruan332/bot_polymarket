@@ -55,6 +55,7 @@ async def test_main_cancels_tasks_and_closes_everything_on_failure(monkeypatch: 
     flow_cls = _make_agent("flow_15m")
     codex_cls = _make_agent("codex", fail=True)
     claw_cls = _make_agent("claw")
+    weather_cls = _make_agent("weather_copytrade")
     news_validator_cls = _make_agent("news_validator")
 
     async def fake_create():
@@ -65,6 +66,7 @@ async def test_main_cancels_tasks_and_closes_everything_on_failure(monkeypatch: 
     monkeypatch.setattr(run_agents, "FlowAnalyzerAgent", flow_cls)
     monkeypatch.setattr(run_agents, "CodexAgent", codex_cls)
     monkeypatch.setattr(run_agents, "ClawAgent", claw_cls)
+    monkeypatch.setattr(run_agents, "WeatherCopytradeAgent", weather_cls)
     monkeypatch.setattr(run_agents, "NewsValidatorAgent", news_validator_cls)
 
     with pytest.raises(RuntimeError, match="codex failed"):
@@ -75,8 +77,10 @@ async def test_main_cancels_tasks_and_closes_everything_on_failure(monkeypatch: 
     assert all(agent.closed is True for agent in flow_cls.instances)
     assert all(agent.closed is True for agent in codex_cls.instances)
     assert all(agent.closed is True for agent in claw_cls.instances)
+    assert all(agent.closed is True for agent in weather_cls.instances)
     assert all(agent.closed is True for agent in news_validator_cls.instances)
     assert all(agent.cancelled is True for agent in claude_cls.instances)
     assert all(agent.cancelled is True for agent in flow_cls.instances)
     assert all(agent.cancelled is True for agent in claw_cls.instances)
+    assert all(agent.cancelled is True for agent in weather_cls.instances)
     assert all(agent.cancelled is True for agent in news_validator_cls.instances)

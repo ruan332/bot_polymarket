@@ -11,9 +11,11 @@ from core.config import (
     AgentsConfig,
     CryptoSettings,
     RiskSettings,
+    WeatherCopytradeSettings,
     load_agents_config,
     load_crypto_config,
     load_risk_config,
+    load_weather_copytrade_config,
 )
 from core.database import Database, TradingRepository
 from core.market_connector import MarketConnector
@@ -28,6 +30,7 @@ class AppContext:
     agents_config: AgentsConfig
     risk_config: RiskSettings
     crypto_config: CryptoSettings
+    weather_copytrade_config: WeatherCopytradeSettings
     db: Database
     repository: TradingRepository
     redis: Redis
@@ -42,6 +45,7 @@ class AppContext:
         risk_config = load_risk_config()
         _apply_runtime_risk_overrides(settings, risk_config)
         crypto_config = load_crypto_config()
+        weather_copytrade_config = load_weather_copytrade_config()
         db = Database(settings.database_url)
         await _retry_async(
             "database startup",
@@ -60,7 +64,7 @@ class AppContext:
         bus = RedisBus(redis)
         await bus.bootstrap_runtime_config(agents_config)
         await bus.ensure_known_groups()
-        context = cls(settings, agents_config, risk_config, crypto_config, db, repository, redis, bus)
+        context = cls(settings, agents_config, risk_config, crypto_config, weather_copytrade_config, db, repository, redis, bus)
         context.market_connector = MarketConnector(context)
         repository.bind_live_balance_provider(context.refresh_live_bootstrap_status)
         if settings.live_trading:
@@ -86,6 +90,7 @@ class AppContext:
         self.risk_config = load_risk_config()
         _apply_runtime_risk_overrides(self.settings, self.risk_config)
         self.crypto_config = load_crypto_config()
+        self.weather_copytrade_config = load_weather_copytrade_config()
 
     async def refresh_live_bootstrap_status(self, *, sync_allowance: bool = False) -> dict[str, object]:
         if not self.settings.live_trading:

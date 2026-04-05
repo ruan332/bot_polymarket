@@ -396,3 +396,16 @@ class ModelSwapRequest(BaseModel):
     model: str
     provider: str | None = None
     fallback_model: str | None = None
+
+
+class WeatherCopytradeRunRequest(BaseModel):
+    limit: int | None = None
+
+
+class WeatherCopytradeApproveRequest(BaseModel):
+    run_id: str | None = None
+    proxy_wallet: str | None = None
+
+
+class WeatherCopytradePauseRequest(BaseModel):
+    paused: bool = True

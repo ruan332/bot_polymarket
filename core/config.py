@@ -167,6 +167,60 @@ class CryptoConfig(BaseModel):
     crypto: CryptoSettings
 
 
+class WeatherCopytradeSettings(BaseModel):
+    enabled: bool = True
+    category: str = "WEATHER"
+    leaderboard_limit: int = 40
+    shortlist_limit: int = 8
+    min_trades_30d: int = 25
+    min_trades_7d: int = 8
+    min_closed_positions_30d: int = 10
+    min_positive_weeks_4: int = 3
+    min_pnl_7d: float = 0.0
+    min_pnl_30d: float = 0.0
+    min_pnl_all: float = 0.0
+    max_drawdown: float = 0.15
+    min_profit_factor: float = 1.25
+    min_win_rate: float = 0.52
+    max_pnl_concentration: float = 0.40
+    max_spread_bps: float = 150.0
+    min_notional_usd: float = 1.0
+    max_notional_usd: float = 2.5
+    copy_trade_fraction: float = 0.08
+    max_open_copied_positions: int = 3
+    scan_interval_minutes: int = 60
+    poll_interval_seconds: int = 20
+    trade_lookback_days: int = 30
+    short_report_model: str = "gpt-4o-mini"
+    short_report_provider: str = "openai"
+    short_report_fallback_model: str = "gpt-4o-mini"
+    report_token_limit: int = 280
+
+    @field_validator(
+        "max_drawdown",
+        "min_profit_factor",
+        "min_win_rate",
+        "max_pnl_concentration",
+        "copy_trade_fraction",
+    )
+    @classmethod
+    def validate_ratio(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("value must be non-negative")
+        return value
+
+    @field_validator("leaderboard_limit", "shortlist_limit", "min_trades_30d", "min_trades_7d", "min_closed_positions_30d", "min_positive_weeks_4", "max_open_copied_positions", "scan_interval_minutes", "poll_interval_seconds", "trade_lookback_days")
+    @classmethod
+    def validate_positive_int(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("value must be non-negative")
+        return value
+
+
+class WeatherCopytradeConfig(BaseModel):
+    weather_copytrade: WeatherCopytradeSettings
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -321,6 +375,10 @@ def load_risk_config(path: Path = RISK_CONFIG_PATH) -> RiskSettings:
 
 def load_crypto_config(path: Path = CRYPTO_CONFIG_PATH) -> CryptoSettings:
     return CryptoConfig.model_validate(_load_yaml(path)).crypto
+
+
+def load_weather_copytrade_config(path: Path = ROOT_DIR / "config" / "weather_copytrade.yaml") -> WeatherCopytradeSettings:
+    return WeatherCopytradeConfig.model_validate(_load_yaml(path)).weather_copytrade
 
 
 def infer_provider_from_model(model: str) -> tuple[str | None, str]:

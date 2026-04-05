@@ -256,6 +256,19 @@ async def test_build_execution_guard_treats_zero_daily_spend_as_unlimited() -> N
 
 
 @pytest.mark.asyncio
+async def test_build_execution_guard_treats_zero_daily_drawdown_limit_as_unlimited() -> None:
+    context = make_context()
+    context.settings.paper_bankroll_usd = 2_000.0
+    risk = RiskEngine(context)
+    risk.config.daily_drawdown_limit_fraction = 0.0
+    signal = make_signal(symbol="BTC", tier="btc", edge=0.40, confidence=0.80, price=0.40, volume_24h=100000.0)
+
+    guard = await risk.build_execution_guard(make_review(signal))
+
+    assert guard.notional_usd == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
 async def test_validate_signal_requires_stronger_thresholds_for_indirect_crypto() -> None:
     risk = RiskEngine(make_context())
     indirect_signal = make_signal(

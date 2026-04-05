@@ -163,14 +163,18 @@ class RiskEngine:
         initial_bankroll = float(getattr(settings, "paper_bankroll_usd", bankroll) or bankroll or 1.0)
         if initial_bankroll > 0:
             drawdown = max((initial_bankroll - bankroll) / initial_bankroll, 0.0)
-        if drawdown >= self.config.daily_drawdown_limit_fraction:
-            raise RiskBlockedError("drawdown exceeds daily_drawdown_limit_fraction")
-
-        drawdown_scale = clamp(
-            1.0 - (drawdown / max(self.config.daily_drawdown_limit_fraction, 1e-6)) * 0.75,
-            self.config.min_risk_fraction_after_losses,
-            1.0,
-        )
+        daily_drawdown_limit = self.config.daily_drawdown_limit_fraction
+        if daily_drawdown_limit > 0:
+            if drawdown >= daily_drawdown_limit:
+                raise RiskBlockedError("drawdown exceeds daily_drawdown_limit_fraction")
+            drawdown_scale = clamp(
+                1.0 - (drawdown / daily_drawdown_limit) * 0.75,
+                self.config.min_risk_fraction_after_losses,
+                1.0,
+            )
+        else:
+            # A zero or negative limit disables the daily drawdown guardrail entirely.
+            drawdown_scale = 1.0
         loss_scale = clamp(
             1.0 - risk_state["consecutive_losses"] * self.config.loss_streak_size_discount,
             self.config.min_risk_fraction_after_losses,

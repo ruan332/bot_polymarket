@@ -17,7 +17,7 @@ risk:
   circuit_breaker_loss_threshold_usd: 100.0
   circuit_breaker_cooldown_seconds: 300
   default_limit_buffer_bps: 50
-  daily_drawdown_limit_fraction: 0.08
+  daily_drawdown_limit_fraction: 0.0
   loss_streak_size_discount: 0.15
   min_risk_fraction_after_losses: 0.35
   exit_scale_out_fraction: 0.50

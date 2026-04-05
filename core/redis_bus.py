@@ -14,6 +14,7 @@ class RedisBus:
 
     async def ensure_known_groups(self) -> None:
         await self.ensure_group("signals:validated", "codex_reviewers")
+        await self.ensure_group("signals:flow_analyzed", "codex_reviewers")
         await self.ensure_group("signals:reviewed", "claw_executors")
 
     async def publish_event(self, stream: str, payload: dict[str, Any]) -> str:

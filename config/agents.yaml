@@ -16,6 +16,14 @@ agents:
     fallback_model: "gpt-4o-mini"
     daily_cost_limit_usd: 0.30
 
+  flow_15m:
+    model: "gpt-4o-mini"
+    provider: "openai"
+    temperature: 0.0
+    max_tokens: 500
+    fallback_model: "gpt-4o-mini"
+    daily_cost_limit_usd: 0.10
+
   codex:
     model: "gpt-4o-mini"
     provider: "openai"

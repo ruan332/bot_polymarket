@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import json
 from asyncio import to_thread
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 from uuid import uuid4
 
@@ -335,6 +335,84 @@ class MarketConnector:
             "bid_depth": round(sum(level["price"] * level["size"] for level in bids[:5]), 4),
             "ask_depth": round(sum(level["price"] * level["size"] for level in asks[:5]), 4),
         }
+
+    async def get_prices_history(
+        self,
+        token_id: str,
+        *,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        fidelity: int = 1,
+    ) -> list[dict[str, Any]]:
+        session = await self._client()
+        params: dict[str, Any] = {
+            "market": token_id,
+            "fidelity": fidelity,
+        }
+        if start_ts is not None:
+            params["startTs"] = start_ts
+        if end_ts is not None:
+            params["endTs"] = end_ts
+        try:
+            async with session.get(f"{self.context.settings.polymarket_clob_url}/prices-history", params=params) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        except Exception:
+            return []
+        return self._normalize_trade_history_payload(payload)
+
+    async def get_trade_history(
+        self,
+        token_id: str,
+        *,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        base_params: dict[str, Any] = {"limit": min(max(limit, 1), 500)}
+        if start_ts is not None:
+            base_params["startTs"] = start_ts
+        if end_ts is not None:
+            base_params["endTs"] = end_ts
+        for key in ("market", "token_id", "asset_id"):
+            candidates.append((f"{self.context.settings.polymarket_clob_url}/trades", {**base_params, key: token_id}))
+        data_api_url = getattr(self.context.settings, "polymarket_data_api_url", "https://data-api.polymarket.com")
+        for key in ("market", "token_id", "asset_id"):
+            candidates.append((f"{data_api_url}/trades", {**base_params, key: token_id}))
+
+        session = await self._client()
+        for url, params in candidates:
+            try:
+                async with session.get(url, params=params) as response:
+                    if response.status >= 400:
+                        continue
+                    payload = await response.json()
+            except Exception:
+                continue
+            trades = self._normalize_trade_history_payload(payload)
+            if trades:
+                return trades
+        return []
+
+    @staticmethod
+    def _normalize_trade_history_payload(payload: Any) -> list[dict[str, Any]]:
+        if payload is None:
+            return []
+        if isinstance(payload, dict):
+            if "data" in payload:
+                return MarketConnector._normalize_trade_history_payload(payload["data"])
+            if "trades" in payload:
+                return MarketConnector._normalize_trade_history_payload(payload["trades"])
+            return [payload]
+        if not isinstance(payload, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            normalized.append(item)
+        return normalized
 
     async def place_order(
         self,

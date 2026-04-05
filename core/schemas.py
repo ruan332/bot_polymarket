@@ -47,6 +47,7 @@ class SignalPayload(BaseModel):
     reasoning: str = ""
     features_summary: dict[str, Any] = Field(default_factory=dict)
     liquidity_summary: dict[str, Any] = Field(default_factory=dict)
+    flow_analysis: dict[str, Any] | None = None
     news_validation: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -168,6 +169,7 @@ class PairSignalPayload(BaseModel):
     primary_leg: PairLegPlan
     hedge_leg: PairLegPlan
     reasoning: str = ""
+    flow_analysis: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -292,6 +294,36 @@ class PairCycleStatePayload(BaseModel):
     predictor_state: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class FlowAnalysisPayload(BaseModel):
+    version: str = "v1"
+    event_type: Literal["flow.analysis"] = "flow.analysis"
+    flow_id: str
+    signal_id: str | None = None
+    trade_group_id: str | None = None
+    market_id: str
+    cycle_slug: str = ""
+    market_question: str = ""
+    asset_symbol: str = ""
+    asset_name: str = ""
+    crypto_tier: Literal["btc", "major", "small_cap"]
+    window_minutes: int = 15
+    dominant_direction: Literal["up", "down", "neutral"] = "neutral"
+    dominance_score: float = 0.0
+    confidence: float = 0.5
+    up_trade_count: int = 0
+    down_trade_count: int = 0
+    up_notional: float = 0.0
+    down_notional: float = 0.0
+    total_trades: int = 0
+    total_notional: float = 0.0
+    freshness_seconds: float = 0.0
+    source_used: Literal["ws", "data_api", "mixed"] = "ws"
+    sample_count: int = 0
+    last_trade_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class RiskEventPayload(BaseModel):

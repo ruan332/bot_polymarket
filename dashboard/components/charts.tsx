@@ -6,9 +6,11 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  ComposedChart,
   Line,
   LineChart,
   ResponsiveContainer,
+  ReferenceLine,
   Tooltip,
   XAxis,
   YAxis,
@@ -19,6 +21,17 @@ type PipelinePoint = { bucket: string; signals: number; decisions: number; order
 type CostPoint = { agent: string; cost_usd: number; calls: number };
 type BreakdownPoint = { label: string; count: number };
 type FunnelStagePoint = { label: string; count: number; detail?: string; accent?: string };
+type FlowPoint = {
+  created_at: string;
+  dominance_score: number;
+  confidence: number;
+  up_notional: number;
+  down_notional: number;
+  total_notional: number;
+  dominant_direction: "up" | "down" | "neutral";
+  asset_symbol?: string;
+  cycle_slug?: string;
+};
 
 const C = {
   green: "#00ff41",
@@ -209,6 +222,60 @@ export function DiscoveryFunnelChart({
           {operableCount > 0 ? `OPERABLE ${operableCount}` : "NOT_OPERABLE"}
         </div>
       </div>
+    </div>
+  );
+}
+
+export function FlowAnalysisChart({ data }: { data: FlowPoint[] }) {
+  return (
+    <div className="chart-wrap-xl">
+      <ResponsiveContainer width="100%" height="100%">
+        <ComposedChart data={data} margin={{ top: 8, right: 12, bottom: 4, left: 8 }}>
+          <CartesianGrid stroke={C.border} strokeDasharray="3 3" vertical={false} />
+          <XAxis
+            dataKey="created_at"
+            {...axisProps}
+            tickFormatter={(v: string) => new Date(v).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            minTickGap={30}
+          />
+          <YAxis
+            yAxisId="notional"
+            {...axisProps}
+            width={44}
+            tickFormatter={(v: number) => `$${v.toFixed(0)}`}
+          />
+          <YAxis
+            yAxisId="dominance"
+            orientation="right"
+            {...axisProps}
+            domain={[-1, 1]}
+            width={44}
+            tickFormatter={(v: number) => `${Math.round(v * 100)}%`}
+          />
+          <Tooltip
+            contentStyle={tipStyle}
+            labelFormatter={(v: string) => new Date(v).toLocaleString()}
+            formatter={(value: number, name: string) => {
+              if (name === "dominance_score" || name === "confidence") {
+                return [`${(value * 100).toFixed(1)}%`, name === "dominance_score" ? "Dominance" : "Confidence"];
+              }
+              return [`$${value.toFixed(2)}`, name === "up_notional" ? "Up Notional" : "Down Notional"];
+            }}
+          />
+          <ReferenceLine yAxisId="dominance" y={0} stroke={C.dim} strokeDasharray="3 3" />
+          <Bar yAxisId="notional" dataKey="up_notional" stackId="flow" fill={C.green} radius={[2, 2, 0, 0]} />
+          <Bar yAxisId="notional" dataKey="down_notional" stackId="flow" fill={C.red} radius={[2, 2, 0, 0]} />
+          <Line
+            yAxisId="dominance"
+            type="monotone"
+            dataKey="dominance_score"
+            stroke={C.cyan}
+            strokeWidth={2}
+            dot={false}
+          />
+          <Line yAxisId="dominance" type="monotone" dataKey="confidence" stroke={C.amber} strokeWidth={1.5} dot={false} />
+        </ComposedChart>
+      </ResponsiveContainer>
     </div>
   );
 }

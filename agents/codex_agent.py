@@ -48,14 +48,25 @@ class CodexAgent(BaseAgent):
         self.consumer = f"codex-{uuid4().hex[:8]}"
 
     async def tick(self) -> None:
+        await self.context.bus.ensure_group("signals:flow_analyzed", "codex_reviewers")
         await self.context.bus.ensure_group("signals:validated", "codex_reviewers")
         events = await self.context.bus.read_group(
-            "signals:validated",
+            "signals:flow_analyzed",
             "codex_reviewers",
             self.consumer,
             block_ms=250,
             count=1,
         )
+        source_stream = "signals:flow_analyzed"
+        if not events:
+            events = await self.context.bus.read_group(
+                "signals:validated",
+                "codex_reviewers",
+                self.consumer,
+                block_ms=1,
+                count=1,
+            )
+            source_stream = "signals:validated"
         approved_count = 0
         rejected_count = 0
         llm_used_count = 0
@@ -104,7 +115,7 @@ class CodexAgent(BaseAgent):
                         },
                     )
             finally:
-                await self.context.bus.ack("signals:validated", "codex_reviewers", event_id)
+                await self.context.bus.ack(source_stream, "codex_reviewers", event_id)
         if events:
             await self.context.repository.record_pipeline_telemetry(
                 str(uuid4()),

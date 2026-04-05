@@ -198,6 +198,7 @@ class AppSettings(BaseSettings):
     startup_retry_delay_seconds: float = 2.0
     polymarket_gamma_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_url: str = "https://clob.polymarket.com"
+    polymarket_data_api_url: str = "https://data-api.polymarket.com"
     polymarket_market_ws: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     news_provider_primary: Literal["marketaux", "alphavantage"] = "marketaux"
     news_provider_fallback: Literal["marketaux", "alphavantage"] = "alphavantage"

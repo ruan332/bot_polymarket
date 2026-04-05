@@ -273,6 +273,23 @@ async def analysis_cutoffs() -> list[dict[str, object]]:
     return await get_context().repository.get_analysis_cutoffs()
 
 
+@app.get("/analysis/flow/recent")
+async def recent_flow_analyses(
+    limit: int = 48,
+    asset: str | None = None,
+    market_id: str | None = None,
+    strategy: str | None = None,
+    cutoff_name: str | None = None,
+) -> list[dict[str, object]]:
+    return await get_context().repository.get_recent_flow_analyses(
+        limit=limit,
+        asset=asset,
+        market_id=market_id,
+        strategy=strategy,
+        cutoff_name=cutoff_name,
+    )
+
+
 @app.post("/analysis/cutoffs/{cutoff_name}")
 async def create_analysis_cutoff(cutoff_name: str) -> dict[str, object]:
     result = await get_context().repository.create_analysis_cutoff(

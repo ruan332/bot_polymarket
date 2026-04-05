@@ -11,6 +11,7 @@ from core.config import AppSettings
 from core.schemas import (
     AgentHeartbeat,
     EquitySnapshotPoint,
+    FlowAnalysisPayload,
     MarketSnapshotPayload,
     NewsValidationPayload,
     PairCycleStatePayload,
@@ -187,6 +188,34 @@ CREATE TABLE IF NOT EXISTS pair_cycles (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS flow_analyses (
+    id UUID PRIMARY KEY,
+    signal_id UUID,
+    trade_group_id TEXT NOT NULL DEFAULT '',
+    market_id TEXT NOT NULL,
+    cycle_slug TEXT NOT NULL DEFAULT '',
+    market_question TEXT NOT NULL DEFAULT '',
+    asset_symbol TEXT NOT NULL DEFAULT '',
+    asset_name TEXT NOT NULL DEFAULT '',
+    crypto_tier TEXT NOT NULL DEFAULT '',
+    window_minutes INTEGER NOT NULL DEFAULT 15,
+    dominant_direction TEXT NOT NULL DEFAULT 'neutral',
+    dominance_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+    up_trade_count INTEGER NOT NULL DEFAULT 0,
+    down_trade_count INTEGER NOT NULL DEFAULT 0,
+    up_notional DOUBLE PRECISION NOT NULL DEFAULT 0,
+    down_notional DOUBLE PRECISION NOT NULL DEFAULT 0,
+    total_trades INTEGER NOT NULL DEFAULT 0,
+    total_notional DOUBLE PRECISION NOT NULL DEFAULT 0,
+    freshness_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
+    source_used TEXT NOT NULL DEFAULT 'ws',
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    last_trade_at TIMESTAMPTZ,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS pending_pair_orders (
     pending_order_id UUID PRIMARY KEY,
     trade_group_id TEXT NOT NULL,
@@ -288,6 +317,12 @@ ON market_snapshots (market_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_pair_cycles_cycle_slug
 ON pair_cycles (cycle_slug, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_flow_analyses_market_created_at
+ON flow_analyses (market_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_flow_analyses_asset_created_at
+ON flow_analyses (asset_symbol, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_pending_pair_orders_status
 ON pending_pair_orders (status, created_at DESC);
@@ -721,6 +756,123 @@ class TradingRepository:
             strategy=strategy,
             cutoff_name=cutoff_name,
         )
+
+    async def record_flow_analysis(self, analysis: FlowAnalysisPayload) -> None:
+        payload = analysis.model_dump(mode="json")
+        await self.db.execute(
+            """
+            INSERT INTO flow_analyses (
+                id,
+                signal_id,
+                trade_group_id,
+                market_id,
+                cycle_slug,
+                market_question,
+                asset_symbol,
+                asset_name,
+                crypto_tier,
+                window_minutes,
+                dominant_direction,
+                dominance_score,
+                confidence,
+                up_trade_count,
+                down_trade_count,
+                up_notional,
+                down_notional,
+                total_trades,
+                total_notional,
+                freshness_seconds,
+                source_used,
+                sample_count,
+                last_trade_at,
+                payload,
+                created_at
+            )
+            VALUES (
+                $1::uuid,
+                $2::uuid,
+                $3,
+                $4,
+                $5,
+                $6,
+                $7,
+                $8,
+                $9,
+                $10,
+                $11,
+                $12,
+                $13,
+                $14,
+                $15,
+                $16,
+                $17,
+                $18,
+                $19,
+                $20,
+                $21,
+                $22,
+                $23,
+                $24::jsonb,
+                $25
+            )
+            """,
+            analysis.flow_id,
+            analysis.signal_id,
+            analysis.trade_group_id,
+            analysis.market_id,
+            analysis.cycle_slug,
+            analysis.market_question,
+            analysis.asset_symbol,
+            analysis.asset_name,
+            analysis.crypto_tier,
+            analysis.window_minutes,
+            analysis.dominant_direction,
+            analysis.dominance_score,
+            analysis.confidence,
+            analysis.up_trade_count,
+            analysis.down_trade_count,
+            analysis.up_notional,
+            analysis.down_notional,
+            analysis.total_trades,
+            analysis.total_notional,
+            analysis.freshness_seconds,
+            analysis.source_used,
+            analysis.sample_count,
+            analysis.last_trade_at,
+            _as_json(payload),
+            analysis.updated_at,
+        )
+
+    async def get_recent_flow_analyses(
+        self,
+        limit: int = 48,
+        *,
+        asset: str | None = None,
+        market_id: str | None = None,
+        strategy: str | None = None,
+        cutoff_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        args: list[Any] = []
+        if asset:
+            args.append(asset)
+            clauses.append(f"asset_symbol = ${len(args)}")
+        if market_id:
+            args.append(market_id)
+            clauses.append(f"market_id = ${len(args)}")
+        args.append(limit)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = await self.db.fetch(
+            f"""
+            SELECT *
+            FROM flow_analyses
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ${len(args)}
+            """,
+            *args,
+        )
+        return [self._decode_flow_record(row) for row in rows]
 
     async def get_recent_decisions(
         self,
@@ -2517,6 +2669,37 @@ class TradingRepository:
                 payload.setdefault("reason", reason)
         payload["created_at"] = row["created_at"]
         return payload
+
+    @classmethod
+    def _decode_flow_record(cls, row: asyncpg.Record) -> dict[str, Any]:
+        payload = cls._json_value(row["payload"])
+        return {
+            "flow_id": row["id"],
+            "signal_id": row["signal_id"],
+            "trade_group_id": row["trade_group_id"],
+            "market_id": row["market_id"],
+            "cycle_slug": row["cycle_slug"],
+            "market_question": row["market_question"],
+            "asset_symbol": row["asset_symbol"],
+            "asset_name": row["asset_name"],
+            "crypto_tier": row["crypto_tier"],
+            "window_minutes": row["window_minutes"],
+            "dominant_direction": row["dominant_direction"],
+            "dominance_score": float(row["dominance_score"] or 0.0),
+            "confidence": float(row["confidence"] or 0.0),
+            "up_trade_count": int(row["up_trade_count"] or 0),
+            "down_trade_count": int(row["down_trade_count"] or 0),
+            "up_notional": float(row["up_notional"] or 0.0),
+            "down_notional": float(row["down_notional"] or 0.0),
+            "total_trades": int(row["total_trades"] or 0),
+            "total_notional": float(row["total_notional"] or 0.0),
+            "freshness_seconds": float(row["freshness_seconds"] or 0.0),
+            "source_used": row["source_used"],
+            "sample_count": int(row["sample_count"] or 0),
+            "last_trade_at": row["last_trade_at"],
+            "payload": payload,
+            "created_at": row["created_at"],
+        }
 
     @classmethod
     def _decode_pipeline_record(cls, row: asyncpg.Record) -> dict[str, Any]:

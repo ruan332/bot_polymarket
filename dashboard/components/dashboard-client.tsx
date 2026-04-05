@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { FlowAnalysisChart } from "./charts";
 
 type AgentStatus = {
   running: boolean;
@@ -75,6 +76,35 @@ type RiskEvent = {
   reason: string;
   agent: string;
   created_at: string;
+};
+
+type FlowAnalysis = {
+  flow_id: string;
+  signal_id?: string | null;
+  trade_group_id?: string | null;
+  market_id: string;
+  cycle_slug?: string;
+  market_question?: string;
+  asset_symbol: string;
+  asset_name?: string;
+  crypto_tier?: string;
+  window_minutes?: number;
+  dominant_direction: "up" | "down" | "neutral";
+  dominance_score: number;
+  confidence: number;
+  up_trade_count: number;
+  down_trade_count: number;
+  up_notional: number;
+  down_notional: number;
+  total_trades: number;
+  total_notional: number;
+  freshness_seconds: number;
+  source_used?: "ws" | "data_api" | "mixed";
+  sample_count?: number;
+  last_trade_at?: string | null;
+  updated_at?: string | null;
+  created_at?: string;
+  metadata?: Record<string, unknown>;
 };
 
 type PortfolioSummary = {
@@ -169,6 +199,7 @@ type DashboardState = {
   orders: Order[];
   positions: OpenPosition[];
   riskEvents: RiskEvent[];
+  flowAnalyses: FlowAnalysis[];
 };
 
 type SignalMetricsFilter = "all" | "pair_15m" | "momentum_15m";
@@ -213,6 +244,10 @@ function signalDirection(signal: Signal) {
   return signal.direction ?? "-";
 }
 
+function flowDirectionLabel(flow: FlowAnalysis) {
+  return flow.dominant_direction.toUpperCase();
+}
+
 function toneForSignal(signal: Signal): LogTone {
   const edge = numberOr(signal.edge);
   const confidence = numberOr(signal.confidence);
@@ -238,6 +273,12 @@ function toneForRiskEvent(event: RiskEvent): LogTone {
   if (reason.includes("blocked") || reason.includes("exceeds") || reason.includes("fail") || reason.includes("rejected")) {
     return "negative";
   }
+  return "warning";
+}
+
+function toneForFlow(flow: FlowAnalysis): LogTone {
+  if (flow.dominant_direction === "up" && flow.dominance_score >= 0.08) return "positive";
+  if (flow.dominant_direction === "down" && flow.dominance_score <= -0.08) return "negative";
   return "warning";
 }
 
@@ -435,6 +476,7 @@ export function DashboardClient() {
     orders: [],
     positions: [],
     riskEvents: [],
+    flowAnalyses: [],
   });
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState("booting");
@@ -470,6 +512,7 @@ export function DashboardClient() {
         { key: "decisions", path: "/decisions/recent", fallback: current.decisions },
         { key: "orders", path: "/orders/recent", fallback: current.orders },
         { key: "riskEvents", path: "/risk-events/recent", fallback: current.riskEvents },
+        { key: "flowAnalyses", path: "/analysis/flow/recent?limit=32", fallback: current.flowAnalyses },
       ] as const;
 
       const results = await Promise.allSettled(requests.map((request) => getJson(request.path)));
@@ -501,6 +544,7 @@ export function DashboardClient() {
           orders: (next.get("orders") ?? []) as Order[],
           positions: (next.get("positions") ?? []) as OpenPosition[],
           riskEvents: (next.get("riskEvents") ?? []) as RiskEvent[],
+          flowAnalyses: (next.get("flowAnalyses") ?? []) as FlowAnalysis[],
         });
         setError(failures.length > 0 ? `Failed: ${failures.join(", ")}` : null);
         setLastUpdated(new Date().toLocaleTimeString());
@@ -533,6 +577,18 @@ export function DashboardClient() {
   const openPositions = [...state.positions].sort((a, b) => numberOr(b.unrealized_pnl) - numberOr(a.unrealized_pnl));
   const positivePositions = openPositions.filter((position) => numberOr(position.unrealized_pnl) > 0).length;
   const negativePositions = openPositions.filter((position) => numberOr(position.unrealized_pnl) < 0).length;
+  const flowAnalyses = [...state.flowAnalyses].sort((a, b) =>
+    (b.updated_at ?? b.created_at ?? b.last_trade_at ?? "").localeCompare(a.updated_at ?? a.created_at ?? a.last_trade_at ?? ""),
+  );
+  const latestFlow = flowAnalyses[0] ?? null;
+  const flowUpNotional = flowAnalyses.reduce((sum, flow) => sum + numberOr(flow.up_notional), 0);
+  const flowDownNotional = flowAnalyses.reduce((sum, flow) => sum + numberOr(flow.down_notional), 0);
+  const flowDominanceAvg =
+    flowAnalyses.length > 0 ? flowAnalyses.reduce((sum, flow) => sum + numberOr(flow.dominance_score), 0) / flowAnalyses.length : 0;
+  const flowChartData = flowAnalyses.slice(0, 24).reverse().map((flow) => ({
+    ...flow,
+    created_at: flow.updated_at ?? flow.created_at ?? flow.last_trade_at ?? new Date().toISOString(),
+  }));
   const liveOrders = numberOr(summary?.live_orders);
   const paperOrders = numberOr(summary?.paper_orders);
   const liveSubmittedOrders = numberOr(summary?.live_submitted_orders);
@@ -593,6 +649,92 @@ export function DashboardClient() {
         <section className="grid gap-4 lg:grid-cols-2">
           <StrategyGoalCard goal={pairGoal} />
           <StrategyGoalCard goal={momentumGoal} />
+        </section>
+
+        <section className="border border-poly-border bg-poly-black p-4">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.25em] text-poly-dim">FLOW_15M_SIGNAL</div>
+              <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.2em] text-poly-muted">
+                pressure balance, trade imbalance, and confidence overlay for the next review pass
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-right font-mono text-[9px] uppercase text-poly-dim sm:min-w-[340px] sm:grid-cols-4">
+              <div className="border border-poly-border px-3 py-2">
+                <div>Latest</div>
+                <div className={`text-sm normal-case ${latestFlow ? logToneClass(toneForFlow(latestFlow)).text : "text-poly-cyan"}`}>
+                  {latestFlow ? flowDirectionLabel(latestFlow) : "N/A"}
+                </div>
+              </div>
+              <div className="border border-poly-border px-3 py-2">
+                <div>Dominance</div>
+                <div className="text-sm normal-case text-poly-cyan">{asPercent(flowDominanceAvg)}</div>
+              </div>
+              <div className="border border-poly-border px-3 py-2">
+                <div>Up / Down</div>
+                <div className="text-sm normal-case text-poly-cyan">
+                  {asCurrency(flowUpNotional)} / {asCurrency(flowDownNotional)}
+                </div>
+              </div>
+              <div className="border border-poly-border px-3 py-2">
+                <div>Confidence</div>
+                <div className="text-sm normal-case text-poly-cyan">{latestFlow ? asPercent(latestFlow.confidence) : "-"}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 xl:grid-cols-[1.35fr_0.85fr]">
+            <FlowAnalysisChart data={flowChartData} />
+            <div className="grid gap-3">
+              {latestFlow ? (
+                <>
+                  <div className="border border-poly-border bg-poly-surface-dim/20 p-3">
+                    <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-poly-dim">Current Bias</div>
+                    <div className={`mt-1 font-mono text-xl font-bold ${logToneClass(toneForFlow(latestFlow)).text}`}>
+                      {flowDirectionLabel(latestFlow)}
+                    </div>
+                    <div className="mt-1 font-mono text-[9px] text-poly-muted">
+                      {latestFlow.asset_symbol}
+                      {latestFlow.cycle_slug ? ` | ${latestFlow.cycle_slug}` : ""}
+                    </div>
+                  </div>
+                  <div className="border border-poly-border bg-poly-surface-dim/20 p-3">
+                    <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-poly-dim">Window Stats</div>
+                    <div className="mt-2 grid grid-cols-2 gap-2 font-mono text-[9px]">
+                      <div className="border border-poly-border px-2 py-2">
+                        <div className="text-poly-dim uppercase">Trades</div>
+                        <div className="text-sm text-poly-cyan">{latestFlow.total_trades}</div>
+                      </div>
+                      <div className="border border-poly-border px-2 py-2">
+                        <div className="text-poly-dim uppercase">Freshness</div>
+                        <div className="text-sm text-poly-cyan">{Math.round(latestFlow.freshness_seconds)}s</div>
+                      </div>
+                      <div className="border border-poly-border px-2 py-2">
+                        <div className="text-poly-dim uppercase">Up Count</div>
+                        <div className="text-sm text-poly-green">{latestFlow.up_trade_count}</div>
+                      </div>
+                      <div className="border border-poly-border px-2 py-2">
+                        <div className="text-poly-dim uppercase">Down Count</div>
+                        <div className="text-sm text-poly-red">{latestFlow.down_trade_count}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="border border-poly-border bg-poly-surface-dim/20 p-3 font-mono text-[9px] text-poly-dim">
+                    <div className="uppercase tracking-[0.2em]">Source</div>
+                    <div className="mt-1 text-poly-muted">
+                      {latestFlow.source_used ?? "ws"}
+                      {latestFlow.sample_count ? ` | samples ${latestFlow.sample_count}` : ""}
+                      {latestFlow.metadata?.["aligned_with_signal"] === true ? " | aligned" : ""}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="border border-dashed border-poly-border p-4 font-mono text-[10px] text-poly-dim">
+                  waiting for flow analysis snapshots
+                </div>
+              )}
+            </div>
+          </div>
         </section>
 
         <section className="grid gap-4 xl:grid-cols-[1.12fr_1fr_1fr]">

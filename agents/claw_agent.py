@@ -266,6 +266,15 @@ class ClawAgent(BaseAgent):
             size=size,
             price_limit=price_limit,
             notional_usd=round(size * signal.price, 4),
+            entry_notional_target_usd=(
+                guard.entry_notional_target_usd if signal.strategy_id == "momentum_15m" and guard.entry_notional_target_usd > 0 else None
+            ),
+            entry_notional_actual_usd=round(size * price_limit, 4),
+            take_profit_target_usd=(
+                float(getattr(self.context.settings, "momentum_take_profit_usd", 1.0) or 1.0)
+                if signal.strategy_id == "momentum_15m"
+                else None
+            ),
             realized_pnl_usd=0.0,
             execution_mode=execution_mode,  # type: ignore[arg-type]
             status=str(order_result["status"]),
@@ -652,6 +661,9 @@ class ClawAgent(BaseAgent):
                 size=exit_size,
                 price_limit=float(position["current_price"]),
                 notional_usd=round(exit_size * float(position["current_price"]), 4),
+                entry_notional_target_usd=position.get("entry_notional_target_usd"),
+                entry_notional_actual_usd=position.get("entry_notional_actual_usd"),
+                take_profit_target_usd=position.get("take_profit_target_usd"),
                 realized_pnl_usd=realized,
                 exit_reason=str(decision["reason"]),
                 execution_mode="deterministic",
@@ -709,6 +721,14 @@ class ClawAgent(BaseAgent):
         scaled_out_count = int(position.get("scaled_out_count") or 0)
         latest_spread_bps = float(position.get("latest_spread_bps") or 0.0)
         holding_minutes = self._holding_minutes(position.get("opened_at"))
+        strategy_id = str(position.get("strategy_id") or "")
+
+        if strategy_id == "momentum_15m":
+            take_profit_target_usd = float(getattr(self.context.settings, "momentum_take_profit_usd", 1.0) or 1.0)
+            if take_profit_target_usd > 0:
+                pnl_bruto = (current_price - average_price) * size
+                if pnl_bruto >= take_profit_target_usd:
+                    return {"action": "close", "reason": "take_profit_usd", "size": size}
 
         if take_profit and current_price >= take_profit:
             return {"action": "close", "reason": "take_profit", "size": size}

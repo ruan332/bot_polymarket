@@ -10,6 +10,11 @@ type Signal = {
   signal_id: string;
   asset_symbol: string;
   strategy_id: string;
+  market_probability?: number;
+  model_probability?: number;
+  expected_slippage_bps?: number;
+  expected_holding_minutes?: number;
+  volume_24h?: number;
   regime?: string;
   edge?: number;
   confidence?: number;
@@ -166,6 +171,8 @@ type DashboardState = {
   riskEvents: RiskEvent[];
 };
 
+type SignalMetricsFilter = "all" | "pair_15m" | "momentum_15m";
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
 
 async function getJson<T>(path: string): Promise<T> {
@@ -288,6 +295,32 @@ function signalLog(signal: Signal): LogLine {
   };
 }
 
+function signalMetricsLog(signal: Signal): LogLine {
+  const edge = numberOr(signal.edge);
+  const confidence = numberOr(signal.confidence);
+  const modelProbability = numberOr(signal.model_probability);
+  const marketProbability = numberOr(signal.market_probability);
+  const slippageBps = numberOr(signal.expected_slippage_bps);
+  const holdingMinutes = numberOr(signal.expected_holding_minutes);
+  const volume24h = numberOr(signal.volume_24h);
+  return {
+    time: signal.created_at,
+    tone: toneForSignal(signal),
+    tag: "SIG",
+    title: `${signal.asset_symbol} ${signalDirection(signal)} ${labelStrategy(signal.strategy_id)}`,
+    detail: `edge ${edge.toFixed(3)} | conf ${asPercent(confidence)} | model ${asPercent(modelProbability)} | market ${asPercent(marketProbability)}`,
+    meta: `slip ${slippageBps.toFixed(0)}bps | hold ${holdingMinutes.toFixed(0)}m | vol ${asCurrency(volume24h)}${signal.regime ? ` | regime ${signal.regime}` : ""}`,
+  };
+}
+
+function buildSignalMetricsLog(signals: Signal[], filter: SignalMetricsFilter): LogLine[] {
+  return signals
+    .filter((signal) => (filter === "all" ? true : signal.strategy_id === filter))
+    .slice(0, 8)
+    .map(signalMetricsLog)
+    .sort((a, b) => b.time.localeCompare(a.time));
+}
+
 function buildStrategyLog(
   strategy: "pair_15m" | "momentum_15m",
   signals: Signal[],
@@ -406,6 +439,7 @@ export function DashboardClient() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState("booting");
   const [clock, setClock] = useState("--:--:--");
+  const [signalMetricsFilter, setSignalMetricsFilter] = useState<SignalMetricsFilter>("all");
   const stateRef = useRef(state);
 
   useEffect(() => {
@@ -495,6 +529,7 @@ export function DashboardClient() {
   const momentumGoal = evaluateStrategyGoals("momentum_15m", state.momentumPerformance);
   const pairLog = buildStrategyLog("pair_15m", state.signals, state.decisions, state.orders, state.riskEvents);
   const momentumLog = buildStrategyLog("momentum_15m", state.signals, state.decisions, state.orders, state.riskEvents);
+  const signalMetrics = buildSignalMetricsLog(state.signals, signalMetricsFilter);
   const openPositions = [...state.positions].sort((a, b) => numberOr(b.unrealized_pnl) - numberOr(a.unrealized_pnl));
   const positivePositions = openPositions.filter((position) => numberOr(position.unrealized_pnl) > 0).length;
   const negativePositions = openPositions.filter((position) => numberOr(position.unrealized_pnl) < 0).length;
@@ -568,6 +603,34 @@ export function DashboardClient() {
           />
           <LogPanel title="Pair_15M_Log" items={pairLog} />
           <LogPanel title="Momentum_15M_Log" items={momentumLog} />
+        </section>
+
+        <section>
+          <div className="mb-2 flex flex-wrap items-center gap-2 font-mono text-[9px] uppercase text-poly-dim">
+            <span className="tracking-[0.18em]">Signals Metrics Filter</span>
+            <button
+              type="button"
+              onClick={() => setSignalMetricsFilter("all")}
+              className={`border px-2 py-1 ${signalMetricsFilter === "all" ? "border-poly-cyan text-poly-cyan" : "border-poly-border text-poly-dim"}`}
+            >
+              all
+            </button>
+            <button
+              type="button"
+              onClick={() => setSignalMetricsFilter("pair_15m")}
+              className={`border px-2 py-1 ${signalMetricsFilter === "pair_15m" ? "border-poly-cyan text-poly-cyan" : "border-poly-border text-poly-dim"}`}
+            >
+              pair_15m
+            </button>
+            <button
+              type="button"
+              onClick={() => setSignalMetricsFilter("momentum_15m")}
+              className={`border px-2 py-1 ${signalMetricsFilter === "momentum_15m" ? "border-poly-cyan text-poly-cyan" : "border-poly-border text-poly-dim"}`}
+            >
+              momentum_15m
+            </button>
+          </div>
+          <LogPanel title={`Signals_Metrics_Log_${signalMetricsFilter.toUpperCase()}`} items={signalMetrics} />
         </section>
 
         <section className="border border-poly-border bg-poly-black p-4 font-mono text-[10px] text-poly-dim">

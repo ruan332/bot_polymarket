@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from math import ceil
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ class ExecutionGuard:
     price_limit: float
     notional_usd: float
     risk_fraction: float
+    entry_notional_target_usd: float = 0.0
 
 
 @dataclass
@@ -182,7 +184,14 @@ class RiskEngine:
         )
         if signal.market_kind == "indirect_crypto":
             value_to_bet *= self.crypto.indirect_max_position_scale
-        size = review.kelly_size or max(0, int(value_to_bet / max(signal.price, 1e-6)))
+        target_entry_notional = 0.0
+        momentum_sizing_mode = str(getattr(self.context.settings, "momentum_sizing_mode", "fixed_notional") or "fixed_notional")
+        if signal.strategy_id == "momentum_15m" and momentum_sizing_mode == "fixed_notional":
+            target_entry_notional = float(getattr(self.context.settings, "momentum_entry_notional_usd", 1.0) or 1.0)
+            target_entry_notional = max(target_entry_notional, 0.0)
+            size = max(0, ceil(target_entry_notional / max(signal.price, 1e-6)))
+        else:
+            size = review.kelly_size or max(0, int(value_to_bet / max(signal.price, 1e-6)))
         if size <= 0:
             raise RiskBlockedError("kelly sizing returned zero")
 
@@ -252,6 +261,7 @@ class RiskEngine:
             price_limit=price_limit,
             notional_usd=notional,
             risk_fraction=round(risk_fraction, 4),
+            entry_notional_target_usd=target_entry_notional,
         )
 
     async def build_pair_execution_guard(self, review: PairReviewPayload) -> PairExecutionGuard:

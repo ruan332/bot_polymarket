@@ -123,6 +123,9 @@ class PaperOrderPayload(BaseModel):
     size: int
     price_limit: float
     notional_usd: float
+    entry_notional_target_usd: float | None = None
+    entry_notional_actual_usd: float | None = None
+    take_profit_target_usd: float | None = None
     realized_pnl_usd: float = 0.0
     exit_reason: str = ""
     execution_mode: Literal["deterministic", "llm", "llm_fallback"] = "deterministic"

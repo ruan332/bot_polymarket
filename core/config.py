@@ -233,6 +233,9 @@ class AppSettings(BaseSettings):
     momentum_cooldown_minutes: int = 20
     momentum_max_positions: int = 2
     momentum_wait_for_next_market_start: bool = False
+    momentum_entry_notional_usd: float = 1.0
+    momentum_take_profit_usd: float = 1.0
+    momentum_sizing_mode: Literal["fixed_notional", "kelly"] = "fixed_notional"
 
     @field_validator("copytrade_markets", mode="before")
     @classmethod
@@ -277,6 +280,8 @@ class AppSettings(BaseSettings):
         "momentum_max_positions",
         "copytrade_signal_cooldown_minutes",
         "copytrade_min_history_points",
+        "momentum_entry_notional_usd",
+        "momentum_take_profit_usd",
     )
     @classmethod
     def validate_positive_momentum_settings(cls, value: int | float) -> int | float:

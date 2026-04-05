@@ -179,6 +179,9 @@ def test_app_settings_momentum_defaults(monkeypatch: pytest.MonkeyPatch) -> None
         "MOMENTUM_COOLDOWN_MINUTES",
         "MOMENTUM_MAX_POSITIONS",
         "MOMENTUM_WAIT_FOR_NEXT_MARKET_START",
+        "MOMENTUM_ENTRY_NOTIONAL_USD",
+        "MOMENTUM_TAKE_PROFIT_USD",
+        "MOMENTUM_SIZING_MODE",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -194,6 +197,9 @@ def test_app_settings_momentum_defaults(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.momentum_cooldown_minutes == 20
     assert settings.momentum_max_positions == 2
     assert settings.momentum_wait_for_next_market_start is False
+    assert settings.momentum_entry_notional_usd == pytest.approx(1.0)
+    assert settings.momentum_take_profit_usd == pytest.approx(1.0)
+    assert settings.momentum_sizing_mode == "fixed_notional"
 
 
 def test_app_settings_copytrade_env_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -225,6 +231,9 @@ def test_app_settings_momentum_env_parses_csv(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("MOMENTUM_COOLDOWN_MINUTES", "30")
     monkeypatch.setenv("MOMENTUM_MAX_POSITIONS", "3")
     monkeypatch.setenv("MOMENTUM_WAIT_FOR_NEXT_MARKET_START", "true")
+    monkeypatch.setenv("MOMENTUM_ENTRY_NOTIONAL_USD", "1.25")
+    monkeypatch.setenv("MOMENTUM_TAKE_PROFIT_USD", "1.75")
+    monkeypatch.setenv("MOMENTUM_SIZING_MODE", "kelly")
 
     settings = AppSettings(_env_file=None)
 
@@ -238,6 +247,9 @@ def test_app_settings_momentum_env_parses_csv(monkeypatch: pytest.MonkeyPatch) -
     assert settings.momentum_cooldown_minutes == 30
     assert settings.momentum_max_positions == 3
     assert settings.momentum_wait_for_next_market_start is True
+    assert settings.momentum_entry_notional_usd == pytest.approx(1.25)
+    assert settings.momentum_take_profit_usd == pytest.approx(1.75)
+    assert settings.momentum_sizing_mode == "kelly"
 
 
 def test_app_settings_live_bootstrap_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -14,7 +14,7 @@ from agents.codex_agent import CodexAgent
 from agents.news_validator_agent import NewsValidatorAgent
 from api import main as api_main
 from core.config import infer_provider_from_model, load_agents_config, load_crypto_config, load_risk_config
-from core.schemas import MarketSnapshotPayload, ModelResponse, PortfolioSummary
+from core.schemas import MarketSnapshotPayload, ModelResponse, PortfolioSummary, ReviewPayload, SignalPayload
 
 
 class FakeBus:
@@ -629,6 +629,9 @@ class FakeContext:
             momentum_cooldown_minutes=20,
             momentum_max_positions=2,
             momentum_wait_for_next_market_start=False,
+            momentum_entry_notional_usd=1.0,
+            momentum_take_profit_usd=1.0,
+            momentum_sizing_mode="fixed_notional",
         )
         self.agents_config = load_agents_config()
         self.risk_config = load_risk_config()
@@ -1064,6 +1067,94 @@ async def test_claw_exit_cycle_records_uuid_signal_id(monkeypatch) -> None:
     assert context.repository.orders[0]["action"] == "close"
     assert context.repository.orders[0]["exit_reason"] == "take_profit"
     UUID(context.repository.orders[0]["signal_id"])
+
+
+def test_claw_exit_decision_uses_take_profit_usd_for_momentum() -> None:
+    context = FakeContext()
+    claw = ClawAgent(context)
+    position = {
+        "strategy_id": "momentum_15m",
+        "size": 2,
+        "average_price": 0.40,
+        "current_price": 0.95,
+        "take_profit_price": 0.99,
+        "stop_loss_price": 0.2,
+        "time_stop_minutes": 90,
+        "opened_at": "2026-03-21T10:00:00Z",
+        "scaled_out_count": 0,
+        "latest_spread_bps": 20.0,
+    }
+
+    decision = claw._exit_decision(position)
+
+    assert decision is not None
+    assert decision["reason"] == "take_profit_usd"
+    assert decision["action"] == "close"
+    assert decision["size"] == 2
+
+
+@pytest.mark.asyncio
+async def test_claw_execute_records_momentum_entry_and_take_profit_targets(monkeypatch) -> None:
+    context = FakeContext()
+    claw = ClawAgent(context)
+    signal = SignalPayload(
+        signal_id="sig-momentum-1",
+        market_id="market-momentum-1",
+        token_id="token-yes-1",
+        market_question="Will BTC move up?",
+        direction="YES",
+        edge=0.30,
+        confidence=0.85,
+        price=0.63,
+        price_yes=0.63,
+        price_no=0.37,
+        volume_24h=50000.0,
+        asset_symbol="BTC",
+        asset_name="Bitcoin",
+        crypto_tier="btc",
+        market_kind="direct_coin",
+        question_type="direction",
+        strategy_id="momentum_15m",
+        strategy_version="v1",
+        model_probability=0.82,
+        market_probability=0.63,
+        regime="trend",
+        expected_slippage_bps=50.0,
+        expected_holding_minutes=45,
+        thesis_tags=["btc", "momentum_15m"],
+        thesis_hash="btc-momentum-1",
+        reasoning="test",
+        features_summary={"momentum_short": 0.04},
+        liquidity_summary={"spread_bps": 40.0, "ask_depth": 500.0},
+    )
+    review = ReviewPayload(
+        signal_id=signal.signal_id,
+        approved=True,
+        asset_symbol=signal.asset_symbol,
+        crypto_tier=signal.crypto_tier,
+        corrected_price_limit=0.635,
+        kelly_size=0,
+        risk_fraction=0.1,
+        take_profit_price=0.70,
+        stop_loss_price=0.58,
+        time_stop_minutes=45,
+        notes="ok",
+        original_signal=signal,
+    )
+
+    async def fake_place_order(**kwargs):
+        return {"status": "simulated", **kwargs}
+
+    monkeypatch.setattr(claw.connector, "place_order", fake_place_order)
+
+    executed, _ = await claw.execute(review)
+
+    assert executed is True
+    order = context.repository.orders[-1]
+    assert order["strategy_id"] == "momentum_15m"
+    assert order["entry_notional_target_usd"] == pytest.approx(1.0)
+    assert order["entry_notional_actual_usd"] == pytest.approx(2 * 0.635)
+    assert order["take_profit_target_usd"] == pytest.approx(1.0)
 
 
 @pytest.mark.asyncio

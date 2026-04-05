@@ -53,6 +53,9 @@ def make_context(
             momentum_max_positions=2,
             momentum_min_edge=0.085,
             momentum_min_volume_24h=500.0,
+            momentum_entry_notional_usd=1.0,
+            momentum_take_profit_usd=1.0,
+            momentum_sizing_mode="fixed_notional",
         ),
         risk_config=SimpleNamespace(
             min_edge=0.19,
@@ -386,7 +389,69 @@ async def test_build_execution_guard_allows_pair_and_momentum_coexistence_same_m
 
     guard = await risk.build_execution_guard(make_review(incoming_signal))
 
+    assert guard.notional_usd == pytest.approx(1.2)
+    assert guard.size == 3
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_uses_fixed_momentum_entry_notional_with_ceiling_rounding() -> None:
+    signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.40,
+        confidence=0.80,
+        price=0.63,
+        volume_24h=100000.0,
+    )
+    signal.strategy_id = "momentum_15m"
+    risk = RiskEngine(make_context())
+
+    guard = await risk.build_execution_guard(make_review(signal))
+
+    assert guard.size == 2
+    assert guard.notional_usd == pytest.approx(1.26)
+    assert guard.entry_notional_target_usd == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_uses_kelly_when_momentum_sizing_mode_is_kelly() -> None:
+    context = make_context()
+    context.settings.momentum_sizing_mode = "kelly"
+    signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.40,
+        confidence=0.80,
+        price=0.40,
+        volume_24h=100000.0,
+    )
+    signal.strategy_id = "momentum_15m"
+    risk = RiskEngine(context)
+
+    guard = await risk.build_execution_guard(make_review(signal))
+
+    assert guard.size == 250
     assert guard.notional_usd == pytest.approx(100.0)
+    assert guard.entry_notional_target_usd == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_fixed_momentum_respects_max_single_position_guardrail() -> None:
+    context = make_context()
+    context.risk_config.max_single_position_usd = 1.10
+    signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.40,
+        confidence=0.80,
+        price=0.63,
+        volume_24h=100000.0,
+    )
+    signal.strategy_id = "momentum_15m"
+    risk = RiskEngine(context)
+
+    with pytest.raises(RiskBlockedError, match="single position notional exceeds max_single_position_usd"):
+        await risk.build_execution_guard(make_review(signal))
 
 
 @pytest.mark.asyncio

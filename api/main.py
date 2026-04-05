@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI, HTTPException
 
@@ -24,6 +25,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Polymarket Multi-Agent API", lifespan=lifespan)
+logger = logging.getLogger(__name__)
 
 
 def get_context() -> AppContext:
@@ -134,7 +136,33 @@ async def recent_orders(
 
 @app.get("/portfolio/summary")
 async def portfolio_summary() -> dict[str, object]:
-    return (await get_context().repository.get_portfolio_summary()).model_dump()
+    context = get_context()
+    summary = (await context.repository.get_portfolio_summary()).model_dump()
+
+    connector = getattr(context, "market_connector", None)
+    close_after = False
+    if connector is None:
+        connector = MarketConnector(context)
+        close_after = True
+
+    try:
+        snapshot = await connector.get_collateral_snapshot(sync_allowance=False)
+        if snapshot and snapshot.get("balance") is not None:
+            summary["available_balance"] = float(snapshot["balance"])
+            summary["live_balance"] = float(snapshot["balance"])
+            summary["live_allowance"] = float(snapshot["allowance"]) if snapshot.get("allowance") is not None else None
+            summary["balance_source"] = "polymarket_live"
+            if not summary.get("funder"):
+                summary["funder"] = str(snapshot.get("funder") or "")
+        else:
+            logger.info("portfolio_summary_live_snapshot_unavailable")
+    except Exception as exc:
+        logger.warning("portfolio_summary_live_snapshot_failed: %s", exc)
+    finally:
+        if close_after:
+            await connector.close()
+
+    return summary
 
 
 @app.get("/portfolio/positions")

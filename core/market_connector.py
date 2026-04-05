@@ -537,12 +537,11 @@ class MarketConnector:
                     "details": self._mapping_from_object(server_time),
                 }
             )
-            collateral_params = BalanceAllowanceParams(
-                asset_type=AssetType.COLLATERAL,
-                signature_type=settings.polymarket_signature_type,
+            collateral_status, parsed_collateral = await self._fetch_collateral_snapshot(
+                client,
+                sync_allowance=sync_allowance,
             )
             if sync_allowance:
-                await to_thread(client.update_balance_allowance, collateral_params)
                 checks.append(
                     {
                         "name": "allowance_sync",
@@ -550,8 +549,6 @@ class MarketConnector:
                         "details": "update_balance_allowance executed",
                     }
                 )
-            collateral_status = await to_thread(client.get_balance_allowance, collateral_params)
-            parsed_collateral = self._extract_balance_allowance_numbers(collateral_status)
             min_balance = float(settings.polymarket_live_min_usdc_balance or 0.0)
             balance_ok = parsed_collateral["balance"] is not None and parsed_collateral["balance"] >= min_balance
             allowance_ok = parsed_collateral["allowance"] is not None and parsed_collateral["allowance"] > 0
@@ -604,6 +601,30 @@ class MarketConnector:
                     }
                 ],
             }
+
+    async def get_collateral_snapshot(self, *, sync_allowance: bool = False) -> dict[str, Any] | None:
+        """
+        Returns live collateral balance/allowance when credentials are present.
+        This is read-only telemetry and can run independently from LIVE_TRADING mode.
+        """
+        settings = self.context.settings
+        if not settings.polymarket_private_key:
+            return None
+        try:
+            client = await self._get_live_client()
+            collateral_status, parsed_collateral = await self._fetch_collateral_snapshot(
+                client,
+                sync_allowance=sync_allowance,
+            )
+            return {
+                "balance": parsed_collateral["balance"],
+                "allowance": parsed_collateral["allowance"],
+                "raw": self._mapping_from_object(collateral_status),
+                "funder": settings.polymarket_funder or client.get_address() or "",
+                "signature_type": settings.polymarket_signature_type,
+            }
+        except Exception:
+            return None
 
     async def get_market_resolution(self, market_id: str) -> dict[str, Any]:
         market = await self.get_market_by_id(market_id)
@@ -759,6 +780,22 @@ class MarketConnector:
             ("allowance", "availableAllowance", "maxAllowance", "usdcAllowance"),
         )
         return {"balance": balance, "allowance": allowance}
+
+    async def _fetch_collateral_snapshot(
+        self,
+        client: ClobClient,
+        *,
+        sync_allowance: bool,
+    ) -> tuple[Any, dict[str, float | None]]:
+        collateral_params = BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,
+            signature_type=self.context.settings.polymarket_signature_type,
+        )
+        if sync_allowance:
+            await to_thread(client.update_balance_allowance, collateral_params)
+        collateral_status = await to_thread(client.get_balance_allowance, collateral_params)
+        parsed_collateral = self._extract_balance_allowance_numbers(collateral_status)
+        return collateral_status, parsed_collateral
 
     @classmethod
     def _find_first_numeric(cls, value: Any, preferred_keys: tuple[str, ...]) -> float | None:

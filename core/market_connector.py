@@ -551,7 +551,7 @@ class MarketConnector:
                 )
             min_balance = float(settings.polymarket_live_min_usdc_balance or 0.0)
             balance_ok = parsed_collateral["balance"] is not None and parsed_collateral["balance"] >= min_balance
-            allowance_ok = parsed_collateral["allowance"] is not None and parsed_collateral["allowance"] > 0
+            allowance_ok = self._has_positive_collateral_allowance(collateral_status, parsed_collateral["allowance"])
             checks.extend(
                 [
                     {
@@ -771,14 +771,16 @@ class MarketConnector:
     @classmethod
     def _extract_balance_allowance_numbers(cls, payload: Any) -> dict[str, float | None]:
         mapping = cls._mapping_from_object(payload)
-        balance = cls._find_first_numeric(
+        raw_balance = cls._find_value_for_keys(
             mapping,
             ("balance", "available", "availableBalance", "free", "usdcBalance", "balanceAvailable"),
         )
-        allowance = cls._find_first_numeric(
+        raw_allowance = cls._find_value_for_keys(
             mapping,
             ("allowance", "availableAllowance", "maxAllowance", "usdcAllowance"),
         )
+        balance = cls._normalize_collateral_amount(raw_balance)
+        allowance = cls._normalize_collateral_amount(raw_allowance)
         return {"balance": balance, "allowance": allowance}
 
     async def _fetch_collateral_snapshot(
@@ -798,25 +800,56 @@ class MarketConnector:
         return collateral_status, parsed_collateral
 
     @classmethod
-    def _find_first_numeric(cls, value: Any, preferred_keys: tuple[str, ...]) -> float | None:
+    def _find_value_for_keys(cls, value: Any, preferred_keys: tuple[str, ...]) -> Any:
         if isinstance(value, dict):
             for key in preferred_keys:
                 if key in value:
-                    parsed = cls._try_float(value.get(key))
+                    return value.get(key)
+            for nested in value.values():
+                if isinstance(nested, (dict, list, tuple)):
+                    parsed = cls._find_value_for_keys(nested, preferred_keys)
                     if parsed is not None:
                         return parsed
-            for nested in value.values():
-                parsed = cls._find_first_numeric(nested, preferred_keys)
-                if parsed is not None:
-                    return parsed
             return None
         if isinstance(value, list):
             for item in value:
-                parsed = cls._find_first_numeric(item, preferred_keys)
+                parsed = cls._find_value_for_keys(item, preferred_keys)
                 if parsed is not None:
                     return parsed
             return None
-        return cls._try_float(value)
+        return None
+
+    @classmethod
+    def _normalize_collateral_amount(cls, value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                amount = float(stripped)
+            except (TypeError, ValueError):
+                return None
+            if "." in stripped or "e" in stripped.lower():
+                return amount
+            return amount / 1_000_000
+        if isinstance(value, int):
+            return float(value) / 1_000_000
+        if isinstance(value, float):
+            return value
+        parsed = cls._try_float(value)
+        return parsed
+
+    @classmethod
+    def _has_positive_collateral_allowance(cls, payload: Any, parsed_allowance: float | None) -> bool:
+        if parsed_allowance is not None and parsed_allowance > 0:
+            return True
+        mapping = cls._mapping_from_object(payload)
+        allowances = mapping.get("allowances") if isinstance(mapping, dict) else None
+        if isinstance(allowances, dict):
+            return any((cls._try_float(item) or 0.0) > 0 for item in allowances.values())
+        return False
 
     @staticmethod
     def _try_float(value: Any) -> float | None:

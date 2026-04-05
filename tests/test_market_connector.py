@@ -163,6 +163,70 @@ async def test_get_live_bootstrap_status_validates_balance_and_allowance(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_get_live_bootstrap_status_normalizes_base_unit_balance_and_uses_allowances_map(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def get_address(self):
+            return "0xFunder"
+
+        def create_or_derive_api_creds(self):
+            return SimpleNamespace(api_key="key", api_secret="secret", api_passphrase="pass")
+
+        def get_server_time(self):
+            return {"epoch": 12345}
+
+        def update_balance_allowance(self, params):
+            return None
+
+        def get_balance_allowance(self, params):
+            return {
+                "balance": "5994819",
+                "allowances": {
+                    "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+                },
+            }
+
+    monkeypatch.setattr("core.market_connector.ClobClient", FakeClient)
+
+    connector = MarketConnector(FakeContext(live_trading=True))
+    result = await connector.get_live_bootstrap_status(sync_allowance=False)
+
+    assert result["mode"] == "live"
+    assert result["ready"] is True
+    assert result["parsed_collateral"]["balance"] == pytest.approx(5.994819)
+    assert result["parsed_collateral"]["allowance"] is None
+    allowance_check = next(check for check in result["checks"] if check["name"] == "collateral_allowance")
+    assert allowance_check["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_collateral_snapshot_normalizes_base_units(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def get_address(self):
+            return "0xFunder"
+
+        def create_or_derive_api_creds(self):
+            return SimpleNamespace(api_key="key", api_secret="secret", api_passphrase="pass")
+
+        def get_balance_allowance(self, params):
+            return {"balance": "12345678", "allowance": "25000000"}
+
+    monkeypatch.setattr("core.market_connector.ClobClient", FakeClient)
+
+    connector = MarketConnector(FakeContext(live_trading=True))
+    snapshot = await connector.get_collateral_snapshot(sync_allowance=False)
+
+    assert snapshot is not None
+    assert snapshot["balance"] == pytest.approx(12.345678)
+    assert snapshot["allowance"] == pytest.approx(25.0)
+
+
+@pytest.mark.asyncio
 async def test_get_live_bootstrap_status_requires_private_key_in_live_mode() -> None:
     context = FakeContext(live_trading=True)
     context.settings.polymarket_private_key = ""

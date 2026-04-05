@@ -234,16 +234,9 @@ async def live_bootstrap_status(refresh: bool = False, sync_allowance: bool | No
         else sync_allowance
     )
     if refresh or not context.live_bootstrap_status:
-        from core.market_connector import MarketConnector
-
-        runtime_connector = MarketConnector(context)
-        try:
-            context.live_bootstrap_status = await runtime_connector.get_live_bootstrap_status(
-                sync_allowance=should_sync_allowance,
-            )
-            context.live_bootstrap_status["fail_open"] = bool(context.settings.polymarket_live_bootstrap_fail_open)
-        finally:
-            await runtime_connector.close()
+        context.live_bootstrap_status = await context.refresh_live_bootstrap_status(
+            sync_allowance=should_sync_allowance,
+        )
     return context.live_bootstrap_status
 
 

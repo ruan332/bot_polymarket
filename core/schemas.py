@@ -318,6 +318,11 @@ class PortfolioSummary(BaseModel):
     open_positions: int = 0
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
+    mode: Literal["paper", "live"] = "paper"
+    balance_source: str = "paper_ledger"
+    funder: str = ""
+    live_balance: float | None = None
+    live_allowance: float | None = None
 
 
 class MarketSnapshotPayload(BaseModel):
@@ -347,6 +352,7 @@ class EquitySnapshotPoint(BaseModel):
     total_pnl: float
     realized_pnl: float
     unrealized_pnl: float
+    trigger_source: str = ""
     source: str = "system"
 
 

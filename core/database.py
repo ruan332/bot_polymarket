@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import math
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import asyncpg
 
+from core.config import AppSettings
 from core.schemas import (
     AgentHeartbeat,
     EquitySnapshotPoint,
@@ -130,6 +131,7 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     realized_pnl DOUBLE PRECISION NOT NULL,
     unrealized_pnl DOUBLE PRECISION NOT NULL,
     source TEXT NOT NULL DEFAULT 'system',
+    trigger_source TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -137,6 +139,7 @@ ALTER TABLE equity_snapshots ADD COLUMN IF NOT EXISTS current_market_value DOUBL
 ALTER TABLE equity_snapshots ADD COLUMN IF NOT EXISTS total_equity DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE equity_snapshots ADD COLUMN IF NOT EXISTS total_pnl DOUBLE PRECISION NOT NULL DEFAULT 0;
 ALTER TABLE equity_snapshots ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'system';
+ALTER TABLE equity_snapshots ADD COLUMN IF NOT EXISTS trigger_source TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS agent_heartbeats (
     agent TEXT PRIMARY KEY,
@@ -384,9 +387,23 @@ def _as_optional_int(value: Any) -> int | None:
 
 
 class TradingRepository:
-    def __init__(self, db: Database, initial_bankroll: float):
+    def __init__(self, db: Database, initial_bankroll: float, settings: AppSettings | None = None):
         self.db = db
         self.initial_bankroll = initial_bankroll
+        self.settings = settings
+        self._live_balance_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+
+    def bind_live_balance_provider(self, provider: Callable[[], Awaitable[dict[str, Any]]]) -> None:
+        self._live_balance_provider = provider
+
+    def _is_live_mode(self) -> bool:
+        return bool(getattr(self.settings, "live_trading", False))
+
+    async def _get_live_bootstrap_status(self) -> dict[str, Any] | None:
+        if not self._is_live_mode() or self._live_balance_provider is None:
+            return None
+        status = await self._live_balance_provider()
+        return status if isinstance(status, dict) else None
 
     async def record_signal(self, signal_id: str, event_type: str, payload: dict[str, Any]) -> None:
         await self.db.execute(
@@ -584,6 +601,7 @@ class TradingRepository:
 
     async def record_equity_snapshot(self, source: str = "system") -> None:
         summary = await self.get_portfolio_summary()
+        canonical_source = summary.balance_source or ("polymarket_live" if summary.mode == "live" else "paper_ledger")
         await self.db.execute(
             """
             INSERT INTO equity_snapshots (
@@ -595,9 +613,10 @@ class TradingRepository:
                 total_pnl,
                 realized_pnl,
                 unrealized_pnl,
-                source
+                source,
+                trigger_source
             )
-            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
             """,
             summary.available_balance,
             summary.total_exposure,
@@ -606,6 +625,7 @@ class TradingRepository:
             summary.total_pnl,
             summary.realized_pnl,
             summary.unrealized_pnl,
+            canonical_source,
             source,
         )
 
@@ -637,29 +657,35 @@ class TradingRepository:
             list(FILLED_ORDER_STATUSES),
         )
         realized_pnl = float(realized_row["realized_pnl"] or 0.0) if realized_row else 0.0
-        if not rows:
-            return PortfolioSummary(
-                available_balance=self.initial_bankroll + realized_pnl,
-                total_equity=self.initial_bankroll + realized_pnl,
-                realized_pnl=realized_pnl,
-                total_pnl=realized_pnl,
-            )
+        live_status = await self._get_live_bootstrap_status()
+        live_balance = None
+        live_allowance = None
+        funder = ""
+        mode = "live" if self._is_live_mode() else "paper"
+        balance_source = "polymarket_live" if mode == "live" else "paper_ledger"
+        if live_status is not None:
+            live_balance, live_allowance = self._extract_live_collateral(live_status)
+            funder = str(live_status.get("funder") or getattr(self.settings, "polymarket_funder", "") or "")
 
-        latest_prices = await self._latest_market_prices([str(row["market_id"]) for row in rows])
-        pair_cycles = await self._current_pair_cycles([str(row["asset_symbol"] or "") for row in rows])
         total_exposure = 0.0
         current_market_value = 0.0
-        for row in rows:
-            total_exposure += float(row["exposure_usd"] or 0.0)
-            current_price, _ = self._mark_price_for_position(
-                row,
-                latest_prices.get(str(row["market_id"])),
-                pair_cycles.get(str(row["asset_symbol"] or "")),
-            )
-            current_market_value += int(row["size"] or 0) * current_price
+        if rows:
+            latest_prices = await self._latest_market_prices([str(row["market_id"]) for row in rows])
+            pair_cycles = await self._current_pair_cycles([str(row["asset_symbol"] or "") for row in rows])
+            for row in rows:
+                total_exposure += float(row["exposure_usd"] or 0.0)
+                current_price, _ = self._mark_price_for_position(
+                    row,
+                    latest_prices.get(str(row["market_id"])),
+                    pair_cycles.get(str(row["asset_symbol"] or "")),
+                )
+                current_market_value += int(row["size"] or 0) * current_price
 
         unrealized_pnl = current_market_value - total_exposure
-        available_balance = max(self.initial_bankroll - total_exposure + realized_pnl, 0.0)
+        if mode == "live":
+            available_balance = float(live_balance or 0.0)
+        else:
+            available_balance = max(self.initial_bankroll - total_exposure + realized_pnl, 0.0)
         total_equity = available_balance + current_market_value
         total_pnl = realized_pnl + unrealized_pnl
         return PortfolioSummary(
@@ -671,6 +697,11 @@ class TradingRepository:
             open_positions=len(rows),
             realized_pnl=realized_pnl,
             unrealized_pnl=unrealized_pnl,
+            mode=mode,
+            balance_source=balance_source,
+            funder=funder,
+            live_balance=live_balance,
+            live_allowance=live_allowance,
         )
 
     async def get_recent_signals(
@@ -1729,6 +1760,7 @@ class TradingRepository:
                 total_pnl,
                 realized_pnl,
                 unrealized_pnl,
+                trigger_source,
                 source,
                 created_at
             FROM equity_snapshots
@@ -1747,6 +1779,7 @@ class TradingRepository:
                 total_pnl=float(row["total_pnl"] or 0.0),
                 realized_pnl=float(row["realized_pnl"] or 0.0),
                 unrealized_pnl=float(row["unrealized_pnl"] or 0.0),
+                trigger_source=str(row["trigger_source"] or ""),
                 source=str(row["source"] or "system"),
             ).model_dump(mode="json")
             for row in reversed(rows)
@@ -2568,6 +2601,24 @@ class TradingRepository:
             return dict(value)
         except Exception:
             return value
+
+    @staticmethod
+    def _extract_live_collateral(status: dict[str, Any] | None) -> tuple[float | None, float | None]:
+        if not status:
+            return None, None
+        parsed = status.get("parsed_collateral")
+        if not isinstance(parsed, dict):
+            return None, None
+        return TradingRepository._safe_float(parsed.get("balance")), TradingRepository._safe_float(parsed.get("allowance"))
+
+    @staticmethod
+    def _safe_float(value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _latest_pipeline_event(events: list[dict[str, Any]], event_type: str) -> dict[str, Any] | None:

@@ -29,6 +29,71 @@ class ClawAgent(BaseAgent):
         self.settlement = SettlementService(context, self.connector)
         self.consumer = f"claw-{uuid4().hex[:8]}"
 
+    async def _place_order_or_block(
+        self,
+        *,
+        market_id: str,
+        token_id: str,
+        direction: str,
+        size: int,
+        price_limit: float,
+        open_position: bool = True,
+        reason: str,
+        details: dict[str, object],
+    ) -> dict[str, object]:
+        if self.context.settings.live_trading:
+            notional = round(float(size) * float(price_limit), 4)
+            if notional < 1.0:
+                message = f"live order below Polymarket minimum size: ${notional:.2f} < $1.00"
+                await self.risk.record_block(
+                    self.name,
+                    message,
+                    {
+                        **details,
+                        "market_id": market_id,
+                        "token_id": token_id,
+                        "direction": direction,
+                        "size": size,
+                        "price_limit": price_limit,
+                        "reason": reason,
+                        "notional_usd": notional,
+                        "min_notional_usd": 1.0,
+                    },
+                )
+                return {
+                    "status": "blocked",
+                    "error": message,
+                    "exchange_order_id": "",
+                }
+        try:
+            return await self.connector.place_order(
+                market_id=market_id,
+                token_id=token_id,
+                direction=direction,
+                size=size,
+                price_limit=price_limit,
+                open_position=open_position,
+            )
+        except Exception as exc:
+            await self.risk.record_block(
+                self.name,
+                f"exchange order failed: {exc}",
+                {
+                    **details,
+                    "market_id": market_id,
+                    "token_id": token_id,
+                    "direction": direction,
+                    "size": size,
+                    "price_limit": price_limit,
+                    "reason": reason,
+                },
+            )
+            return {
+                "status": "blocked",
+                "error": str(exc),
+                "exchange_order_id": "",
+            }
+
     async def tick(self) -> None:
         exit_stats = await self.process_exit_cycle()
         pending_stats = await self.process_pending_pair_orders()
@@ -166,13 +231,22 @@ class ClawAgent(BaseAgent):
                 reason = sanitize_text(f"{review.notes} | execution LLM fallback: {exc}", 280)
                 execution_mode = "llm_fallback"
 
-        order_result = await self.connector.place_order(
+        order_result = await self._place_order_or_block(
             market_id=signal.market_id,
             token_id=signal.token_id,
             direction=signal.direction,
             size=size,
             price_limit=price_limit,
+            reason=reason,
+            details={
+                "signal_id": signal.signal_id,
+                "asset_symbol": signal.asset_symbol,
+                "crypto_tier": signal.crypto_tier,
+                "strategy_id": signal.strategy_id,
+            },
         )
+        if str(order_result.get("status")) == "blocked" and order_result.get("error"):
+            return False, execution_mode
         paper_order = PaperOrderPayload(
             order_id=str(uuid4()),
             signal_id=signal.signal_id,
@@ -230,29 +304,53 @@ class ClawAgent(BaseAgent):
 
         signal = review.original_signal
         primary_leg = review.approved_primary_leg
-        order_result = await self.connector.place_order(
+        order_result = await self._place_order_or_block(
             market_id=signal.market_id,
             token_id=primary_leg.token_id,
             direction=primary_leg.direction,
             size=primary_leg.size,
             price_limit=primary_leg.target_price,
             open_position=True,
+            reason=review.notes,
+            details={
+                "signal_id": signal.signal_id,
+                "trade_group_id": review.trade_group_id,
+                "asset_symbol": signal.asset_symbol,
+                "crypto_tier": signal.crypto_tier,
+                "strategy_id": signal.strategy_id,
+                "cycle_slug": signal.cycle_slug,
+                "leg_role": "primary",
+            },
         )
+        if str(order_result.get("status")) == "blocked" and order_result.get("error"):
+            return False, "deterministic"
         hedge_submission_reason = "hedge_submitted"
         try:
-            hedge_submission = await self.connector.place_order(
+            hedge_submission = await self._place_order_or_block(
                 market_id=signal.market_id,
                 token_id=review.approved_hedge_leg.token_id,
                 direction=review.approved_hedge_leg.direction,
                 size=review.approved_hedge_leg.size,
                 price_limit=review.approved_hedge_leg.target_price,
                 open_position=False,
+                reason=review.notes,
+                details={
+                    "signal_id": signal.signal_id,
+                    "trade_group_id": review.trade_group_id,
+                    "asset_symbol": signal.asset_symbol,
+                    "crypto_tier": signal.crypto_tier,
+                    "strategy_id": signal.strategy_id,
+                    "cycle_slug": signal.cycle_slug,
+                    "leg_role": "hedge",
+                },
             )
-        except Exception as exc:
+            if str(hedge_submission.get("status")) == "blocked" and hedge_submission.get("error"):
+                hedge_submission_reason = "hedge_submission_failed"
+        except Exception:
             hedge_submission_reason = "hedge_submission_failed"
             hedge_submission = {
                 "status": "blocked",
-                "error": str(exc),
+                "error": "unexpected hedge submission failure",
                 "exchange_order_id": "",
             }
         primary_order = PairOrderPayload(
@@ -511,13 +609,23 @@ class ClawAgent(BaseAgent):
             exit_size = int(decision["size"])
             if exit_size <= 0:
                 continue
-            order_result = await self.connector.place_order(
+            order_result = await self._place_order_or_block(
                 market_id=str(position["market_id"]),
                 token_id=str(position["token_id"]),
                 direction=str(position["direction"]),
                 size=exit_size,
                 price_limit=float(position["current_price"]),
+                reason=str(decision["reason"]),
+                details={
+                    "position_key": str(position.get("position_key") or ""),
+                    "asset_symbol": str(position.get("asset_symbol") or ""),
+                    "crypto_tier": str(position.get("crypto_tier") or ""),
+                    "strategy_id": str(position.get("strategy_id") or ""),
+                    "leg_role": str(position.get("leg_role") or ""),
+                },
             )
+            if str(order_result.get("status")) == "blocked" and order_result.get("error"):
+                continue
             realized = round(
                 (float(position["current_price"]) - float(position["average_price"])) * exit_size,
                 4,

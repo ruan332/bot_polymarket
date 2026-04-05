@@ -32,6 +32,7 @@ class AppContext:
     repository: TradingRepository
     redis: Redis
     bus: RedisBus
+    market_connector: MarketConnector | None = field(default=None, repr=False)
     live_bootstrap_status: dict[str, object] = field(default_factory=dict)
 
     @classmethod
@@ -48,7 +49,7 @@ class AppContext:
             settings.startup_retry_delay_seconds,
             _init_database(db),
         )
-        repository = TradingRepository(db, settings.paper_bankroll_usd)
+        repository = TradingRepository(db, settings.paper_bankroll_usd, settings)
         redis = Redis.from_url(settings.redis_url, decode_responses=False)
         await _retry_async(
             "redis startup",
@@ -60,14 +61,12 @@ class AppContext:
         await bus.bootstrap_runtime_config(agents_config)
         await bus.ensure_known_groups()
         context = cls(settings, agents_config, risk_config, crypto_config, db, repository, redis, bus)
+        context.market_connector = MarketConnector(context)
+        repository.bind_live_balance_provider(context.refresh_live_bootstrap_status)
         if settings.live_trading:
-            connector = MarketConnector(context)
-            try:
-                context.live_bootstrap_status = await connector.get_live_bootstrap_status(
-                    sync_allowance=settings.polymarket_sync_balance_allowance_on_startup
-                )
-            finally:
-                await connector.close()
+            context.live_bootstrap_status = await context.refresh_live_bootstrap_status(
+                sync_allowance=settings.polymarket_sync_balance_allowance_on_startup
+            )
             if not bool(context.live_bootstrap_status.get("ready")):
                 context.live_bootstrap_status["fail_open"] = bool(settings.polymarket_live_bootstrap_fail_open)
                 if not settings.polymarket_live_bootstrap_fail_open:
@@ -88,7 +87,34 @@ class AppContext:
         _apply_runtime_risk_overrides(self.settings, self.risk_config)
         self.crypto_config = load_crypto_config()
 
+    async def refresh_live_bootstrap_status(self, *, sync_allowance: bool = False) -> dict[str, object]:
+        if not self.settings.live_trading:
+            self.live_bootstrap_status = {
+                "mode": "paper",
+                "ready": True,
+                "reason": "live trading disabled",
+                "fail_open": False,
+            }
+            return self.live_bootstrap_status
+
+        connector = self.market_connector
+        close_after = False
+        if connector is None:
+            connector = MarketConnector(self)
+            close_after = True
+
+        try:
+            status = await connector.get_live_bootstrap_status(sync_allowance=sync_allowance)
+            status["fail_open"] = bool(self.settings.polymarket_live_bootstrap_fail_open)
+            self.live_bootstrap_status = status
+            return status
+        finally:
+            if close_after:
+                await connector.close()
+
     async def close(self) -> None:
+        if self.market_connector is not None:
+            await self.market_connector.close()
         await self.redis.close()
         await self.db.close()
 

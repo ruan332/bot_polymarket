@@ -1067,6 +1067,37 @@ async def test_claw_exit_cycle_records_uuid_signal_id(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_claw_blocks_live_buy_orders_below_polymarket_minimum(monkeypatch) -> None:
+    context = FakeContext()
+    context.settings.live_trading = True
+    claw = ClawAgent(context)
+    called = False
+
+    async def fake_place_order(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("connector should not be called for sub-$1 live buy orders")
+
+    monkeypatch.setattr(claw.connector, "place_order", fake_place_order)
+
+    result = await claw._place_order_or_block(
+        market_id="market-1",
+        token_id="token-yes-1",
+        direction="YES",
+        size=2,
+        price_limit=0.325,
+        reason="test live buy minimum",
+        details={"signal_id": "sig-1", "asset_symbol": "BTC"},
+    )
+
+    assert called is False
+    assert result["status"] == "blocked"
+    assert "minimum size" in str(result["error"])
+    assert context.repository.risk_events[-1]["notional_usd"] == pytest.approx(0.65)
+    assert context.bus.streams["events:risk"][-1][1]["reason"].startswith("live order below Polymarket minimum size")
+
+
+@pytest.mark.asyncio
 async def test_codex_and_claw_use_llm_when_flags_enabled(monkeypatch) -> None:
     context = FakeContext()
     context.settings.review_llm_enabled = True

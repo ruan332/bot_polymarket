@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -199,3 +200,103 @@ def test_decode_record_merges_risk_metadata() -> None:
     assert decoded["agent"] == "claude"
     assert decoded["reason"] == "agent_error"
     assert decoded["error"] == "MomentumTradingEngine crash"
+
+
+@pytest.mark.asyncio
+async def test_get_portfolio_summary_uses_live_polymarket_balance_when_live() -> None:
+    class DummyDb:
+        async def fetch(self, query: str, *args):
+            if "FROM positions" in query:
+                return []
+            return []
+
+        async def fetchrow(self, query: str, *args):
+            return {"realized_pnl": 0.0}
+
+    repo = TradingRepository(
+        DummyDb(),
+        initial_bankroll=1000.0,
+        settings=SimpleNamespace(live_trading=True, polymarket_funder="0xabc"),
+    )
+
+    async def live_status() -> dict[str, object]:
+        return {
+            "funder": "0xdef",
+            "parsed_collateral": {"balance": 12.5, "allowance": 25.0},
+        }
+
+    repo.bind_live_balance_provider(live_status)
+
+    summary = await repo.get_portfolio_summary()
+
+    assert summary.mode == "live"
+    assert summary.balance_source == "polymarket_live"
+    assert summary.available_balance == pytest.approx(12.5)
+    assert summary.total_equity == pytest.approx(12.5)
+    assert summary.live_balance == pytest.approx(12.5)
+    assert summary.live_allowance == pytest.approx(25.0)
+    assert summary.funder == "0xdef"
+
+
+@pytest.mark.asyncio
+async def test_get_portfolio_summary_keeps_paper_bankroll_when_paper() -> None:
+    class DummyDb:
+        async def fetch(self, query: str, *args):
+            if "FROM positions" in query:
+                return []
+            return []
+
+        async def fetchrow(self, query: str, *args):
+            return {"realized_pnl": 5.0}
+
+    repo = TradingRepository(DummyDb(), initial_bankroll=100.0, settings=SimpleNamespace(live_trading=False))
+
+    summary = await repo.get_portfolio_summary()
+
+    assert summary.mode == "paper"
+    assert summary.balance_source == "paper_ledger"
+    assert summary.available_balance == pytest.approx(105.0)
+    assert summary.total_equity == pytest.approx(105.0)
+    assert summary.realized_pnl == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_record_equity_snapshot_persists_canonical_source_and_trigger_source() -> None:
+    class DummyDb:
+        def __init__(self):
+            self.executed: list[tuple[str, tuple[object, ...]]] = []
+
+        async def fetch(self, query: str, *args):
+            if "FROM positions" in query:
+                return []
+            return []
+
+        async def fetchrow(self, query: str, *args):
+            return {"realized_pnl": 0.0}
+
+        async def execute(self, query: str, *args):
+            self.executed.append((query, args))
+            return "OK"
+
+    db = DummyDb()
+    repo = TradingRepository(
+        db,
+        initial_bankroll=1000.0,
+        settings=SimpleNamespace(live_trading=True, polymarket_funder="0xabc"),
+    )
+
+    async def live_status() -> dict[str, object]:
+        return {
+            "funder": "0xabc",
+            "parsed_collateral": {"balance": 9.5, "allowance": 11.0},
+        }
+
+    repo.bind_live_balance_provider(live_status)
+
+    await repo.record_equity_snapshot(source="scan_cycle")
+
+    assert db.executed
+    query, args = db.executed[-1]
+    assert "INSERT INTO equity_snapshots" in query
+    assert args[7] == "polymarket_live"
+    assert args[8] == "scan_cycle"

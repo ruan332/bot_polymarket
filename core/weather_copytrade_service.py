@@ -264,7 +264,7 @@ class WeatherCopytradeService:
                 "last_trade_seen_hash": latest_seen_hash,
                 "processed_trade_hashes": processed_history[-500:],
                 "metadata": {
-                    **dict(state.get("metadata") or {}),
+                    **self._metadata_map(state.get("metadata")),
                     "last_sync_at": datetime.now(UTC).isoformat(),
                 },
                 "updated_at": datetime.now(UTC),
@@ -729,6 +729,22 @@ class WeatherCopytradeService:
                     pass
             return [item.strip() for item in stripped.split(",") if item.strip()]
         return [str(value)]
+
+    @staticmethod
+    def _metadata_map(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return {}
+            try:
+                parsed = parse_json_object(stripped)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                return {}
+        return {}
 
     @staticmethod
     def _coerce_sequence(value: Any) -> list[Any]:

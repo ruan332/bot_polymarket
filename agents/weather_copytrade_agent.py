@@ -6,6 +6,7 @@ from uuid import uuid4
 from agents.base import BaseAgent
 from core.app_context import AppContext
 from core.weather_copytrade_service import WeatherCopytradeService
+from core.utils import parse_json_object
 
 
 class WeatherCopytradeAgent(BaseAgent):
@@ -47,7 +48,7 @@ class WeatherCopytradeAgent(BaseAgent):
                 {
                     **state,
                     "metadata": {
-                        **dict(state.get("metadata") or {}),
+                        **self._metadata_map(state.get("metadata")),
                         "last_run_at": datetime.now(UTC).isoformat(),
                     },
                     "updated_at": datetime.now(UTC),
@@ -91,3 +92,18 @@ class WeatherCopytradeAgent(BaseAgent):
         except Exception:
             return None
 
+    @staticmethod
+    def _metadata_map(value: object) -> dict[str, object]:
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return {}
+            try:
+                parsed = parse_json_object(stripped)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                return {}
+        return {}

@@ -22,7 +22,7 @@ class WeatherCopytradeAgent(BaseAgent):
         state = await self.context.repository.get_weather_copytrade_state(self.service.category)
         should_scan = state is None
         if state is not None:
-            last_sync = self._parse_datetime((state.get("metadata") or {}).get("last_run_at"))
+            last_sync = self._parse_datetime(self._metadata_map(state.get("metadata")).get("last_run_at"))
             if last_sync is None:
                 should_scan = True
             else:

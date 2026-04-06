@@ -67,4 +67,4 @@ cd .\dashboard; npm run build
 
 - O modo local usa `LIVE_TRADING=false` por padrao.
 - Os logs da stack ficam em `.tmp\local-stack`.
-- Para producao na VPS, continue usando `docker-compose.prod.yml`.
+- Para producao na VPS, continue usando `docker-compose.prod.yml`...

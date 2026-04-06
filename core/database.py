@@ -1474,7 +1474,7 @@ class TradingRepository:
             payload.get("created_at", datetime.now(UTC)),
         )
         assert row is not None
-        return self._json_value(dict(row))
+        return self._normalize_weather_copytrade_payload(dict(row))
 
     async def record_weather_copytrade_candidates(self, candidates: list[dict[str, Any]]) -> None:
         if not candidates:
@@ -1605,7 +1605,7 @@ class TradingRepository:
             payload.get("updated_at", datetime.now(UTC)),
         )
         assert row is not None
-        return self._json_value(dict(row))
+        return self._normalize_weather_copytrade_payload(dict(row))
 
     async def get_weather_copytrade_state(self, category: str = "WEATHER") -> dict[str, Any] | None:
         row = await self.db.fetchrow(
@@ -1618,7 +1618,7 @@ class TradingRepository:
         )
         if row is None:
             return None
-        return self._json_value(dict(row))
+        return self._normalize_weather_copytrade_payload(dict(row))
 
     async def get_latest_weather_copytrade_summary(self, *, limit: int = 12) -> dict[str, Any] | None:
         run_row = await self.db.fetchrow(
@@ -1632,10 +1632,15 @@ class TradingRepository:
             """
         )
         if run_row is None:
+            state = await self.get_weather_copytrade_state()
             return {
                 "run": None,
                 "candidates": [],
-                "state": await self.get_weather_copytrade_state(),
+                "state": state,
+                "report": (state or {}).get("report") if state else None,
+                "selection_summary": {},
+                "scan_stats": {},
+                "metadata": {},
             }
         candidate_rows = await self.db.fetch(
             """
@@ -1649,10 +1654,17 @@ class TradingRepository:
             limit,
         )
         state = await self.get_weather_copytrade_state(str(run_row["category"] or "WEATHER"))
+        run = self._normalize_weather_copytrade_payload(dict(run_row))
+        candidates = [self._normalize_weather_copytrade_payload(dict(row)) for row in candidate_rows]
+        report = (state or {}).get("report") or run.get("model_summary") or {}
         return {
-            "run": self._json_value(dict(run_row)),
-            "candidates": [self._json_value(dict(row)) for row in candidate_rows],
+            "run": run,
+            "candidates": candidates,
             "state": state,
+            "report": report,
+            "selection_summary": run.get("selection_summary") or {},
+            "scan_stats": run.get("scan_stats") or {},
+            "metadata": run.get("metadata") or {},
         }
 
     async def get_recent_weather_copytrade_runs(self, *, limit: int = 12) -> list[dict[str, Any]]:
@@ -1667,7 +1679,7 @@ class TradingRepository:
             """,
             limit,
         )
-        return [self._json_value(dict(row)) for row in rows]
+        return [self._normalize_weather_copytrade_payload(dict(row)) for row in rows]
 
     async def get_recent_settlement_events(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = await self.db.fetch(
@@ -3102,6 +3114,21 @@ class TradingRepository:
             return dict(value)
         except Exception:
             return value
+
+    @classmethod
+    def _normalize_weather_copytrade_payload(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: cls._normalize_weather_copytrade_payload(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._normalize_weather_copytrade_payload(item) for item in value]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("{") or stripped.startswith("["):
+                try:
+                    return cls._normalize_weather_copytrade_payload(json.loads(stripped))
+                except Exception:
+                    return value
+        return value
 
     @staticmethod
     def _extract_live_collateral(status: dict[str, Any] | None) -> tuple[float | None, float | None]:

@@ -314,3 +314,60 @@ async def test_approve_selection_and_sync_mirror_trades() -> None:
     assert sync["copied"] == 1
     assert sync["reasons"].get("non_weather_market", 0) == 1
     assert len(repository.orders) == 1
+
+
+@pytest.mark.asyncio
+async def test_new_analysis_keeps_approved_state_active() -> None:
+    now = datetime.now(UTC)
+    week_anchor = _week_start(now)
+    wallet = "0xweather1"
+    leaderboard = [{"proxyWallet": wallet, "userName": "weather-alpha", "verifiedBadge": True}]
+    metrics = {
+        wallet: {
+            "WEEK": [{"pnl": 12.0}],
+            "MONTH": [{"pnl": 45.0}],
+            "ALL": [{"pnl": 92.0}],
+            "closed": [
+                _closed_position(week_anchor, 6.0, "weather-a"),
+                _closed_position(week_anchor - timedelta(weeks=1), 5.0, "weather-b"),
+                _closed_position(week_anchor - timedelta(weeks=2), 6.0, "weather-c"),
+                _closed_position(week_anchor - timedelta(weeks=3), -1.0, "weather-d"),
+            ],
+        }
+    }
+    trades = {
+        wallet: [
+            _trade(now - timedelta(days=2), trade_hash=f"hash-{idx}", slug="weather-rain-market")
+            for idx in range(1, 31)
+        ],
+    }
+    connector = DummyConnector(
+        leaderboard=leaderboard,
+        profiles={wallet: {"displayUsernamePublic": True, "name": "weather-alpha"}},
+        metrics=metrics,
+        trades=trades,
+        markets={
+            "cond-weather": {
+                "id": "cond-weather",
+                "question": "Weather market",
+                "slug": "weather-rain-market",
+                "description": "weather market",
+                "eventSlug": "weather-rain-market",
+                "clobTokenIds": ["token-yes", "token-no"],
+            }
+        },
+        books={"token-yes": {"best_bid": 0.46, "best_ask": 0.50, "spread_bps": 80.0}, "token-no": {"best_bid": 0.48, "best_ask": 0.52, "spread_bps": 80.0}},
+    )
+    repository = DummyRepository()
+    service = make_service(connector, repository)
+
+    await service.run_analysis(limit=10)
+    approved = await service.approve_selection()
+    refreshed = await service.run_analysis(limit=10)
+
+    assert approved["state"]["approved"] is True
+    assert approved["state"]["active"] is True
+    assert refreshed["state"]["approved"] is True
+    assert refreshed["state"]["active"] is True
+    assert refreshed["state"]["paused"] is False
+    assert refreshed["state"]["selected_proxy_wallet"] == wallet

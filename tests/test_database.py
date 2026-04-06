@@ -203,6 +203,85 @@ def test_decode_record_merges_risk_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_latest_weather_copytrade_summary_normalizes_nested_json_payloads() -> None:
+    run_id = UUID("11111111-1111-1111-1111-111111111111")
+
+    class DummyDb:
+        async def fetchrow(self, query: str, *args):
+            if "FROM weather_copytrade_runs" in query:
+                return {
+                    "run_id": run_id,
+                    "category": "WEATHER",
+                    "leaderboard_limit": 10,
+                    "universe_count": 12,
+                    "shortlisted_count": 3,
+                    "selected_count": 1,
+                    "selected_proxy_wallet": "0xabc",
+                    "selected_user_name": "ColdMath",
+                    "candidate_count": 6,
+                    "stage_counts": '[{"label":"universe","count":12}]',
+                    "rejected_breakdown": '{"invalid_profile":2}',
+                    "model_summary": '{"summary":"ok","why":"because","risks":["low"],"selection_reason":"strong fit","selected_proxy_wallet":"0xabc","selected_user_name":"ColdMath"}',
+                    "selection_summary": '{"pnl_30d":42.5,"max_drawdown":0.08}',
+                    "scan_stats": '{"enriched_count":6}',
+                    "metadata": '{"copy_trade_fraction":0.08}',
+                    "created_at": datetime(2026, 3, 24, tzinfo=UTC),
+                }
+            if "FROM weather_copytrade_state" in query:
+                return {
+                    "category": "WEATHER",
+                    "run_id": run_id,
+                    "selected_proxy_wallet": "0xabc",
+                    "selected_user_name": "ColdMath",
+                    "selected_profile": '{"display_username_public":true,"name":"ColdMath"}',
+                    "selection": '{"proxy_wallet":"0xabc","score":98.5}',
+                    "report": '{"summary":"ok","why":"because","risks":["low"],"selection_reason":"strong fit","selected_proxy_wallet":"0xabc","selected_user_name":"ColdMath"}',
+                    "approved": True,
+                    "active": True,
+                    "paused": False,
+                    "approved_at": datetime(2026, 3, 24, tzinfo=UTC),
+                    "activated_at": datetime(2026, 3, 24, tzinfo=UTC),
+                    "last_trade_seen_at": datetime(2026, 3, 24, tzinfo=UTC),
+                    "last_trade_seen_hash": "trade-1",
+                    "processed_trade_hashes": '["trade-1"]',
+                    "metadata": '{"last_run_id":"11111111-1111-1111-1111-111111111111"}',
+                    "created_at": datetime(2026, 3, 24, tzinfo=UTC),
+                    "updated_at": datetime(2026, 3, 24, tzinfo=UTC),
+                }
+            raise AssertionError(f"unexpected fetchrow query: {query}")
+
+        async def fetch(self, query: str, *args):
+            if "FROM weather_copytrade_candidates" in query:
+                return [
+                    {
+                        "run_id": run_id,
+                        "rank": 1,
+                        "proxy_wallet": "0xabc",
+                        "user_name": "ColdMath",
+                        "verified_badge": True,
+                        "profile": '{"display_username_public":true,"name":"ColdMath"}',
+                        "metrics": '{"pnl_30d":42.5,"max_drawdown":0.08,"profit_factor":2.5,"trades_30d":30}',
+                        "score": 98.5,
+                        "rationale": "consistent pnl=42.50 pf=2.50 dd=8.00% weeks=4/4",
+                        "selected": True,
+                        "created_at": datetime(2026, 3, 24, tzinfo=UTC),
+                    }
+                ]
+            raise AssertionError(f"unexpected fetch query: {query}")
+
+    repo = TradingRepository(DummyDb(), initial_bankroll=10.0)
+    summary = await repo.get_latest_weather_copytrade_summary()
+
+    assert summary is not None
+    assert summary["run"]["model_summary"]["summary"] == "ok"
+    assert summary["report"]["summary"] == "ok"
+    assert summary["selection_summary"]["pnl_30d"] == 42.5
+    assert summary["metadata"]["copy_trade_fraction"] == 0.08
+    assert summary["candidates"][0]["metrics"]["profit_factor"] == 2.5
+    assert summary["state"]["report"]["selection_reason"] == "strong fit"
+
+
+@pytest.mark.asyncio
 async def test_get_portfolio_summary_uses_live_polymarket_balance_when_live() -> None:
     class DummyDb:
         async def fetch(self, query: str, *args):

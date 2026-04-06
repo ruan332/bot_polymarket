@@ -52,6 +52,7 @@ class WeatherCopytradeService:
 
     async def run_analysis(self, *, limit: int | None = None) -> dict[str, Any]:
         leaderboard_limit = int(limit or self.settings.leaderboard_limit)
+        existing_state = await self.context.repository.get_weather_copytrade_state(self.category)
         leaderboard = await self.connector.get_trader_leaderboard(
             category=self.category,
             time_period="ALL",
@@ -140,7 +141,7 @@ class WeatherCopytradeService:
                 for item in shortlisted
             ]
         )
-        state = await self._merge_state_from_run(run_payload, selected, report, approved=False, active=False, paused=True)
+        state = await self._merge_state_from_run(run_payload, selected, report, existing_state=existing_state)
         return {"run": run_payload, "candidates": shortlisted, "selected": selected, "report": report, "state": state}
 
     async def approve_selection(self, *, run_id: str | None = None, proxy_wallet: str | None = None) -> dict[str, Any]:
@@ -380,32 +381,47 @@ class WeatherCopytradeService:
         selected: dict[str, Any] | None,
         report: dict[str, Any],
         *,
-        approved: bool,
-        active: bool,
-        paused: bool,
+        existing_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        has_existing_lifecycle = bool(existing_state) and (
+            bool(existing_state.get("approved")) or bool(existing_state.get("active")) or bool(existing_state.get("paused"))
+        )
+        preserve_selection = has_existing_lifecycle and bool(existing_state.get("approved") or existing_state.get("active"))
+        approved = bool(existing_state.get("approved")) if has_existing_lifecycle else False
+        active = bool(existing_state.get("active")) if has_existing_lifecycle else False
+        paused = bool(existing_state.get("paused")) if has_existing_lifecycle else True
+        approved_at = existing_state.get("approved_at") if has_existing_lifecycle else None
+        activated_at = existing_state.get("activated_at") if has_existing_lifecycle else None
+        last_trade_seen_at = existing_state.get("last_trade_seen_at") if has_existing_lifecycle else None
+        last_trade_seen_hash = str(existing_state.get("last_trade_seen_hash") or "") if has_existing_lifecycle else ""
+        processed_trade_hashes = self._json_list(existing_state.get("processed_trade_hashes")) if has_existing_lifecycle else []
+        created_at = existing_state.get("created_at", datetime.now(UTC)) if has_existing_lifecycle else datetime.now(UTC)
+        metadata = self._metadata_map(existing_state.get("metadata")) if has_existing_lifecycle else {}
+        metadata.update(
+            {
+                "last_run_id": run_payload["run_id"],
+                "selected_score": selected["score"] if selected else 0,
+            }
+        )
         return await self.context.repository.upsert_weather_copytrade_state(
             {
                 "category": self.category,
                 "run_id": run_payload["run_id"],
-                "selected_proxy_wallet": selected["proxy_wallet"] if selected else "",
-                "selected_user_name": selected["user_name"] if selected else "",
-                "selected_profile": selected["profile"] if selected else {},
-                "selection": selected or {},
+                "selected_proxy_wallet": existing_state.get("selected_proxy_wallet") if preserve_selection else (selected["proxy_wallet"] if selected else ""),
+                "selected_user_name": existing_state.get("selected_user_name") if preserve_selection else (selected["user_name"] if selected else ""),
+                "selected_profile": existing_state.get("selected_profile") if preserve_selection else (selected["profile"] if selected else {}),
+                "selection": existing_state.get("selection") if preserve_selection else (selected or {}),
                 "report": report,
                 "approved": approved,
                 "active": active,
                 "paused": paused,
-                "approved_at": None,
-                "activated_at": None,
-                "last_trade_seen_at": None,
-                "last_trade_seen_hash": "",
-                "processed_trade_hashes": [],
-                "metadata": {
-                    "last_run_id": run_payload["run_id"],
-                    "selected_score": selected["score"] if selected else 0,
-                },
-                "created_at": datetime.now(UTC),
+                "approved_at": approved_at,
+                "activated_at": activated_at,
+                "last_trade_seen_at": last_trade_seen_at,
+                "last_trade_seen_hash": last_trade_seen_hash,
+                "processed_trade_hashes": processed_trade_hashes,
+                "metadata": metadata,
+                "created_at": created_at,
                 "updated_at": datetime.now(UTC),
             }
         )

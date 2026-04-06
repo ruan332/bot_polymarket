@@ -180,7 +180,7 @@ type WeatherCopytradeRun = {
   candidate_count: number;
   stage_counts: Array<{ label: string; count: number }>;
   rejected_breakdown: Record<string, number>;
-  model_summary: WeatherCopytradeReport;
+  model_summary: WeatherCopytradeReport | null;
   selection_summary: Record<string, unknown>;
   scan_stats: Record<string, unknown>;
   metadata: Record<string, unknown>;
@@ -194,7 +194,7 @@ type WeatherCopytradeState = {
   selected_user_name: string;
   selected_profile: Record<string, unknown>;
   selection: Record<string, unknown>;
-  report: WeatherCopytradeReport;
+  report: WeatherCopytradeReport | null;
   approved: boolean;
   active: boolean;
   paused: boolean;
@@ -212,6 +212,10 @@ type WeatherCopytradeSummary = {
   run: WeatherCopytradeRun | null;
   candidates: WeatherCopytradeCandidate[];
   state: WeatherCopytradeState | null;
+  report?: WeatherCopytradeReport | null;
+  selection_summary?: Record<string, unknown>;
+  scan_stats?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
 };
 
 type MetricsOverview = {
@@ -323,7 +327,169 @@ function asCurrencySigned(value: number) {
 }
 
 function numberOr(value: unknown, fallback = 0) {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed) {
+      const parsed = Number(trimmed);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return fallback;
+}
+
+function optionalNumber(value: unknown): number | null {
+  const parsed = numberOr(value, Number.NaN);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeRecord(value: unknown): Record<string, unknown> | null {
+  if (!value) return null;
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function normalizeObjectRecord(value: unknown): Record<string, unknown> {
+  return normalizeRecord(value) ?? {};
+}
+
+function normalizeNumberRecord(value: unknown): Record<string, number> {
+  const raw = normalizeRecord(value);
+  if (!raw) return {};
+  const normalized: Record<string, number> = {};
+  Object.entries(raw).forEach(([key, item]) => {
+    const parsed = optionalNumber(item);
+    if (parsed != null) {
+      normalized[key] = parsed;
+    }
+  });
+  return normalized;
+}
+
+function normalizeWeatherCopytradeReport(value: unknown): WeatherCopytradeReport | null {
+  const raw = normalizeRecord(value);
+  if (!raw) return null;
+  return {
+    summary: String(raw.summary ?? ""),
+    why: String(raw.why ?? ""),
+    risks: Array.isArray(raw.risks) ? raw.risks.map((item) => String(item)).filter(Boolean) : [],
+    selection_reason: String(raw.selection_reason ?? ""),
+    selected_proxy_wallet: String(raw.selected_proxy_wallet ?? ""),
+    selected_user_name: String(raw.selected_user_name ?? ""),
+    model: String(raw.model ?? "deterministic"),
+    provider: String(raw.provider ?? "deterministic"),
+    fallback_used: Boolean(raw.fallback_used),
+  };
+}
+
+function normalizeWeatherCopytradeCandidate(value: unknown): WeatherCopytradeCandidate | null {
+  const raw = normalizeRecord(value);
+  if (!raw) return null;
+  return {
+    run_id: typeof raw.run_id === "string" ? raw.run_id : undefined,
+    rank: Math.trunc(optionalNumber(raw.rank) ?? 0),
+    proxy_wallet: String(raw.proxy_wallet ?? ""),
+    user_name: String(raw.user_name ?? ""),
+    verified_badge: Boolean(raw.verified_badge),
+    profile: normalizeObjectRecord(raw.profile),
+    metrics: normalizeObjectRecord(raw.metrics),
+    score: optionalNumber(raw.score) ?? 0,
+    rationale: String(raw.rationale ?? ""),
+    selected: typeof raw.selected === "boolean" ? raw.selected : undefined,
+    created_at: typeof raw.created_at === "string" ? raw.created_at : undefined,
+    passed: typeof raw.passed === "boolean" ? raw.passed : undefined,
+    reject_reason: typeof raw.reject_reason === "string" ? raw.reject_reason : undefined,
+  };
+}
+
+function normalizeWeatherCopytradeRun(value: unknown): WeatherCopytradeRun | null {
+  const raw = normalizeRecord(value);
+  if (!raw) return null;
+  return {
+    run_id: String(raw.run_id ?? ""),
+    category: String(raw.category ?? "WEATHER"),
+    leaderboard_limit: Math.trunc(optionalNumber(raw.leaderboard_limit) ?? 0),
+    universe_count: Math.trunc(optionalNumber(raw.universe_count) ?? 0),
+    shortlisted_count: Math.trunc(optionalNumber(raw.shortlisted_count) ?? 0),
+    selected_count: Math.trunc(optionalNumber(raw.selected_count) ?? 0),
+    selected_proxy_wallet: String(raw.selected_proxy_wallet ?? ""),
+    selected_user_name: String(raw.selected_user_name ?? ""),
+    candidate_count: Math.trunc(optionalNumber(raw.candidate_count) ?? 0),
+    stage_counts: Array.isArray(raw.stage_counts)
+      ? raw.stage_counts.map((item) => ({
+          label: String(normalizeRecord(item)?.label ?? ""),
+          count: Math.trunc(optionalNumber(normalizeRecord(item)?.count) ?? 0),
+        }))
+      : [],
+    rejected_breakdown: normalizeNumberRecord(raw.rejected_breakdown),
+    model_summary: normalizeWeatherCopytradeReport(raw.model_summary) ?? null,
+    selection_summary: normalizeObjectRecord(raw.selection_summary),
+    scan_stats: normalizeObjectRecord(raw.scan_stats),
+    metadata: normalizeObjectRecord(raw.metadata),
+    created_at: String(raw.created_at ?? ""),
+  };
+}
+
+function normalizeWeatherCopytradeState(value: unknown): WeatherCopytradeState | null {
+  const raw = normalizeRecord(value);
+  if (!raw) return null;
+  return {
+    category: String(raw.category ?? "WEATHER"),
+    run_id: typeof raw.run_id === "string" ? raw.run_id : undefined,
+    selected_proxy_wallet: String(raw.selected_proxy_wallet ?? ""),
+    selected_user_name: String(raw.selected_user_name ?? ""),
+    selected_profile: normalizeObjectRecord(raw.selected_profile),
+    selection: normalizeObjectRecord(raw.selection),
+    report: normalizeWeatherCopytradeReport(raw.report) ?? null,
+    approved: Boolean(raw.approved),
+    active: Boolean(raw.active),
+    paused: Boolean(raw.paused),
+    approved_at: typeof raw.approved_at === "string" ? raw.approved_at : null,
+    activated_at: typeof raw.activated_at === "string" ? raw.activated_at : null,
+    last_trade_seen_at: typeof raw.last_trade_seen_at === "string" ? raw.last_trade_seen_at : null,
+    last_trade_seen_hash: typeof raw.last_trade_seen_hash === "string" ? raw.last_trade_seen_hash : undefined,
+    processed_trade_hashes: Array.isArray(raw.processed_trade_hashes) ? raw.processed_trade_hashes.map((item) => String(item)) : [],
+    metadata: normalizeObjectRecord(raw.metadata),
+    created_at: typeof raw.created_at === "string" ? raw.created_at : undefined,
+    updated_at: typeof raw.updated_at === "string" ? raw.updated_at : undefined,
+  };
+}
+
+function normalizeWeatherCopytradeSummary(value: unknown): WeatherCopytradeSummary | null {
+  const raw = normalizeRecord(value);
+  if (!raw) return null;
+  const stateRecord = normalizeRecord(raw.state);
+  const runRecord = normalizeRecord(raw.run);
+  const reportSource = raw.report ?? stateRecord?.report ?? runRecord?.model_summary;
+  return {
+    run: normalizeWeatherCopytradeRun(raw.run),
+    candidates: Array.isArray(raw.candidates)
+      ? raw.candidates.map((item) => normalizeWeatherCopytradeCandidate(item)).filter((item): item is WeatherCopytradeCandidate => item !== null)
+      : [],
+    state: normalizeWeatherCopytradeState(raw.state),
+    report: normalizeWeatherCopytradeReport(reportSource) ?? null,
+    selection_summary: normalizeObjectRecord(raw.selection_summary ?? runRecord?.selection_summary),
+    scan_stats: normalizeObjectRecord(raw.scan_stats ?? runRecord?.scan_stats),
+    metadata: normalizeObjectRecord(raw.metadata ?? runRecord?.metadata),
+  };
 }
 
 function labelStrategy(value?: string) {
@@ -629,6 +795,7 @@ export function DashboardClient() {
       });
 
       try {
+        const normalizedWeatherSummary = normalizeWeatherCopytradeSummary(next.get("weatherCopytradeSummary"));
         setState({
           statuses: (next.get("statuses") ?? {}) as Record<string, AgentStatus>,
           portfolio: (next.get("portfolio") ?? null) as PortfolioSummary | null,
@@ -637,7 +804,7 @@ export function DashboardClient() {
           performance: (next.get("performance") ?? null) as PerformanceReport | null,
           pairPerformance: (next.get("pairPerformance") ?? null) as PerformanceReport | null,
           momentumPerformance: (next.get("momentumPerformance") ?? null) as PerformanceReport | null,
-          weatherCopytradeSummary: (next.get("weatherCopytradeSummary") ?? null) as WeatherCopytradeSummary | null,
+          weatherCopytradeSummary: normalizedWeatherSummary,
           weatherCopytradeMetrics: (next.get("weatherCopytradeMetrics") ?? null) as PerformanceReport | null,
           signals: (next.get("signals") ?? []) as Signal[],
           decisions: (next.get("decisions") ?? []) as Decision[],
@@ -702,8 +869,11 @@ export function DashboardClient() {
     weatherCandidates.find((candidate) => candidate.proxy_wallet === weatherState?.selected_proxy_wallet) ??
     weatherCandidates.find((candidate) => candidate.selected) ??
     (weatherCandidates.length > 0 ? weatherCandidates[0] : null);
-  const weatherReport = weatherState?.report ?? weatherRun?.model_summary ?? null;
+  const weatherReport = weatherSummary?.report ?? weatherState?.report ?? weatherRun?.model_summary ?? null;
   const weatherMetrics = state.weatherCopytradeMetrics ?? null;
+  const weatherCopyTradeFraction = optionalNumber(
+    normalizeRecord(weatherRun?.metadata)?.copy_trade_fraction ?? normalizeRecord(weatherState?.metadata)?.copy_trade_fraction,
+  );
   const weatherBusyLabel = weatherActionBusy ? "WORKING" : weatherState?.active ? "ACTIVE" : weatherState?.paused ? "PAUSED" : "IDLE";
 
   async function refreshWeatherCopytrade() {
@@ -944,11 +1114,11 @@ export function DashboardClient() {
               <div className="mt-3 grid gap-2 text-[10px] font-mono text-poly-dim sm:grid-cols-2">
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">Universo</div>
-                  <div className="mt-1 text-poly-cyan">{weatherRun?.universe_count ?? 0}</div>
+                  <div className="mt-1 text-poly-cyan">{weatherRun ? weatherRun.universe_count : "-"}</div>
                 </div>
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">Shortlist</div>
-                  <div className="mt-1 text-poly-cyan">{weatherRun?.shortlisted_count ?? 0}</div>
+                  <div className="mt-1 text-poly-cyan">{weatherRun ? weatherRun.shortlisted_count : "-"}</div>
                 </div>
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">Selecionado</div>
@@ -963,7 +1133,7 @@ export function DashboardClient() {
                 <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-poly-dim">Resumo do modelo</div>
                 <div className="mt-2 space-y-2 font-mono text-[10px] text-poly-text">
                   <div>
-                    <span className="text-poly-dim">summary:</span> {weatherReport?.summary ?? "aguardando nova analise"}
+                    <span className="text-poly-dim">summary:</span> {weatherReport?.summary ?? "sem resumo disponivel"}
                   </div>
                   <div>
                     <span className="text-poly-dim">why:</span> {weatherReport?.why ?? "sem justificativa ainda"}
@@ -1004,6 +1174,11 @@ export function DashboardClient() {
                 {weatherCandidates.length > 0 ? (
                   weatherCandidates.slice(0, 6).map((candidate) => {
                     const isSelected = candidate.proxy_wallet === weatherState?.selected_proxy_wallet || candidate.selected;
+                    const metrics = normalizeRecord(candidate.metrics) ?? {};
+                    const pnl30d = optionalNumber(metrics.pnl_30d ?? metrics.pnl30d);
+                    const maxDrawdown = optionalNumber(metrics.max_drawdown ?? metrics.maxDrawdown);
+                    const profitFactor = optionalNumber(metrics.profit_factor ?? metrics.profitFactor);
+                    const trades30d = optionalNumber(metrics.trades_30d ?? metrics.trades30d);
                     return (
                       <div
                         key={`${candidate.proxy_wallet}-${candidate.rank}`}
@@ -1024,10 +1199,10 @@ export function DashboardClient() {
                         <div className="mt-2 grid gap-1 font-mono text-[9px] text-poly-dim">
                           <div>{candidate.rationale}</div>
                           <div className="flex flex-wrap gap-2">
-                            <span>pnl30d {numberOr(candidate.metrics?.pnl_30d).toFixed(2)}</span>
-                            <span>dd {asPercent(numberOr(candidate.metrics?.max_drawdown))}</span>
-                            <span>pf {numberOr(candidate.metrics?.profit_factor).toFixed(2)}</span>
-                            <span>trades {numberOr(candidate.metrics?.trades_30d)}</span>
+                            <span>pnl30d {pnl30d != null ? pnl30d.toFixed(2) : "-"}</span>
+                            <span>dd {maxDrawdown != null ? asPercent(maxDrawdown) : "-"}</span>
+                            <span>pf {profitFactor != null ? profitFactor.toFixed(2) : "-"}</span>
+                            <span>trades {trades30d != null ? trades30d : "-"}</span>
                           </div>
                         </div>
                       </div>
@@ -1049,39 +1224,39 @@ export function DashboardClient() {
               <div className="mt-3 grid gap-2 text-[10px] font-mono text-poly-dim sm:grid-cols-2">
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">Orders</div>
-                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.orders ?? 0}</div>
+                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.orders != null ? numberOr(weatherMetrics.summary.orders) : "-"}</div>
                 </div>
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">Signals</div>
-                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.signals ?? 0}</div>
+                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.signals != null ? numberOr(weatherMetrics.summary.signals) : "-"}</div>
                 </div>
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">Execução</div>
                   <div className="mt-1 text-poly-green">
-                    {weatherMetrics?.summary.execution_rate != null ? asPercent(weatherMetrics.summary.execution_rate) : "-"}
+                    {weatherMetrics?.summary.execution_rate != null ? asPercent(numberOr(weatherMetrics.summary.execution_rate)) : "-"}
                   </div>
                 </div>
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">Win%</div>
-                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.win_rate != null ? asPercent(weatherMetrics.summary.win_rate) : "-"}</div>
+                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.win_rate != null ? asPercent(numberOr(weatherMetrics.summary.win_rate)) : "-"}</div>
                 </div>
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">PnL</div>
                   <div className={`mt-1 ${numberOr(weatherMetrics?.summary.realized_pnl_window) >= 0 ? "text-poly-green" : "text-poly-red"}`}>
-                    {weatherMetrics?.summary.realized_pnl_window != null ? asCurrencySigned(weatherMetrics.summary.realized_pnl_window) : "-"}
+                    {weatherMetrics?.summary.realized_pnl_window != null ? asCurrencySigned(numberOr(weatherMetrics.summary.realized_pnl_window)) : "-"}
                   </div>
                 </div>
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">DD</div>
-                  <div className="mt-1 text-poly-amber">{weatherMetrics?.summary.max_drawdown != null ? asPercent(weatherMetrics.summary.max_drawdown) : "-"}</div>
+                  <div className="mt-1 text-poly-amber">{weatherMetrics?.summary.max_drawdown != null ? asPercent(numberOr(weatherMetrics.summary.max_drawdown)) : "-"}</div>
                 </div>
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">Risk</div>
-                  <div className="mt-1 text-poly-red">{weatherMetrics?.summary.risk_events ?? 0}</div>
+                  <div className="mt-1 text-poly-red">{weatherMetrics?.summary.risk_events != null ? numberOr(weatherMetrics.summary.risk_events) : "-"}</div>
                 </div>
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">Approval</div>
-                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.approval_rate != null ? asPercent(weatherMetrics.summary.approval_rate) : "-"}</div>
+                  <div className="mt-1 text-poly-cyan">{weatherMetrics?.summary.approval_rate != null ? asPercent(numberOr(weatherMetrics.summary.approval_rate)) : "-"}</div>
                 </div>
               </div>
               <div className="mt-3 border border-poly-border bg-poly-surface-dim/20 p-3 font-mono text-[10px] text-poly-dim">
@@ -1090,8 +1265,7 @@ export function DashboardClient() {
                   {weatherSelected ? `${weatherSelected.user_name} · ${weatherSelected.proxy_wallet}` : "nenhum usuario selecionado"}
                 </div>
                 <div className="mt-1 text-[9px] uppercase text-poly-muted">
-                  copy_trade_fraction{" "}
-                  {String(weatherRun?.metadata?.["copy_trade_fraction"] ?? weatherState?.metadata?.["copy_trade_fraction"] ?? "-")}
+                  copy_trade_fraction {weatherCopyTradeFraction != null ? asPercent(weatherCopyTradeFraction) : "-"}
                 </div>
               </div>
             </div>

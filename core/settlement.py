@@ -49,7 +49,8 @@ class SettlementService:
 
     async def process_redeem_cycle(self, *, dry_run: bool | None = None, limit: int = 20) -> dict[str, object]:
         candidates = await self.preview_redeemable_positions(limit=limit)
-        should_dry_run = self.context.settings.live_trading if dry_run is None else dry_run
+        live_mode = bool(self.context.settings.live_trading)
+        should_dry_run = True if live_mode else (bool(dry_run) if dry_run is not None else False)
         processed = 0
         skipped = 0
         redeemed = 0
@@ -82,11 +83,13 @@ class SettlementService:
                 payout_usd=payout_usd,
                 cost_basis_usd=cost_basis,
                 realized_pnl_usd=realized_pnl,
-                status="dry_run" if should_dry_run else "settled",
-                reason="live redemption requires explicit on-chain redeem flow" if self.context.settings.live_trading else "paper market redeemed",
+                status="skipped" if live_mode else ("dry_run" if should_dry_run else "settled"),
+                reason="live redemption requires explicit on-chain redeem flow" if live_mode else "paper market redeemed",
                 resolution=dict(candidate["resolution"]),
             )
-            if not should_dry_run:
+            if live_mode:
+                skipped += 1
+            elif not should_dry_run:
                 close_order = PaperOrderPayload(
                     order_id=str(uuid4()),
                     signal_id=str(uuid4()),

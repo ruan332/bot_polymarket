@@ -15,6 +15,10 @@ def make_context(
     *,
     positions: list[dict[str, object]] | None = None,
     execution_state: dict[str, object] | None = None,
+    live_trading: bool = False,
+    paper_bankroll_usd: float = 1000.0,
+    available_balance: float = 1000.0,
+    total_equity: float | None = None,
 ):
     crypto_config = load_crypto_config()
     open_positions = positions or []
@@ -27,11 +31,12 @@ def make_context(
 
     class Repository:
         def __init__(self):
+            equity = total_equity if total_equity is not None else available_balance
             self.summary = PortfolioSummary(
-                available_balance=1000.0,
+                available_balance=available_balance,
                 total_exposure=sum(float(item.get("cost_basis_usd") or 0.0) for item in open_positions),
                 current_market_value=0.0,
-                total_equity=1000.0,
+                total_equity=equity,
                 total_pnl=0.0,
                 open_positions=len(open_positions),
                 realized_pnl=0.0,
@@ -49,7 +54,8 @@ def make_context(
 
     return SimpleNamespace(
         settings=SimpleNamespace(
-            paper_bankroll_usd=1000.0,
+            paper_bankroll_usd=paper_bankroll_usd,
+            live_trading=live_trading,
             momentum_max_positions=2,
             momentum_min_edge=0.085,
             momentum_min_volume_24h=500.0,
@@ -253,6 +259,29 @@ async def test_build_execution_guard_treats_zero_daily_spend_as_unlimited() -> N
     guard = await risk.build_execution_guard(make_review(signal))
 
     assert guard.notional_usd == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_uses_live_equity_for_drawdown_in_live_mode() -> None:
+    risk = RiskEngine(
+        make_context(
+            live_trading=True,
+            paper_bankroll_usd=10.0,
+            available_balance=8.0,
+            total_equity=8.0,
+            execution_state={
+                "daily_spend_usd": 0.0,
+                "realized_pnl_usd": 0.0,
+                "consecutive_losses": 0,
+                "last_loss_at": None,
+            },
+        )
+    )
+    signal = make_signal(symbol="BTC", tier="btc", edge=0.40, confidence=0.80, price=0.40, volume_24h=100000.0)
+
+    guard = await risk.build_execution_guard(make_review(signal))
+
+    assert guard.notional_usd > 0
 
 
 @pytest.mark.asyncio

@@ -119,8 +119,8 @@ class RiskSettings(BaseModel):
     min_confidence: float = 0.55
     max_kelly_fraction: float = 0.25
     max_single_exposure_fraction: float = 0.10
-    max_asset_exposure_fraction: float = 0.18
-    max_strategy_exposure_fraction: float = 0.25
+    max_asset_exposure_fraction: float = 0.40
+    max_strategy_exposure_fraction: float = 0.40
     max_single_position_usd: float = 100.0
     max_total_exposure_usd: float = 250.0
     max_daily_spend_usd: float = 50.0
@@ -282,7 +282,7 @@ class AppSettings(BaseSettings):
     momentum_enabled: bool = False
     momentum_markets: Annotated[list[str], NoDecode] = Field(default_factory=list)
     momentum_min_edge: float = 0.068
-    momentum_min_volume_24h: float = 500.0
+    momentum_min_volume_24h: float = 350.0
     momentum_signal_confidence_threshold: float = 0.58
     momentum_min_history_points: int = 6
     momentum_cooldown_minutes: int = 20

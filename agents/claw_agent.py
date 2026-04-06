@@ -14,7 +14,7 @@ from core.utils import parse_json_object, sanitize_text
 
 
 SYSTEM_PROMPT = """
-Voce e um executor em paper trading conservador.
+Voce e um executor de producao conservador na Polymarket.
 Responda APENAS com JSON valido:
 {"execute": true, "size": 100, "price_limit": 0.42, "reason": "..."}
 Nunca aumente size ou price_limit acima dos limites ja calculados.
@@ -28,6 +28,9 @@ class ClawAgent(BaseAgent):
         self.risk = RiskEngine(context)
         self.settlement = SettlementService(context, self.connector)
         self.consumer = f"claw-{uuid4().hex[:8]}"
+
+    def _order_stream(self) -> str:
+        return "orders:live" if self.context.settings.live_trading else "orders:paper"
 
     async def _place_order_or_block(
         self,
@@ -288,7 +291,7 @@ class ClawAgent(BaseAgent):
             paper_order.status,
             paper_order.model_dump(mode="json"),
         )
-        await self.context.bus.publish_event("orders:paper", paper_order.model_dump(mode="json"))
+        await self.context.bus.publish_event(self._order_stream(), paper_order.model_dump(mode="json"))
         return True, execution_mode
 
     async def execute_pair(self, review: PairReviewPayload) -> tuple[bool, str]:
@@ -397,7 +400,7 @@ class ClawAgent(BaseAgent):
                 "leg_role": "primary",
             },
         )
-        await self.context.bus.publish_event("orders:paper", primary_order.model_dump(mode="json"))
+        await self.context.bus.publish_event(self._order_stream(), primary_order.model_dump(mode="json"))
         pending = PendingPairOrderPayload(
             pending_order_id=str(uuid4()),
             trade_group_id=review.trade_group_id,
@@ -471,6 +474,8 @@ class ClawAgent(BaseAgent):
                     continue
                 fill_state = live_status
             else:
+                if self.context.settings.live_trading:
+                    continue
                 fill_state = await self._paper_pending_fill_state(pending)
                 if fill_state is None:
                     continue
@@ -523,7 +528,7 @@ class ClawAgent(BaseAgent):
                     "resolved_at": datetime.now(UTC).isoformat(),
                 },
             )
-            await self.context.bus.publish_event("orders:paper", hedge_order.model_dump(mode="json"))
+            await self.context.bus.publish_event(self._order_stream(), hedge_order.model_dump(mode="json"))
             filled_hedges += 1
             hedge_actions.append("hedge_filled")
         return {
@@ -678,7 +683,7 @@ class ClawAgent(BaseAgent):
                 payload.status,
                 payload.model_dump(mode="json"),
             )
-            await self.context.bus.publish_event("orders:paper", payload.model_dump(mode="json"))
+            await self.context.bus.publish_event(self._order_stream(), payload.model_dump(mode="json"))
             exit_orders_count += 1
             exit_actions.append(str(decision["reason"]))
         return {

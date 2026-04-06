@@ -3,8 +3,8 @@ risk:
   min_confidence: 0.55
   max_kelly_fraction: 0.25
   max_single_exposure_fraction: 0.10
-  max_asset_exposure_fraction: 0.18
-  max_strategy_exposure_fraction: 0.25
+  max_asset_exposure_fraction: 0.40
+  max_strategy_exposure_fraction: 0.40
   max_single_position_usd: 100.0
   max_total_exposure_usd: 300.0
   max_daily_spend_usd: 50.0

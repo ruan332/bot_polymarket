@@ -337,7 +337,7 @@ async def test_momentum_analysis_rejects_shallow_or_wide_book() -> None:
 
 
 @pytest.mark.asyncio
-async def test_momentum_analysis_rejects_marginal_edge_below_quality_floor() -> None:
+async def test_momentum_analysis_accepts_marginal_edge_after_quality_floor_relaxation() -> None:
     class QualityFloorConnector(FakeConnector):
         def __init__(self) -> None:
             super().__init__()
@@ -394,8 +394,9 @@ async def test_momentum_analysis_rejects_marginal_edge_below_quality_floor() -> 
         }
     )
 
-    assert decision.decision is None
-    assert decision.pre_risk_reason and "quality floor" in decision.pre_risk_reason
+    assert decision.decision is not None
+    assert decision.decision["edge"] >= 0.08
+    assert decision.decision["confidence"] >= 0.7
 
 
 @pytest.mark.asyncio

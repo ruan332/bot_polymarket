@@ -412,7 +412,7 @@ class MomentumTradingEngine:
         medium_anchor = history[max(0, len(history) - 7)]
         momentum_short = latest - short_anchor
         momentum_medium = latest - medium_anchor
-        if abs(momentum_short) < 0.015 and abs(momentum_medium) < 0.025:
+        if abs(momentum_short) < 0.012 and abs(momentum_medium) < 0.02:
             return MomentumAnalysisResult(None, "momentum below threshold")
         if momentum_short == 0 or momentum_medium == 0:
             return MomentumAnalysisResult(None, "flat momentum")
@@ -426,7 +426,7 @@ class MomentumTradingEngine:
         bid_depth = float(book.get("bid_depth") or 0.0)
         ask_depth = float(book.get("ask_depth") or 0.0)
         depth_total = float(book.get("bid_depth") or 0.0) + float(book.get("ask_depth") or 0.0)
-        if market_probability <= 0.08 or market_probability >= 0.92:
+        if market_probability <= 0.06 or market_probability >= 0.94:
             return MomentumAnalysisResult(None, f"probability saturated ({market_probability:.3f})")
         if spread_bps <= 0 or spread_bps > min(float(self.risk.config.max_spread_bps), 220.0):
             return MomentumAnalysisResult(None, f"spread too wide ({spread_bps:.1f} bps)")
@@ -436,7 +436,7 @@ class MomentumTradingEngine:
                 f"book too shallow (bid {bid_depth:.1f}, ask {ask_depth:.1f}, total {depth_total:.1f})",
             )
         expected_move = min(abs(momentum_short) * 1.8 + abs(momentum_medium) * 1.15, 0.18)
-        if expected_move < 0.035:
+        if expected_move < 0.025:
             return MomentumAnalysisResult(None, f"expected move too small ({expected_move:.3f})")
 
         model_probability = clamp(market_probability + expected_move, 0.02, 0.98)
@@ -444,7 +444,7 @@ class MomentumTradingEngine:
         edge = model_probability - market_probability - (expected_slippage_bps / 10000)
         quality_edge_floor = max(
             float(getattr(self.context.settings, "momentum_min_edge", 0.085) or 0.085),
-            0.11 + min(spread_bps / 50000.0, 0.015),
+            0.08 + min(spread_bps / 60000.0, 0.01),
         )
         if edge < quality_edge_floor:
             return MomentumAnalysisResult(None, f"edge below quality floor ({edge:.3f} < {quality_edge_floor:.3f})")

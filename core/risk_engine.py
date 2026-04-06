@@ -160,7 +160,10 @@ class RiskEngine:
         base_fraction = review.risk_fraction or self.kelly_fraction(signal.edge, signal.price)
         drawdown = 0.0
         settings = getattr(self.context, "settings", None)
-        initial_bankroll = float(getattr(settings, "paper_bankroll_usd", bankroll) or bankroll or 1.0)
+        if bool(getattr(settings, "live_trading", False)):
+            initial_bankroll = bankroll or 1.0
+        else:
+            initial_bankroll = float(getattr(settings, "paper_bankroll_usd", bankroll) or bankroll or 1.0)
         if initial_bankroll > 0:
             drawdown = max((initial_bankroll - bankroll) / initial_bankroll, 0.0)
         if drawdown >= self.config.daily_drawdown_limit_fraction:

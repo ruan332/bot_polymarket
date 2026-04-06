@@ -37,10 +37,16 @@ type Order = {
   order_id: string;
   asset_symbol: string;
   strategy_id?: string;
+  market_id?: string;
+  trade_group_id?: string;
+  leg_role?: string;
   direction: "YES" | "NO";
   action?: "entry" | "scale_in" | "scale_out" | "close";
+  notional_usd?: number;
   realized_pnl_usd?: number;
   status: string;
+  exchange_order_id?: string;
+  reason?: string;
   created_at: string;
 };
 
@@ -518,6 +524,8 @@ function toneForDecision(decision: Decision): LogTone {
 }
 
 function toneForOrder(order: Order): LogTone {
+  if (order.status === "live_submitted") return "warning";
+  if (order.status === "cancelled" || order.status === "expired" || order.status === "rejected") return "negative";
   const pnl = numberOr(order.realized_pnl_usd);
   if (pnl > 0) return "positive";
   if (pnl < 0) return "negative";
@@ -620,7 +628,7 @@ function buildSignalMetricsLog(signals: Signal[], filter: SignalMetricsFilter): 
 }
 
 function buildStrategyLog(
-  strategy: "pair_15m" | "momentum_15m",
+  strategy: "pair_15m" | "momentum_15m" | "weather_copytrade",
   signals: Signal[],
   decisions: Decision[],
   orders: Order[],
@@ -672,6 +680,28 @@ function buildStrategyLog(
   });
 
   return lines.sort((a, b) => b.time.localeCompare(a.time)).slice(0, 6);
+}
+
+function buildOrderLog(orders: Order[], strategy?: string): LogLine[] {
+  const filtered = strategy ? orders.filter((order) => order.strategy_id === strategy) : orders;
+  return filtered.slice(0, 8).map((order) => {
+    const status = order.status.toLowerCase();
+    const tag = status === "live_filled" ? "FILL" : status === "live_submitted" ? "SUB" : status === "cancelled" ? "CAN" : "OPS";
+    const notional = numberOr(order.notional_usd);
+    const pnl = numberOr(order.realized_pnl_usd);
+    return {
+      time: order.created_at,
+      tone: toneForOrder(order),
+      tag,
+      title: `${order.asset_symbol} ${order.direction} ${order.action ?? "entry"}${order.strategy_id ? ` · ${labelStrategy(order.strategy_id)}` : ""}`,
+      detail: `${notional > 0 ? `notional ${asCurrency(notional)} | ` : ""}realized ${asCurrencySigned(pnl)}`,
+      meta: `${order.status.toUpperCase()}${order.market_id ? ` | ${order.market_id}` : ""}${order.exchange_order_id ? ` | ${order.exchange_order_id.slice(0, 10)}` : ""}`,
+    };
+  });
+}
+
+function buildOperationsLog(orders: Order[]): LogLine[] {
+  return buildOrderLog(orders);
 }
 
 function evaluateStrategyGoals(strategy: "pair_15m" | "momentum_15m", report: PerformanceReport | null): StrategyGoalStatus {
@@ -838,6 +868,8 @@ export function DashboardClient() {
   const totalAgents = Object.keys(state.statuses).length;
   const pairGoal = evaluateStrategyGoals("pair_15m", state.pairPerformance);
   const momentumGoal = evaluateStrategyGoals("momentum_15m", state.momentumPerformance);
+  const operationsLog = buildOperationsLog(state.orders);
+  const weatherOperationsLog = buildOrderLog(state.orders, "weather_copytrade");
   const pairLog = buildStrategyLog("pair_15m", state.signals, state.decisions, state.orders, state.riskEvents);
   const momentumLog = buildStrategyLog("momentum_15m", state.signals, state.decisions, state.orders, state.riskEvents);
   const signalMetrics = buildSignalMetricsLog(state.signals, signalMetricsFilter);
@@ -1059,6 +1091,22 @@ export function DashboardClient() {
           />
           <LogPanel title="Pair_15M_Log" items={pairLog} />
           <LogPanel title="Momentum_15M_Log" items={momentumLog} />
+        </section>
+
+        <section className="grid gap-4 xl:grid-cols-[1.12fr_1fr_1fr]">
+          <LogPanel title="Operations_Log" items={operationsLog} />
+          <LogPanel
+            title="Weather_Copytrade_Log"
+            items={weatherOperationsLog}
+          />
+          <div className="border border-poly-border bg-poly-black p-4 font-mono text-[10px] text-poly-dim">
+            <div className="uppercase tracking-[0.25em] text-poly-dim">Operational Notes</div>
+            <div className="mt-3 space-y-2 text-poly-text">
+              <div>Orders are now shown from the local ledger in the same format used by the metrics engine.</div>
+              <div>Live orders are synced back into the ledger so fills and cancellations can surface after restarts.</div>
+              <div>Weather copytrade operations now have a dedicated log slice for easier inspection.</div>
+            </div>
+          </div>
         </section>
 
         <section className="border border-poly-border bg-[radial-gradient(circle_at_top_left,rgba(0,243,255,0.10),transparent_30%),radial-gradient(circle_at_bottom_right,rgba(0,255,65,0.08),transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.01),transparent)] p-4 md:p-5">

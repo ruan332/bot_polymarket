@@ -57,6 +57,7 @@ class WeatherCopytradeAgent(BaseAgent):
 
         if state and bool(state.get("active")) and not bool(state.get("paused")):
             sync_result = await self.service.sync_mirror_trades()
+            live_sync_result = await self.service.sync_live_order_statuses()
             await self.context.repository.record_pipeline_telemetry(
                 str(uuid4()),
                 self.name,
@@ -66,6 +67,19 @@ class WeatherCopytradeAgent(BaseAgent):
                     "processed": sync_result["processed"],
                     "skipped": sync_result["skipped"],
                     "reasons": sync_result["reasons"],
+                    "selected_proxy_wallet": str((state or {}).get("selected_proxy_wallet") or ""),
+                },
+            )
+            await self.context.repository.record_pipeline_telemetry(
+                str(uuid4()),
+                self.name,
+                "weather_copytrade.order_sync",
+                {
+                    "scanned": live_sync_result["scanned"],
+                    "synced": live_sync_result["synced"],
+                    "filled": live_sync_result["filled"],
+                    "cancelled": live_sync_result["cancelled"],
+                    "open": live_sync_result["open"],
                     "selected_proxy_wallet": str((state or {}).get("selected_proxy_wallet") or ""),
                 },
             )

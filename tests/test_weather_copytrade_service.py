@@ -61,7 +61,22 @@ class DummyRepository:
             "state": self.state,
         }
 
+    async def get_recent_orders(self, limit: int = 20, *, strategy: str | None = None, asset: str | None = None, tier: str | None = None, cutoff_name: str | None = None):
+        orders = list(self.orders)
+        if strategy:
+            orders = [item for item in orders if item.get("strategy_id") == strategy]
+        return orders[:limit]
+
     async def record_paper_order(self, order_id, signal_id, market_id, status, payload):  # pragma: no cover - exercised by service
+        payload = dict(payload)
+        payload["order_id"] = order_id
+        payload["signal_id"] = signal_id
+        payload["market_id"] = market_id
+        payload["status"] = status
+        for index, existing in enumerate(self.orders):
+            if existing.get("order_id") == order_id:
+                self.orders[index] = payload
+                return
         self.orders.append(payload)
 
 
@@ -74,6 +89,7 @@ class DummyConnector:
         self.markets = markets
         self.books = books
         self.orders: list[dict[str, object]] = []
+        self.live_orders: dict[str, dict[str, object]] = {}
 
     async def close(self) -> None:
         return None
@@ -100,6 +116,9 @@ class DummyConnector:
 
     async def get_orderbook_summary(self, token_id: str):
         return self.books.get(token_id)
+
+    async def get_order(self, order_id: str):
+        return self.live_orders.get(order_id)
 
     async def place_order(self, **kwargs):
         self.orders.append(kwargs)
@@ -314,6 +333,55 @@ async def test_approve_selection_and_sync_mirror_trades() -> None:
     assert sync["copied"] == 1
     assert sync["reasons"].get("non_weather_market", 0) == 1
     assert len(repository.orders) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_live_order_statuses_promotes_submitted_orders_to_filled() -> None:
+    now = datetime.now(UTC)
+    wallet = "0xweather1"
+    connector = DummyConnector(
+        leaderboard=[],
+        profiles={},
+        metrics={},
+        trades={},
+        markets={},
+        books={},
+    )
+    connector.live_orders["order-123"] = {
+        "status": "FILLED",
+        "size_matched": 8,
+        "size": 8,
+        "avgPrice": 0.52,
+    }
+    repository = DummyRepository()
+    repository.orders = [
+        {
+            "order_id": "order-123",
+            "signal_id": "signal-123",
+            "market_id": "cond-weather",
+            "asset_symbol": "WEATHER",
+            "strategy_id": "weather_copytrade",
+            "trade_group_id": wallet,
+            "direction": "YES",
+            "action": "entry",
+            "size": 8,
+            "price_limit": 0.52,
+            "notional_usd": 4.16,
+            "realized_pnl_usd": 0.0,
+            "status": "live_submitted",
+            "exchange_order_id": "order-123",
+            "created_at": now.isoformat(),
+        }
+    ]
+    service = make_service(connector, repository)
+    service.context.settings = SimpleNamespace(live_trading=True)
+
+    result = await service.sync_live_order_statuses()
+
+    assert result["scanned"] == 1
+    assert result["synced"] == 1
+    assert result["filled"] == 1
+    assert repository.orders[0]["status"] == "live_filled"
 
 
 @pytest.mark.asyncio

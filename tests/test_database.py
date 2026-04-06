@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -379,3 +380,60 @@ async def test_record_equity_snapshot_persists_canonical_source_and_trigger_sour
     assert "INSERT INTO equity_snapshots" in query
     assert args[7] == "polymarket_live"
     assert args[8] == "scan_cycle"
+
+
+@pytest.mark.asyncio
+async def test_record_paper_order_upserts_live_status_without_double_counting_positions() -> None:
+    class DummyDb:
+        def __init__(self):
+            self.status_lookup_calls = 0
+            self.executed: list[tuple[str, tuple[object, ...]]] = []
+
+        async def fetch(self, query: str, *args):
+            if "FROM positions" in query:
+                return []
+            return []
+
+        async def fetchrow(self, query: str, *args):
+            if "SELECT status FROM paper_orders" in query:
+                self.status_lookup_calls += 1
+                if self.status_lookup_calls == 1:
+                    return None
+                if self.status_lookup_calls == 2:
+                    return {"status": "live_submitted"}
+                return {"status": "live_filled"}
+            raise AssertionError(f"unexpected fetchrow query: {query}")
+
+        async def execute(self, query: str, *args):
+            self.executed.append((query, args))
+            return "OK"
+
+    db = DummyDb()
+    repo = TradingRepository(db, initial_bankroll=100.0)
+    position_effect = AsyncMock()
+    snapshot_effect = AsyncMock()
+    repo._upsert_position = position_effect  # type: ignore[assignment]
+    repo.record_equity_snapshot = snapshot_effect  # type: ignore[assignment]
+
+    payload = {
+        "action": "entry",
+        "direction": "YES",
+        "size": 10,
+        "price_limit": 0.55,
+        "notional_usd": 5.5,
+        "market_question": "Will BTC go up?",
+        "asset_symbol": "BTC",
+        "crypto_tier": "btc",
+        "strategy_id": "weather_copytrade",
+        "trade_group_id": "wallet-1",
+        "cycle_slug": "btc-updown-15m-1",
+        "leg_role": "primary",
+    }
+
+    await repo.record_paper_order("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", "market-1", "live_submitted", payload)
+    await repo.record_paper_order("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", "market-1", "live_filled", payload)
+    await repo.record_paper_order("11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", "market-1", "live_filled", payload)
+
+    assert position_effect.await_count == 1
+    assert snapshot_effect.await_count == 1
+    assert len(db.executed) == 3

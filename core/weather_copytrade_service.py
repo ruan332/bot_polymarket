@@ -279,6 +279,79 @@ class WeatherCopytradeService:
             "state": await self.context.repository.get_weather_copytrade_state(self.category),
         }
 
+    async def sync_live_order_statuses(self, *, limit: int = 100) -> dict[str, Any]:
+        if not bool(getattr(self.context.settings, "live_trading", False)):
+            return {"scanned": 0, "synced": 0, "filled": 0, "cancelled": 0, "open": 0, "orders": []}
+        recent_orders = await self.context.repository.get_recent_orders(limit=limit, strategy="weather_copytrade")
+        tracked_orders = [
+            item
+            for item in recent_orders
+            if str(item.get("status") or "") in {"live_submitted", "live_filled"}
+        ]
+        scanned = synced = filled = cancelled = open_orders = 0
+        order_events: list[dict[str, object]] = []
+        for order in tracked_orders:
+            exchange_order_id = str(order.get("exchange_order_id") or order.get("order_id") or "").strip()
+            order_id = str(order.get("order_id") or "").strip()
+            signal_id = str(order.get("signal_id") or "").strip()
+            market_id = str(order.get("market_id") or "").strip()
+            if not exchange_order_id:
+                continue
+            scanned += 1
+            live_state = await self._live_order_state(exchange_order_id, order)
+            if live_state is None or live_state["state"] == "open":
+                open_orders += 1
+                continue
+            synced += 1
+            order_events.append(
+                {
+                    "order_id": order_id,
+                    "exchange_order_id": exchange_order_id,
+                    "state": live_state["state"],
+                    "exchange_status": live_state.get("exchange_status", ""),
+                }
+            )
+            if not order_id or not signal_id or not market_id:
+                continue
+            if live_state["state"] == "filled":
+                filled += 1
+                await self.context.repository.record_paper_order(
+                    order_id,
+                    signal_id,
+                    market_id,
+                    "live_filled",
+                    {
+                        **order,
+                        **live_state.get("payload", {}),
+                        "status": "live_filled",
+                        "exchange_order_id": exchange_order_id,
+                        "realized_pnl_usd": float(order.get("realized_pnl_usd") or 0.0),
+                    },
+                )
+            elif live_state["state"] == "cancelled":
+                cancelled += 1
+                await self.context.repository.record_paper_order(
+                    order_id,
+                    signal_id,
+                    market_id,
+                    "cancelled",
+                    {
+                        **order,
+                        **live_state.get("payload", {}),
+                        "status": "cancelled",
+                        "exchange_order_id": exchange_order_id,
+                        "reason": live_state.get("reason") or "exchange_cancelled",
+                    },
+                )
+        return {
+            "scanned": scanned,
+            "synced": synced,
+            "filled": filled,
+            "cancelled": cancelled,
+            "open": open_orders,
+            "orders": order_events[:10],
+        }
+
     async def _evaluate_trader(self, rank: int, trader: dict[str, Any]) -> dict[str, Any] | None:
         proxy_wallet = str(trader.get("proxyWallet") or trader.get("proxy_wallet") or "").strip()
         if not proxy_wallet:
@@ -515,6 +588,56 @@ class WeatherCopytradeService:
             payload,
         )
         return {"copied": True, "reason": "mirrored", "trade_hash": trade_hash}
+
+    async def _live_order_state(self, exchange_order_id: str, order: dict[str, object]) -> dict[str, object] | None:
+        live_order = await self.connector.get_order(exchange_order_id)
+        if not live_order:
+            return None
+        status = str(live_order.get("status") or live_order.get("order_status") or "").upper()
+        matched_size = self._as_float(
+            live_order.get("size_matched")
+            or live_order.get("sizeMatched")
+            or live_order.get("filled_size")
+            or live_order.get("matched_size")
+        )
+        requested_size = max(
+            self._as_float(live_order.get("size") or live_order.get("original_size")),
+            self._as_float(order.get("size") or 0),
+        )
+        fill_price = self._as_float(
+            live_order.get("avgPrice")
+            or live_order.get("avg_price")
+            or live_order.get("price")
+            or order.get("price_limit")
+        )
+        if status in {"FILLED", "MATCHED"} or (requested_size > 0 and matched_size >= requested_size):
+            return {
+                "state": "filled",
+                "exchange_status": status or "FILLED",
+                "fill_price": fill_price or float(order.get("price_limit") or 0.0),
+                "payload": {
+                    "live_order": live_order,
+                    "fill_price": fill_price or float(order.get("price_limit") or 0.0),
+                    "fill_source": "exchange_status",
+                },
+            }
+        if status in {"CANCELLED", "CANCELED", "REJECTED", "FAILED"}:
+            return {
+                "state": "cancelled",
+                "exchange_status": status,
+                "reason": status.lower(),
+                "payload": {
+                    "live_order": live_order,
+                    "cancelled_at": datetime.now(UTC).isoformat(),
+                },
+            }
+        return {
+            "state": "open",
+            "exchange_status": status or "OPEN",
+            "payload": {
+                "live_order": live_order,
+            },
+        }
 
     def _passes_thresholds(self, metrics: dict[str, Any]) -> tuple[bool, str]:
         if metrics.get("pnl_all", 0.0) < float(self.settings.min_pnl_all):

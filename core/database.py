@@ -569,15 +569,29 @@ class TradingRepository:
         )
 
     async def record_paper_order(self, order_id: str, signal_id: str, market_id: str, status: str, payload: dict[str, Any]) -> None:
+        previous_status_row = await self.db.fetchrow(
+            "SELECT status FROM paper_orders WHERE id = $1::uuid",
+            order_id,
+        )
+        previous_status = str(previous_status_row["status"]) if previous_status_row is not None else ""
         await self.db.execute(
-            "INSERT INTO paper_orders (id, signal_id, market_id, status, payload) VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb)",
+            """
+            INSERT INTO paper_orders (id, signal_id, market_id, status, payload)
+            VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb)
+            ON CONFLICT (id) DO UPDATE
+            SET signal_id = EXCLUDED.signal_id,
+                market_id = EXCLUDED.market_id,
+                status = EXCLUDED.status,
+                payload = EXCLUDED.payload
+            """,
             order_id,
             signal_id,
             market_id,
             status,
             _as_json(payload),
         )
-        if status in {"simulated", "live_filled"}:
+        should_apply_position_effect = status in {"simulated", "live_filled"} and previous_status not in FILLED_ORDER_STATUSES
+        if should_apply_position_effect:
             action = str(payload.get("action") or "entry")
             if action in {"entry", "scale_in"}:
                 await self._upsert_position(

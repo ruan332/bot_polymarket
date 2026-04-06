@@ -553,6 +553,9 @@ class MarketConnector:
             "live_trading": self.context.settings.live_trading,
         }
         if self.context.settings.live_trading:
+            min_order_size = max(int(getattr(self.context.settings, "polymarket_live_min_order_size", 5) or 5), 1)
+            if size < min_order_size:
+                raise ValueError(f"live order size below Polymarket minimum size: {size} < {min_order_size}")
             client = await self._get_live_client()
             live_side = side.upper() if side else (BUY if direction in {"YES", "BUY"} else SELL)
             signed_order = await to_thread(

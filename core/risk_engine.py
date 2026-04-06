@@ -189,10 +189,14 @@ class RiskEngine:
             value_to_bet *= self.crypto.indirect_max_position_scale
         target_entry_notional = 0.0
         momentum_sizing_mode = str(getattr(self.context.settings, "momentum_sizing_mode", "fixed_notional") or "fixed_notional")
+        live_trading = bool(getattr(settings, "live_trading", False))
+        min_live_order_size = max(int(getattr(settings, "polymarket_live_min_order_size", 5) or 5), 1)
         if signal.strategy_id == "momentum_15m" and momentum_sizing_mode == "fixed_notional":
             target_entry_notional = float(getattr(self.context.settings, "momentum_entry_notional_usd", 1.0) or 1.0)
             target_entry_notional = max(target_entry_notional, 0.0)
-            size = max(0, ceil(target_entry_notional / max(signal.price, 1e-6)))
+            if live_trading:
+                target_entry_notional = max(target_entry_notional, min_live_order_size * max(signal.price, 1e-6))
+            size = max(min_live_order_size if live_trading else 0, ceil(target_entry_notional / max(signal.price, 1e-6)))
         else:
             size = review.kelly_size or max(0, int(value_to_bet / max(signal.price, 1e-6)))
         if size <= 0:

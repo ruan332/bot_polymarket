@@ -246,6 +246,7 @@ class AppSettings(BaseSettings):
     polymarket_signature_type: int = 0
     polymarket_chain_id: int = 137
     polymarket_live_min_usdc_balance: float = 5.0
+    polymarket_live_min_order_size: int = 5
     polymarket_sync_balance_allowance_on_startup: bool = False
     polymarket_live_bootstrap_fail_open: bool = False
     startup_max_retries: int = 10
@@ -282,8 +283,8 @@ class AppSettings(BaseSettings):
     momentum_enabled: bool = False
     momentum_markets: Annotated[list[str], NoDecode] = Field(default_factory=list)
     momentum_min_edge: float = 0.068
-    momentum_min_volume_24h: float = 350.0
-    momentum_signal_confidence_threshold: float = 0.58
+    momentum_min_volume_24h: float = 30.0
+    momentum_signal_confidence_threshold: float = 0.54
     momentum_min_history_points: int = 6
     momentum_cooldown_minutes: int = 20
     momentum_max_positions: int = 2
@@ -342,6 +343,13 @@ class AppSettings(BaseSettings):
     def validate_positive_momentum_settings(cls, value: int | float) -> int | float:
         if value < 0:
             raise ValueError("value must be non-negative")
+        return value
+
+    @field_validator("polymarket_live_min_order_size")
+    @classmethod
+    def validate_positive_live_order_size(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("value must be positive")
         return value
 
     @property

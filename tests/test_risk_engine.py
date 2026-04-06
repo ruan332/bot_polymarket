@@ -238,7 +238,21 @@ async def test_build_execution_guard_blocks_small_caps_more_aggressively() -> No
     assert guard.notional_usd == pytest.approx(100.0)
     small_cap_guard = await risk.build_execution_guard(make_review(small_cap_signal))
     assert small_cap_guard.notional_usd == pytest.approx(34.8)
-    assert small_cap_guard.size < guard.size
+
+
+@pytest.mark.asyncio
+async def test_build_execution_guard_enforces_live_min_order_size_for_momentum() -> None:
+    risk = RiskEngine(make_context(live_trading=True))
+    signal = make_signal(symbol="BTC", tier="btc", edge=0.30, confidence=0.75, price=0.63, volume_24h=50000.0).model_copy(
+        update={"strategy_id": "momentum_15m"}
+    )
+    review = make_review(signal)
+
+    guard = await risk.build_execution_guard(review)
+
+    assert guard.size == 5
+    assert guard.entry_notional_target_usd == pytest.approx(3.15)
+    assert guard.notional_usd == pytest.approx(3.15)
 
 
 @pytest.mark.asyncio

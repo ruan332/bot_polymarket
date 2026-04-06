@@ -596,6 +596,7 @@ class FakeContext:
             polymarket_funder="",
             polymarket_signature_type=0,
             polymarket_chain_id=137,
+            polymarket_live_min_order_size=5,
             news_provider_primary="marketaux",
             news_provider_fallback="alphavantage",
             news_lookback_hours=24,
@@ -633,6 +634,12 @@ class FakeContext:
             momentum_take_profit_usd=1.0,
             momentum_sizing_mode="fixed_notional",
         )
+        self.live_bootstrap_status = {
+            "mode": "live",
+            "ready": True,
+            "reason": "live trading ready",
+            "parsed_collateral": {"balance": 12.0, "allowance": 12.0},
+        }
         self.agents_config = load_agents_config()
         self.risk_config = load_risk_config()
         self.risk_config.max_daily_spend_usd = 100.0
@@ -644,6 +651,9 @@ class FakeContext:
         self.agents_config = load_agents_config()
         self.risk_config = load_risk_config()
         self.crypto_config = load_crypto_config()
+
+    async def refresh_live_bootstrap_status(self, *, sync_allowance: bool = False):
+        return dict(self.live_bootstrap_status)
 
     async def close(self) -> None:
         return None
@@ -1185,7 +1195,43 @@ async def test_claw_blocks_live_buy_orders_below_polymarket_minimum(monkeypatch)
     assert result["status"] == "blocked"
     assert "minimum size" in str(result["error"])
     assert context.repository.risk_events[-1]["notional_usd"] == pytest.approx(0.65)
-    assert context.bus.streams["events:risk"][-1][1]["reason"].startswith("live order below Polymarket minimum size")
+    assert context.bus.streams["events:risk"][-1][1]["reason"].startswith("live order size below Polymarket minimum size")
+
+
+@pytest.mark.asyncio
+async def test_claw_blocks_live_orders_when_bootstrap_is_not_ready(monkeypatch) -> None:
+    context = FakeContext()
+    context.settings.live_trading = True
+    context.live_bootstrap_status = {
+        "mode": "live",
+        "ready": False,
+        "reason": "insufficient collateral balance/allowance for live trading",
+        "parsed_collateral": {"balance": 0.0, "allowance": 0.0},
+    }
+    claw = ClawAgent(context)
+    called = False
+
+    async def fake_place_order(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("connector should not be called when bootstrap is not ready")
+
+    monkeypatch.setattr(claw.connector, "place_order", fake_place_order)
+
+    result = await claw._place_order_or_block(
+        market_id="market-1",
+        token_id="token-yes-1",
+        direction="YES",
+        size=5,
+        price_limit=0.325,
+        reason="test live bootstrap",
+        details={"signal_id": "sig-1", "asset_symbol": "BTC"},
+    )
+
+    assert called is False
+    assert result["status"] == "blocked"
+    assert "live trading not ready" in str(result["error"])
+    assert context.repository.risk_events[-1]["bootstrap_status"]["ready"] is False
 
 
 @pytest.mark.asyncio

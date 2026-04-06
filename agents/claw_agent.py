@@ -45,6 +45,60 @@ class ClawAgent(BaseAgent):
         details: dict[str, object],
     ) -> dict[str, object]:
         if self.context.settings.live_trading:
+            bootstrap_status = getattr(self.context, "live_bootstrap_status", {}) or {}
+            if not isinstance(bootstrap_status, dict) or not bootstrap_status.get("ready"):
+                refresh = getattr(self.context, "refresh_live_bootstrap_status", None)
+                if callable(refresh):
+                    bootstrap_status = await refresh(sync_allowance=False)
+            if not isinstance(bootstrap_status, dict) or not bootstrap_status.get("ready"):
+                bootstrap_reason = str(
+                    (bootstrap_status.get("reason") if isinstance(bootstrap_status, dict) else None)
+                    or "live bootstrap unavailable"
+                )
+                message = f"live trading not ready: {bootstrap_reason}"
+                await self.risk.record_block(
+                    self.name,
+                    message,
+                    {
+                        **details,
+                        "market_id": market_id,
+                        "token_id": token_id,
+                        "direction": direction,
+                        "size": size,
+                        "price_limit": price_limit,
+                        "reason": reason,
+                        "bootstrap_status": bootstrap_status,
+                    },
+                )
+                return {
+                    "status": "blocked",
+                    "error": message,
+                    "exchange_order_id": "",
+                }
+            min_order_size = max(int(getattr(self.context.settings, "polymarket_live_min_order_size", 5) or 5), 1)
+            if size < min_order_size:
+                message = f"live order size below Polymarket minimum size: {size} < {min_order_size}"
+                notional = round(float(size) * float(price_limit), 4)
+                await self.risk.record_block(
+                    self.name,
+                    message,
+                    {
+                        **details,
+                        "market_id": market_id,
+                        "token_id": token_id,
+                        "direction": direction,
+                        "size": size,
+                        "price_limit": price_limit,
+                        "reason": reason,
+                        "notional_usd": notional,
+                        "min_order_size": min_order_size,
+                    },
+                )
+                return {
+                    "status": "blocked",
+                    "error": message,
+                    "exchange_order_id": "",
+                }
             notional = round(float(size) * float(price_limit), 4)
             if notional < 1.0:
                 message = f"live order below Polymarket minimum size: ${notional:.2f} < $1.00"

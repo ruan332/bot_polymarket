@@ -115,6 +115,20 @@ async def test_place_order_uses_py_clob_client_when_live_enabled(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_place_order_rejects_live_orders_below_exchange_minimum() -> None:
+    connector = MarketConnector(FakeContext(live_trading=True))
+
+    with pytest.raises(ValueError, match="minimum size"):
+        await connector.place_order(
+            market_id="market-1",
+            token_id="token-1",
+            direction="YES",
+            size=2,
+            price_limit=0.41,
+        )
+
+
+@pytest.mark.asyncio
 async def test_get_live_bootstrap_status_reports_paper_mode() -> None:
     connector = MarketConnector(FakeContext(live_trading=False))
 

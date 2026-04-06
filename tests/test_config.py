@@ -191,8 +191,8 @@ def test_app_settings_momentum_defaults(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.momentum_markets == []
     assert settings.momentum_trading_enabled is False
     assert settings.momentum_min_edge == pytest.approx(0.068)
-    assert settings.momentum_min_volume_24h == pytest.approx(500.0)
-    assert settings.momentum_signal_confidence_threshold == pytest.approx(0.58)
+    assert settings.momentum_min_volume_24h == pytest.approx(30.0)
+    assert settings.momentum_signal_confidence_threshold == pytest.approx(0.54)
     assert settings.momentum_min_history_points == 6
     assert settings.momentum_cooldown_minutes == 20
     assert settings.momentum_max_positions == 2
@@ -253,10 +253,15 @@ def test_app_settings_momentum_env_parses_csv(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_app_settings_live_bootstrap_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    for key in ("POLYMARKET_LIVE_MIN_USDC_BALANCE", "POLYMARKET_SYNC_BALANCE_ALLOWANCE_ON_STARTUP"):
+    for key in (
+        "POLYMARKET_LIVE_MIN_USDC_BALANCE",
+        "POLYMARKET_LIVE_MIN_ORDER_SIZE",
+        "POLYMARKET_SYNC_BALANCE_ALLOWANCE_ON_STARTUP",
+    ):
         monkeypatch.delenv(key, raising=False)
 
     settings = AppSettings(_env_file=None)
 
     assert settings.polymarket_live_min_usdc_balance == pytest.approx(5.0)
+    assert settings.polymarket_live_min_order_size == 5
     assert settings.polymarket_sync_balance_allowance_on_startup is False

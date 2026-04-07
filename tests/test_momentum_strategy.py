@@ -341,6 +341,9 @@ async def test_momentum_engine_skips_low_liquidity_markets_before_orderbook_fetc
     assert stats["persisted_signals"] == 0
     assert stats["liquidity_prefilter_blocked"] == 1
     assert stats["pre_risk_blocked"] == 1
+    assert stats["liquidity_prefilter_breakdown"]["reasons"]["market volume below minimum"] == 1
+    assert stats["liquidity_prefilter_breakdown"]["volume_buckets"]["<5"] == 1
+    assert stats["liquidity_prefilter_breakdown"]["samples"][0]["market_id"] == "market-btc-15m"
     assert connector.orderbook_calls == 0
 
 

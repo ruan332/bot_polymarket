@@ -121,6 +121,13 @@ class MomentumTradingEngine:
             "persisted_signals": 0,
             "selected_markets": [],
             "liquidity_prefilter_blocked": 0,
+            "liquidity_prefilter_breakdown": {
+                "reasons": {},
+                "market_kind": {},
+                "crypto_tier": {},
+                "volume_buckets": {},
+                "samples": [],
+            },
             "discovery_source": "momentum_strategy",
             "news_validation_enabled": bool(self.context.settings.news_validation_enabled),
             "feed_error": "",
@@ -137,22 +144,29 @@ class MomentumTradingEngine:
             floor = self._momentum_volume_floor(cycle, now=now)
             if floor > 0 and cycle.volume_24h < floor:
                 self._mark_low_liquidity_backoff(cycle.market_id, now=now)
-                liquidity_prefilter_blocked += 1
-                self._increment_reason(
+                self._record_liquidity_prefilter_block(
                     stats,
-                    "market volume below minimum",
-                    bucket_name="pre_risk_blocked",
-                    reasons_key="pre_risk_block_reasons",
+                    cycle,
+                    reason="market volume below minimum",
+                    actual_volume=cycle.volume_24h,
+                    volume_floor=floor,
+                    backoff_active=False,
+                    now=now,
                 )
+                liquidity_prefilter_blocked += 1
                 continue
             if self._low_liquidity_backoff_active(cycle.market_id, now):
-                liquidity_prefilter_blocked += 1
-                self._increment_reason(
+                floor = self._momentum_volume_floor(cycle, now=now)
+                self._record_liquidity_prefilter_block(
                     stats,
-                    "market volume below minimum",
-                    bucket_name="pre_risk_blocked",
-                    reasons_key="pre_risk_block_reasons",
+                    cycle,
+                    reason="market volume below minimum",
+                    actual_volume=cycle.volume_24h,
+                    volume_floor=floor,
+                    backoff_active=True,
+                    now=now,
                 )
+                liquidity_prefilter_blocked += 1
                 continue
             self.low_liquidity_backoff.pop(cycle.market_id, None)
             eligible_cycles.append(cycle)
@@ -718,6 +732,70 @@ class MomentumTradingEngine:
         stats[bucket_name] += 1
         bucket = stats.setdefault(reasons_key, {})
         bucket[reason] = int(bucket.get(reason, 0)) + 1
+
+    def _record_liquidity_prefilter_block(
+        self,
+        stats: dict[str, Any],
+        cycle: MomentumCycleRuntime,
+        *,
+        reason: str,
+        actual_volume: float,
+        volume_floor: float,
+        backoff_active: bool,
+        now: datetime,
+    ) -> None:
+        self._increment_reason(
+            stats,
+            reason,
+            bucket_name="pre_risk_blocked",
+            reasons_key="pre_risk_block_reasons",
+        )
+        breakdown = stats.setdefault(
+            "liquidity_prefilter_breakdown",
+            {"reasons": {}, "market_kind": {}, "crypto_tier": {}, "volume_buckets": {}, "samples": []},
+        )
+        for key, value in (
+            ("reasons", reason),
+            ("market_kind", "direct_coin"),
+            ("crypto_tier", cycle.crypto_tier),
+        ):
+            bucket = breakdown.setdefault(key, {})
+            bucket[value] = int(bucket.get(value, 0)) + 1
+        volume_bucket = self._volume_bucket(actual_volume)
+        volume_buckets = breakdown.setdefault("volume_buckets", {})
+        volume_buckets[volume_bucket] = int(volume_buckets.get(volume_bucket, 0)) + 1
+        samples = breakdown.setdefault("samples", [])
+        if len(samples) < 12:
+            samples.append(
+                {
+                    "market_id": cycle.market_id,
+                    "asset_symbol": cycle.asset_symbol,
+                    "crypto_tier": cycle.crypto_tier,
+                    "market_kind": "direct_coin",
+                    "reason": reason,
+                    "actual_volume_24h": round(actual_volume, 2),
+                    "volume_floor_24h": round(volume_floor, 2),
+                    "volume_bucket": volume_bucket,
+                    "backoff_active": backoff_active,
+                    "evaluated_at": now.isoformat(),
+                }
+            )
+
+    @staticmethod
+    def _volume_bucket(volume_24h: float) -> str:
+        if volume_24h < 5:
+            return "<5"
+        if volume_24h < 10:
+            return "5-10"
+        if volume_24h < 20:
+            return "10-20"
+        if volume_24h < 30:
+            return "20-30"
+        if volume_24h < 50:
+            return "30-50"
+        if volume_24h < 100:
+            return "50-100"
+        return "100+"
 
     def _crypto_tier(self, asset_symbol: str) -> Literal["btc", "major", "small_cap"]:
         symbol = asset_symbol.upper()

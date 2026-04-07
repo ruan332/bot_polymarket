@@ -74,12 +74,19 @@ class DummyProvider:
         )
 
 
-def _make_candidate_decision(edge: float, confidence: float, direction: str = "YES") -> SimpleNamespace:
+def _make_candidate_decision(
+    edge: float,
+    confidence: float,
+    direction: str = "YES",
+    *,
+    features_summary: dict[str, object] | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         strategy_id="trend_follow_bayes",
         direction=direction,
         edge=edge,
         confidence=confidence,
+        features_summary=features_summary or {},
     )
 
 
@@ -205,5 +212,140 @@ def test_discovery_service_runs_cheap_llm_then_final_claude_only_on_shortlist() 
         assert repository.latest_run is not None
         assert len(repository.latest_candidates) == 3
         assert result["stage_counts"][0]["count"] == 3
+
+    asyncio.run(run_case())
+
+
+def test_discovery_service_prioritizes_more_executable_volatile_setups() -> None:
+    async def run_case() -> None:
+        markets = [
+            {
+                "id": "calm",
+                "question": "Will BTC stay range bound?",
+                "asset_symbol": "BTC",
+                "asset_name": "Bitcoin",
+                "crypto_tier": "btc",
+                "market_kind": "direct_coin",
+                "volume_24h": 18000,
+                "price_yes": 0.51,
+                "price_no": 0.49,
+                "orderbook_summary_yes": {"spread_bps": 32, "bid_depth": 260, "ask_depth": 250},
+                "orderbook_summary_no": {"spread_bps": 34, "bid_depth": 250, "ask_depth": 240},
+                "thesis_tags": ["btc", "range"],
+                "end_date": "2026-12-31T00:00:00Z",
+            },
+            {
+                "id": "volatile",
+                "question": "Will BTC breakout higher this week?",
+                "asset_symbol": "BTC",
+                "asset_name": "Bitcoin",
+                "crypto_tier": "btc",
+                "market_kind": "direct_coin",
+                "volume_24h": 18000,
+                "price_yes": 0.52,
+                "price_no": 0.48,
+                "orderbook_summary_yes": {"spread_bps": 32, "bid_depth": 260, "ask_depth": 250},
+                "orderbook_summary_no": {"spread_bps": 34, "bid_depth": 250, "ask_depth": 240},
+                "thesis_tags": ["btc", "breakout"],
+                "end_date": "2026-12-31T00:00:00Z",
+            },
+            {
+                "id": "wide_spread",
+                "question": "Will ETH spike today?",
+                "asset_symbol": "ETH",
+                "asset_name": "Ethereum",
+                "crypto_tier": "major",
+                "market_kind": "direct_coin",
+                "volume_24h": 22000,
+                "price_yes": 0.58,
+                "price_no": 0.42,
+                "orderbook_summary_yes": {"spread_bps": 140, "bid_depth": 220, "ask_depth": 210},
+                "orderbook_summary_no": {"spread_bps": 138, "bid_depth": 200, "ask_depth": 190},
+                "thesis_tags": ["eth", "spike"],
+                "end_date": "2026-12-31T00:00:00Z",
+            },
+        ]
+        decisions = {
+            "calm": _make_candidate_decision(
+                edge=0.24,
+                confidence=0.73,
+                features_summary={"momentum_short": 0.01, "momentum_medium": 0.01},
+            ),
+            "volatile": _make_candidate_decision(
+                edge=0.24,
+                confidence=0.73,
+                features_summary={"momentum_short": 0.05, "momentum_medium": 0.06},
+            ),
+            "wide_spread": _make_candidate_decision(
+                edge=0.22,
+                confidence=0.67,
+                features_summary={"momentum_short": 0.03, "momentum_medium": 0.04},
+            ),
+        }
+        repository = DummyRepository()
+        context = SimpleNamespace(
+            repository=repository,
+            crypto_config=SimpleNamespace(
+                enabled=True,
+                indirect_min_edge_buffer=0.06,
+                indirect_min_confidence_buffer=0.05,
+                indirect_min_volume_multiplier=1.5,
+                tier=lambda tier_name: SimpleNamespace(min_edge=0.20, min_confidence=0.60, min_volume_24h=5000.0, max_position_usd=100.0),
+            ),
+            risk_config=SimpleNamespace(max_spread_bps=250),
+            agents_config=SimpleNamespace(
+                agents={
+                    "news_validator": SimpleNamespace(
+                        model="gpt-4o-mini",
+                        provider="openai",
+                        temperature=0.0,
+                        max_tokens=512,
+                        fallback_model="gpt-4o-mini",
+                        daily_cost_limit_usd=1.0,
+                    ),
+                    "claude": SimpleNamespace(
+                        model="claude-sonnet-4-20250514",
+                        provider="anthropic",
+                        temperature=0.0,
+                        max_tokens=512,
+                        fallback_model="claude-3-5-haiku-20241022",
+                        daily_cost_limit_usd=1.0,
+                        scan_limit=24,
+                    ),
+                }
+            ),
+        )
+        service = DiscoveryService(
+            context,  # type: ignore[arg-type]
+            connector=DummyConnector(markets, {"crypto_classified": 3, "selected_for_scan": 3}),
+            strategy=DummyStrategy(decisions),
+            research_provider=DummyProvider(
+                model="gpt-4o-mini",
+                provider="openai",
+                responses=[
+                    {"content": '{"recommendation":"promote","score":0.91,"summary":"strong fit","why":"high quality setup","risks":["liquidity"],"follow_up":"send to Claude"}'},
+                    {"content": '{"recommendation":"promote","score":0.88,"summary":"good fit","why":"volatile and executable","risks":["noise"],"follow_up":"keep"}'},
+                    {"content": '{"recommendation":"promote","score":0.86,"summary":"acceptable","why":"edge but wide spread","risks":["spread"],"follow_up":"monitor"}'},
+                ],
+            ),
+            final_provider=DummyProvider(
+                model="claude-sonnet-4-20250514",
+                provider="anthropic",
+                responses=[
+                    {"content": '{"operable":true,"final_score":0.88,"strategy_fit":"trend_follow_bayes","summary":"operable","blocked_reasons":[],"operator_note":"include in operation"}'},
+                    {"content": '{"operable":true,"final_score":0.85,"strategy_fit":"trend_follow_bayes","summary":"operable","blocked_reasons":[],"operator_note":"include in operation"}'},
+                    {"content": '{"operable":true,"final_score":0.82,"strategy_fit":"trend_follow_bayes","summary":"operable","blocked_reasons":[],"operator_note":"include in operation"}'},
+                ],
+            ),
+            research_cost_tracker=DummyTracker(),
+            final_cost_tracker=DummyTracker(),
+        )
+
+        result = await service.run(limit=3)
+
+        assert result["run"]["universe_count"] == 3
+        assert repository.latest_candidates[0]["market_id"] == "volatile"
+        assert repository.latest_candidates[0]["score"] > repository.latest_candidates[1]["score"]
+        assert repository.latest_candidates[1]["score"] >= repository.latest_candidates[2]["score"]
 
     asyncio.run(run_case())

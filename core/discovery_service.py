@@ -213,6 +213,7 @@ class DiscoveryService:
         edge = 0.0
         confidence = 0.0
         liquidity_score = 0.0
+        volatility_score = 0.0
         spread_bps = self._spread_bps(market)
         time_to_expiry_hours = self._time_to_expiry_hours(market)
         reason_parts: list[str] = []
@@ -238,6 +239,10 @@ class DiscoveryService:
             direction = decision.direction
             edge = float(decision.edge)
             confidence = float(decision.confidence)
+            features_summary = getattr(decision, "features_summary", {}) or {}
+            momentum_short = abs(float(features_summary.get("momentum_short") or 0.0))
+            momentum_medium = abs(float(features_summary.get("momentum_medium") or 0.0))
+            volatility_score = clamp((momentum_short + momentum_medium) / 0.12, 0.0, 1.0)
             yes_book = market.get("orderbook_summary_yes") or {}
             no_book = market.get("orderbook_summary_no") or {}
             yes_depth = float(yes_book.get("bid_depth") or 0.0) + float(yes_book.get("ask_depth") or 0.0)
@@ -257,11 +262,12 @@ class DiscoveryService:
         normalized_volume = clamp(float(market.get("volume_24h") or 0.0) / max(min_volume, 1.0), 0.0, 2.0)
         normalized_spread = clamp(1 - (spread_bps / max(float(self.context.risk_config.max_spread_bps), 1.0)), 0.0, 1.0)
         score = clamp(
-            0.35 * normalized_edge
-            + 0.25 * normalized_confidence
-            + 0.20 * clamp(normalized_volume / 2.0, 0.0, 1.0)
-            + 0.15 * clamp(liquidity_score / 1.0, 0.0, 1.0)
-            + 0.05 * normalized_spread,
+            0.38 * normalized_edge
+            + 0.14 * normalized_confidence
+            + 0.12 * clamp(normalized_volume / 2.0, 0.0, 1.0)
+            + 0.14 * clamp(liquidity_score / 1.0, 0.0, 1.0)
+            + 0.06 * normalized_spread
+            + 0.16 * volatility_score,
             0.0,
             1.0,
         )
@@ -277,6 +283,7 @@ class DiscoveryService:
                 "confidence": round(confidence, 4),
                 "spread_bps": round(spread_bps, 2),
                 "liquidity_score": round(liquidity_score, 4),
+                "volatility_score": round(volatility_score, 4),
                 "time_to_expiry_hours": None if time_to_expiry_hours is None else round(time_to_expiry_hours, 2),
                 "market_kind": market_kind,
                 "volume_24h": float(market.get("volume_24h") or 0.0),
@@ -295,6 +302,7 @@ class DiscoveryService:
             "edge": round(edge, 4),
             "confidence": round(confidence, 4),
             "liquidity_score": round(liquidity_score, 4),
+            "volatility_score": round(volatility_score, 4),
             "time_to_expiry_hours": time_to_expiry_hours,
             "strategy_id": strategy_id,
             "direction": direction,
@@ -399,6 +407,7 @@ class DiscoveryService:
             f"Confidence: {candidate['confidence']:.4f}\n"
             f"Spread bps: {candidate['spread_bps']:.2f}\n"
             f"Liquidity score: {candidate['liquidity_score']:.4f}\n"
+            f"Volatility score: {candidate['volatility_score']:.4f}\n"
             f"Volume 24h: {candidate['volume_24h']:.2f}\n"
             f"Time to expiry (h): {candidate['time_to_expiry_hours'] if candidate['time_to_expiry_hours'] is not None else 'unknown'}\n"
             f"Strategy reasoning: {sanitize_text(str(candidate['stage_payload']['deterministic'].get('reason') or ''), 220)}\n"
@@ -425,6 +434,7 @@ class DiscoveryService:
             f"Confidence: {candidate['confidence']:.4f}\n"
             f"Spread bps: {candidate['spread_bps']:.2f}\n"
             f"Liquidity score: {candidate['liquidity_score']:.4f}\n"
+            f"Volatility score: {candidate['volatility_score']:.4f}\n"
             f"Volume 24h: {candidate['volume_24h']:.2f}\n"
             f"Time to expiry (h): {candidate['time_to_expiry_hours'] if candidate['time_to_expiry_hours'] is not None else 'unknown'}\n"
         )
@@ -533,6 +543,7 @@ class DiscoveryService:
                     "edge": candidate["edge"],
                     "confidence": candidate["confidence"],
                     "liquidity_score": candidate["liquidity_score"],
+                    "volatility_score": candidate["volatility_score"],
                     "time_to_expiry_hours": candidate["time_to_expiry_hours"],
                     "strategy_id": candidate["strategy_id"],
                     "direction": candidate["direction"],
@@ -557,6 +568,7 @@ class DiscoveryService:
                         "edge": candidate["edge"],
                         "confidence": candidate["confidence"],
                         "liquidity_score": candidate["liquidity_score"],
+                        "volatility_score": candidate["volatility_score"],
                         "time_to_expiry_hours": candidate["time_to_expiry_hours"],
                         "strategy_id": candidate["strategy_id"],
                         "direction": candidate["direction"],

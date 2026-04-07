@@ -500,8 +500,6 @@ class MomentumTradingEngine:
         bid_depth = float(book.get("bid_depth") or 0.0)
         ask_depth = float(book.get("ask_depth") or 0.0)
         depth_total = float(book.get("bid_depth") or 0.0) + float(book.get("ask_depth") or 0.0)
-        if market_probability <= 0.06 or market_probability >= 0.94:
-            return MomentumAnalysisResult(None, f"probability saturated ({market_probability:.3f})")
         if spread_bps <= 0 or spread_bps > min(float(self.risk.config.max_spread_bps), 220.0):
             return MomentumAnalysisResult(None, f"spread too wide ({spread_bps:.1f} bps)")
         if bid_depth < 15.0 or ask_depth < 15.0 or depth_total < 45.0:
@@ -513,13 +511,32 @@ class MomentumTradingEngine:
         if expected_move < 0.02:
             return MomentumAnalysisResult(None, f"expected move too small ({expected_move:.3f})")
 
-        model_probability = clamp(market_probability + expected_move, 0.02, 0.98)
-        expected_slippage_bps = round(max(spread_bps * 0.35, 8.0), 2)
+        continuation_strength = abs(momentum_short) + abs(momentum_medium)
+        strong_continuation = expected_move >= 0.07 and continuation_strength >= 0.08
+        moderate_continuation = expected_move >= 0.045 and continuation_strength >= 0.05
+        saturation_floor = 0.06
+        saturation_cap = 0.94
+        if strong_continuation:
+            saturation_floor = 0.03
+            saturation_cap = 0.975
+        elif moderate_continuation:
+            saturation_floor = 0.045
+            saturation_cap = 0.96
+        if market_probability <= saturation_floor or market_probability >= saturation_cap:
+            return MomentumAnalysisResult(None, f"probability saturated ({market_probability:.3f})")
+
+        model_probability_cap = 0.995 if strong_continuation else 0.985 if moderate_continuation else 0.98
+        model_probability = clamp(market_probability + expected_move, 0.02, model_probability_cap)
+        expected_slippage_bps = round(max(spread_bps * (0.28 if strong_continuation else 0.35), 6.0 if strong_continuation else 8.0), 2)
         edge = model_probability - market_probability - (expected_slippage_bps / 10000)
         quality_edge_floor = max(
             float(getattr(self.context.settings, "momentum_min_edge", 0.085) or 0.085),
             0.07 + min(spread_bps / 75000.0, 0.008),
         )
+        if strong_continuation:
+            quality_edge_floor = max(quality_edge_floor - 0.05, 0.03)
+        elif moderate_continuation:
+            quality_edge_floor = max(quality_edge_floor - 0.015, 0.045)
         if edge < quality_edge_floor:
             return MomentumAnalysisResult(None, f"edge below quality floor ({edge:.3f} < {quality_edge_floor:.3f})")
         confidence = clamp(

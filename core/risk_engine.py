@@ -76,7 +76,12 @@ class RiskEngine:
                 getattr(self.context.settings, "momentum_min_volume_24h", min_volume) or min_volume
             )
             min_edge = min(min_edge, momentum_min_edge)
-            min_volume = min(min_volume, momentum_min_volume)
+            min_volume = self._adaptive_momentum_volume_floor(
+                signal,
+                min(min_volume, momentum_min_volume),
+                min_edge=min_edge,
+                min_confidence=min_confidence,
+            )
 
         if signal.edge < min_edge:
             raise RiskBlockedError(f"edge below minimum ({signal.edge:.3f} < {min_edge:.3f})")
@@ -98,6 +103,50 @@ class RiskEngine:
             raise RiskBlockedError(
                 f"expected slippage too high ({signal.expected_slippage_bps:.0f} > {self.config.max_slippage_bps:.0f})"
             )
+
+    def _adaptive_momentum_volume_floor(
+        self,
+        signal: SignalPayload,
+        base_volume_floor: float,
+        *,
+        min_edge: float,
+        min_confidence: float,
+    ) -> float:
+        floor = max(float(base_volume_floor or 0.0), 0.0)
+        if floor <= 0:
+            return 0.0
+
+        if signal.crypto_tier == "btc":
+            crypto_multiplier = 0.85
+        elif signal.crypto_tier == "major":
+            crypto_multiplier = 1.0
+        else:
+            crypto_multiplier = 1.12
+
+        market_multiplier = 0.9 if signal.market_kind == "direct_coin" else 1.15
+        hour = datetime.now(UTC).astimezone().hour
+        if 0 <= hour < 6:
+            time_multiplier = 0.8
+        elif 6 <= hour < 12:
+            time_multiplier = 0.92
+        elif 12 <= hour < 18:
+            time_multiplier = 1.0
+        else:
+            time_multiplier = 0.95
+
+        quality_multiplier = 1.0
+        strong_signal = signal.edge >= max(min_edge * 1.5, 0.12) and signal.confidence >= min_confidence + 0.12
+        moderate_signal = signal.edge >= max(min_edge * 1.15, 0.09) and signal.confidence >= min_confidence + 0.06
+        weak_signal = signal.edge <= min_edge * 1.02 or signal.confidence <= min_confidence
+        if strong_signal:
+            quality_multiplier = 0.65
+        elif moderate_signal:
+            quality_multiplier = 0.82
+        elif weak_signal:
+            quality_multiplier = 1.08
+
+        adaptive_floor = floor * crypto_multiplier * market_multiplier * time_multiplier * quality_multiplier
+        return clamp(adaptive_floor, floor * 0.5, floor * 1.35)
 
     async def portfolio_state(self) -> PortfolioSummary:
         return await self.context.repository.get_portfolio_summary()

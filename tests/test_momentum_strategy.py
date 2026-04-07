@@ -10,6 +10,7 @@ from core.momentum_strategy import MomentumTradingEngine
 
 class FakeConnector:
     def __init__(self):
+        self.orderbook_calls = 0
         self.market = {
             "id": "market-btc-15m",
             "slug": "btc-updown-15m-1774271700",
@@ -29,6 +30,7 @@ class FakeConnector:
         return dict(self.market)
 
     async def get_orderbook_summary(self, token_id: str):
+        self.orderbook_calls += 1
         if token_id == "token-yes":
             return dict(self.yes_summary)
         return dict(self.no_summary)
@@ -289,6 +291,57 @@ async def test_momentum_engine_blocks_low_confidence_before_publish() -> None:
     assert stats["pre_risk_block_reasons"]["confidence_below_threshold"] == 1
     assert stats["risk_blocked"] == 0
     assert repository.signals == []
+
+
+@pytest.mark.asyncio
+async def test_momentum_engine_skips_low_liquidity_markets_before_orderbook_fetch() -> None:
+    repository = FakeRepository()
+    bus = FakeBus()
+    connector = FakeConnector()
+    connector.market["volume_24h"] = 5.0
+    context = SimpleNamespace(
+        settings=SimpleNamespace(
+            momentum_enabled=True,
+            momentum_markets=["BTC"],
+            momentum_trading_enabled=True,
+            momentum_signal_confidence_threshold=0.55,
+            momentum_min_history_points=6,
+            momentum_cooldown_minutes=20,
+            momentum_wait_for_next_market_start=False,
+            live_trading=False,
+            news_validation_enabled=False,
+            momentum_min_volume_24h=30.0,
+        ),
+        risk_config=SimpleNamespace(
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_spread_bps=250,
+            max_slippage_bps=150,
+            max_order_price=0.9,
+            min_market_volume_24h=1000.0,
+        ),
+        crypto_config=SimpleNamespace(major_assets=["ETH", "SOL"]),
+        repository=repository,
+        bus=bus,
+    )
+    engine = MomentumTradingEngine(context, connector)  # type: ignore[arg-type]
+    engine.risk = FakeRisk()  # type: ignore[assignment]
+
+    async def ensure_feed(_cycles=None):
+        return None
+
+    async def analyze_market(_market):
+        raise AssertionError("low-liquidity market should be filtered before analysis")
+
+    engine._ensure_feed = ensure_feed  # type: ignore[method-assign,assignment]
+    engine._analyze_market = analyze_market  # type: ignore[method-assign,assignment]
+
+    stats = await engine.tick()
+
+    assert stats["persisted_signals"] == 0
+    assert stats["liquidity_prefilter_blocked"] == 1
+    assert stats["pre_risk_blocked"] == 1
+    assert connector.orderbook_calls == 0
 
 
 @pytest.mark.asyncio

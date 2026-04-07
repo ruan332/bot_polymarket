@@ -67,6 +67,11 @@ class BaseAgent(ABC):
         close = getattr(self.provider, "close", None)
         if callable(close):
             await close()
+        for attr_name in ("connector", "service", "momentum_engine", "pair_engine", "news_provider"):
+            resource = getattr(self, attr_name, None)
+            close_resource = getattr(resource, "close", None)
+            if callable(close_resource):
+                await close_resource()
 
     @abstractmethod
     async def tick(self) -> None:

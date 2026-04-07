@@ -334,6 +334,17 @@ async def test_validate_signal_uses_momentum_specific_volume_floor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_signal_relaxes_momentum_volume_floor_for_high_quality_setup() -> None:
+    context = make_context()
+    context.settings.momentum_min_volume_24h = 1000.0
+    risk = RiskEngine(context)
+    signal = make_signal(symbol="BTC", tier="btc", edge=0.32, confidence=0.86, price=0.40, volume_24h=700.0)
+    signal.strategy_id = "momentum_15m"
+
+    await risk.validate_signal(signal)
+
+
+@pytest.mark.asyncio
 async def test_build_execution_guard_scales_down_indirect_crypto_positions() -> None:
     risk = RiskEngine(make_context())
     direct_signal = make_signal(symbol="BTC", tier="btc", edge=0.40, confidence=0.80, price=0.40, volume_24h=100000.0)

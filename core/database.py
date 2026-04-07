@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     market_id TEXT NOT NULL,
     status TEXT NOT NULL,
     payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS positions (
@@ -389,6 +390,8 @@ ALTER TABLE pending_pair_orders ADD COLUMN IF NOT EXISTS exchange_order_id TEXT 
 ALTER TABLE pending_pair_orders ADD COLUMN IF NOT EXISTS submission_status TEXT NOT NULL DEFAULT '';
 ALTER TABLE pending_pair_orders ADD COLUMN IF NOT EXISTS submission_created_at TIMESTAMPTZ;
 
+ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
 CREATE INDEX IF NOT EXISTS idx_equity_snapshots_created_at
 ON equity_snapshots (created_at DESC);
 
@@ -576,13 +579,14 @@ class TradingRepository:
         previous_status = str(previous_status_row["status"]) if previous_status_row is not None else ""
         await self.db.execute(
             """
-            INSERT INTO paper_orders (id, signal_id, market_id, status, payload)
-            VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb)
+            INSERT INTO paper_orders (id, signal_id, market_id, status, payload, created_at, updated_at)
+            VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, NOW(), NOW())
             ON CONFLICT (id) DO UPDATE
             SET signal_id = EXCLUDED.signal_id,
                 market_id = EXCLUDED.market_id,
                 status = EXCLUDED.status,
-                payload = EXCLUDED.payload
+                payload = EXCLUDED.payload,
+                updated_at = EXCLUDED.updated_at
             """,
             order_id,
             signal_id,
@@ -1791,7 +1795,7 @@ class TradingRepository:
             window_start,
         )
         order_rows = await self.db.fetch(
-            "SELECT payload, created_at FROM paper_orders WHERE created_at >= $1 ORDER BY created_at ASC",
+            "SELECT payload, created_at, updated_at FROM paper_orders WHERE created_at >= $1 ORDER BY created_at ASC",
             window_start,
         )
         risk_event_rows = await self.db.fetch(
@@ -1902,6 +1906,7 @@ class TradingRepository:
             tracked_orders,
             pending_count=len(pending_pair_orders),
         )
+        order_lifecycle_summary = self._order_lifecycle_summary(orders_filtered, pending_pair_orders)
         time_series = self._build_pipeline_time_series(
             signals_filtered,
             decisions_filtered,
@@ -1969,6 +1974,7 @@ class TradingRepository:
             "news_fallback_breakdown": news_fallback_breakdown,
             "last_news_provider": last_news_provider,
             "pair_trade_summary": pair_trade_summary,
+            "order_lifecycle_summary": order_lifecycle_summary,
             "top_markets": top_markets,
             "open_positions": open_positions[:8],
             "mae_mfe": mae_mfe,
@@ -2567,6 +2573,68 @@ class TradingRepository:
         ]
 
     @staticmethod
+    def _order_timestamp(item: dict[str, Any], key: str) -> datetime | None:
+        value = item.get(key)
+        if isinstance(value, datetime):
+            return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+        if value in (None, ""):
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
+        except Exception:
+            return None
+
+    @classmethod
+    def _order_lifecycle_summary(
+        cls,
+        orders: list[dict[str, Any]],
+        pending_pair_orders: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        live_submitted = [item for item in orders if str(item.get("status")) == "live_submitted"]
+        live_filled = [item for item in orders if str(item.get("status")) == "live_filled"]
+        blocked = [item for item in orders if str(item.get("status")) == "blocked"]
+        cancelled_like = [item for item in orders if str(item.get("status")) in {"cancelled", "expired"}]
+        pending_cancelled = [
+            item for item in pending_pair_orders if str(item.get("status") or "") in {"cancelled", "expired"}
+        ]
+
+        fill_latencies: list[float] = []
+        open_durations: list[float] = []
+        now = datetime.now(UTC)
+        for item in live_filled:
+            created_at = cls._order_timestamp(item, "created_at")
+            updated_at = cls._order_timestamp(item, "updated_at") or created_at
+            if created_at and updated_at:
+                fill_latencies.append(max((updated_at - created_at).total_seconds(), 0.0))
+        for item in live_submitted:
+            created_at = cls._order_timestamp(item, "created_at")
+            updated_at = cls._order_timestamp(item, "updated_at") or now
+            if created_at and updated_at:
+                open_durations.append(max((updated_at - created_at).total_seconds(), 0.0))
+
+        cancellation_items = [*blocked, *cancelled_like, *pending_cancelled]
+        lifecycle_orders = len(live_submitted) + len(live_filled) + len(blocked) + len(cancelled_like) + len(pending_cancelled)
+        cancel_count = len(blocked) + len(cancelled_like) + len(pending_cancelled)
+        return {
+            "tracked_orders": len(orders),
+            "live_submitted_orders": len(live_submitted),
+            "live_filled_orders": len(live_filled),
+            "blocked_orders": len(blocked),
+            "cancelled_orders": len(cancelled_like) + len(pending_cancelled),
+            "pending_cancelled_orders": len(pending_cancelled),
+            "fill_rate": round(len(live_filled) / len(live_submitted), 4) if live_submitted else 0.0,
+            "cancel_rate": round(cancel_count / lifecycle_orders, 4) if lifecycle_orders else 0.0,
+            "avg_fill_latency_seconds": round(sum(fill_latencies) / len(fill_latencies), 4) if fill_latencies else 0.0,
+            "avg_open_duration_seconds": round(sum(open_durations) / len(open_durations), 4) if open_durations else 0.0,
+            "cancel_reason_breakdown": cls._count_by_key(
+                cancellation_items,
+                "reason",
+                limit=8,
+                missing_label="unknown",
+            ),
+        }
+
+    @staticmethod
     def _signal_metrics(item: dict[str, Any]) -> dict[str, float]:
         strategy_id = str(item.get("strategy_id") or "").strip()
         edge = float(item.get("edge") or 0.0)
@@ -3012,6 +3080,8 @@ class TradingRepository:
             if reason not in (None, ""):
                 payload.setdefault("reason", reason)
         payload["created_at"] = row["created_at"]
+        if "updated_at" in row and row["updated_at"] not in (None, ""):
+            payload["updated_at"] = row["updated_at"]
         return payload
 
     @classmethod

@@ -144,6 +144,19 @@ type PerformanceSummary = {
 type PerformanceReport = {
   summary: PerformanceSummary;
   strategy_breakdown?: Array<{ label: string; signals: number; orders: number; realized_pnl_usd: number }>;
+  order_lifecycle_summary?: {
+    tracked_orders: number;
+    live_submitted_orders: number;
+    live_filled_orders: number;
+    blocked_orders: number;
+    cancelled_orders: number;
+    pending_cancelled_orders: number;
+    fill_rate: number;
+    cancel_rate: number;
+    avg_fill_latency_seconds: number;
+    avg_open_duration_seconds: number;
+    cancel_reason_breakdown: Array<{ label: string; count: number }>;
+  };
 };
 
 type WeatherCopytradeReport = {
@@ -868,6 +881,7 @@ export function DashboardClient() {
   const totalAgents = Object.keys(state.statuses).length;
   const pairGoal = evaluateStrategyGoals("pair_15m", state.pairPerformance);
   const momentumGoal = evaluateStrategyGoals("momentum_15m", state.momentumPerformance);
+  const orderLifecycle = state.performance?.order_lifecycle_summary ?? null;
   const operationsLog = buildOperationsLog(state.orders);
   const weatherOperationsLog = buildOrderLog(state.orders, "weather_copytrade");
   const pairLog = buildStrategyLog("pair_15m", state.signals, state.decisions, state.orders, state.riskEvents);
@@ -995,6 +1009,69 @@ export function DashboardClient() {
         <section className="grid gap-4 lg:grid-cols-2">
           <StrategyGoalCard goal={pairGoal} />
           <StrategyGoalCard goal={momentumGoal} />
+        </section>
+
+        <section className="border border-poly-border bg-poly-black p-4">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div className="font-mono text-[10px] uppercase tracking-[0.25em] text-poly-dim">ORDER_LIFECYCLE</div>
+              <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.2em] text-poly-muted">
+                execution latency, open duration, and cancellation pressure from the live ledger
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-right font-mono text-[9px] uppercase text-poly-dim sm:min-w-[360px] sm:grid-cols-4">
+              <div className="border border-poly-border px-3 py-2">
+                <div>Fill Rate</div>
+                <div className="text-sm normal-case text-poly-cyan">
+                  {orderLifecycle ? asPercent(orderLifecycle.fill_rate) : "-"}
+                </div>
+              </div>
+              <div className="border border-poly-border px-3 py-2">
+                <div>Cancel Rate</div>
+                <div className="text-sm normal-case text-poly-cyan">
+                  {orderLifecycle ? asPercent(orderLifecycle.cancel_rate) : "-"}
+                </div>
+              </div>
+              <div className="border border-poly-border px-3 py-2">
+                <div>Fill Latency</div>
+                <div className="text-sm normal-case text-poly-cyan">
+                  {orderLifecycle ? `${Math.round(orderLifecycle.avg_fill_latency_seconds)}s` : "-"}
+                </div>
+              </div>
+              <div className="border border-poly-border px-3 py-2">
+                <div>Open Time</div>
+                <div className="text-sm normal-case text-poly-cyan">
+                  {orderLifecycle ? `${Math.round(orderLifecycle.avg_open_duration_seconds)}s` : "-"}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="mt-4 grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
+            <div className="border border-poly-border bg-poly-surface-dim/20 p-3 font-mono text-[10px] text-poly-text">
+              <div className="uppercase tracking-[0.2em] text-poly-dim">Lifecycle Notes</div>
+              <div className="mt-2 space-y-1 text-poly-muted">
+                <div>Tracked orders: {orderLifecycle?.tracked_orders ?? "-"}</div>
+                <div>Live submitted: {orderLifecycle?.live_submitted_orders ?? "-"}</div>
+                <div>Live filled: {orderLifecycle?.live_filled_orders ?? "-"}</div>
+                <div>Pending cancelled: {orderLifecycle?.pending_cancelled_orders ?? "-"}</div>
+              </div>
+            </div>
+            <div className="border border-poly-border bg-poly-surface-dim/20 p-3 font-mono text-[10px] text-poly-text">
+              <div className="uppercase tracking-[0.2em] text-poly-dim">Cancel Reasons</div>
+              <div className="mt-2 space-y-1 text-poly-muted">
+                {orderLifecycle?.cancel_reason_breakdown?.length ? (
+                  orderLifecycle.cancel_reason_breakdown.slice(0, 4).map((item) => (
+                    <div key={item.label} className="flex items-center justify-between gap-3">
+                      <span className="truncate">{item.label}</span>
+                      <span className="text-poly-cyan">{item.count}</span>
+                    </div>
+                  ))
+                ) : (
+                  <div>no cancellation data yet</div>
+                )}
+              </div>
+            </div>
+          </div>
         </section>
 
         <section className="border border-poly-border bg-poly-black p-4">

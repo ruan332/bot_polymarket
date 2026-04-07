@@ -46,6 +46,7 @@ class MomentumTradingEngine:
         self.risk = RiskEngine(context)
         self.cycles: dict[str, MomentumCycleRuntime] = {}
         self.quote_cache: dict[str, Quote] = {}
+        self.low_liquidity_backoff: dict[str, datetime] = {}
         self.feed_task: asyncio.Task[None] | None = None
         self.feed_tokens: tuple[str, ...] = ()
         self.feed_error: str | None = None
@@ -59,6 +60,48 @@ class MomentumTradingEngine:
                 pass
             self.feed_task = None
             self.feed_tokens = ()
+        self.low_liquidity_backoff.clear()
+
+    def _momentum_volume_floor(self, cycle: MomentumCycleRuntime, *, now: datetime | None = None) -> float:
+        base_floor = max(float(getattr(self.context.settings, "momentum_min_volume_24h", 0.0) or 0.0), 0.0)
+        if base_floor <= 0:
+            return 0.0
+        hour = (now or datetime.now(UTC)).astimezone().hour
+        if cycle.crypto_tier == "btc":
+            tier_multiplier = 0.85
+        elif cycle.crypto_tier == "major":
+            tier_multiplier = 1.0
+        else:
+            tier_multiplier = 1.12
+        if 0 <= hour < 6:
+            time_multiplier = 0.8
+        elif 6 <= hour < 12:
+            time_multiplier = 0.92
+        elif 12 <= hour < 18:
+            time_multiplier = 1.0
+        else:
+            time_multiplier = 0.95
+        market_multiplier = 0.9 if cycle.asset_symbol in {"BTC", "ETH", "SOL", "XRP", "DOGE"} else 1.0
+        floor = base_floor * tier_multiplier * time_multiplier * market_multiplier
+        return round(clamp(floor, base_floor * 0.5, base_floor * 1.35), 4)
+
+    def _low_liquidity_backoff_active(self, market_id: str, now: datetime) -> bool:
+        expires_at = self.low_liquidity_backoff.get(market_id)
+        if expires_at is None:
+            return False
+        if expires_at <= now:
+            self.low_liquidity_backoff.pop(market_id, None)
+            return False
+        return True
+
+    def _mark_low_liquidity_backoff(self, market_id: str, *, now: datetime) -> None:
+        cooldown_minutes = max(int(getattr(self.context.settings, "momentum_cooldown_minutes", 20) or 20), 5)
+        self.low_liquidity_backoff[market_id] = now + timedelta(minutes=cooldown_minutes)
+
+    def _prune_low_liquidity_backoff(self, *, known_market_ids: set[str], now: datetime) -> None:
+        for market_id, expires_at in list(self.low_liquidity_backoff.items()):
+            if market_id not in known_market_ids or expires_at <= now:
+                self.low_liquidity_backoff.pop(market_id, None)
 
     async def tick(self) -> dict[str, Any]:
         stats = {
@@ -77,6 +120,7 @@ class MomentumTradingEngine:
             "duplicates_blocked": 0,
             "persisted_signals": 0,
             "selected_markets": [],
+            "liquidity_prefilter_blocked": 0,
             "discovery_source": "momentum_strategy",
             "news_validation_enabled": bool(self.context.settings.news_validation_enabled),
             "feed_error": "",
@@ -85,11 +129,40 @@ class MomentumTradingEngine:
             return stats
 
         await self._refresh_cycles(stats)
-        stats["selected_for_scan"] = len(self.cycles)
-        stats["crypto_classified"] = len(self.cycles)
-
-        snapshots: list[MarketSnapshotPayload] = []
+        now = datetime.now(UTC)
+        eligible_cycles: list[MomentumCycleRuntime] = []
+        liquidity_prefilter_blocked = 0
+        known_market_ids = {cycle.market_id for cycle in self.cycles.values()}
         for cycle in self.cycles.values():
+            floor = self._momentum_volume_floor(cycle, now=now)
+            if floor > 0 and cycle.volume_24h < floor:
+                self._mark_low_liquidity_backoff(cycle.market_id, now=now)
+                liquidity_prefilter_blocked += 1
+                self._increment_reason(
+                    stats,
+                    "market volume below minimum",
+                    bucket_name="pre_risk_blocked",
+                    reasons_key="pre_risk_block_reasons",
+                )
+                continue
+            if self._low_liquidity_backoff_active(cycle.market_id, now):
+                liquidity_prefilter_blocked += 1
+                self._increment_reason(
+                    stats,
+                    "market volume below minimum",
+                    bucket_name="pre_risk_blocked",
+                    reasons_key="pre_risk_block_reasons",
+                )
+                continue
+            self.low_liquidity_backoff.pop(cycle.market_id, None)
+            eligible_cycles.append(cycle)
+        self._prune_low_liquidity_backoff(known_market_ids=known_market_ids, now=now)
+        stats["selected_for_scan"] = len(eligible_cycles)
+        stats["crypto_classified"] = len(self.cycles)
+        stats["liquidity_prefilter_blocked"] = liquidity_prefilter_blocked
+        await self._ensure_feed(eligible_cycles)
+        snapshots: list[MarketSnapshotPayload] = []
+        for cycle in eligible_cycles:
             yes_quote, no_quote = await self._quotes_for_cycle(cycle)
             if yes_quote is None or no_quote is None or yes_quote.best_ask <= 0 or no_quote.best_ask <= 0:
                 self._increment_reason(
@@ -277,12 +350,13 @@ class MomentumTradingEngine:
             )
         return current
 
-    async def _ensure_feed(self) -> None:
+    async def _ensure_feed(self, cycles: list[MomentumCycleRuntime] | None = None) -> None:
+        active_cycles = cycles if cycles is not None else list(self.cycles.values())
         desired_tokens = tuple(
             sorted(
                 {
                     token_id
-                    for cycle in self.cycles.values()
+                    for cycle in active_cycles
                     for token_id in (cycle.token_id_yes, cycle.token_id_no)
                     if token_id
                 }

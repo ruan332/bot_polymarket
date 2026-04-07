@@ -187,6 +187,48 @@ def test_signal_metrics_handles_pair_and_momentum_payloads() -> None:
     assert momentum_metrics["edge"] == pytest.approx(0.1642)
 
 
+def test_order_lifecycle_summary_tracks_latency_and_cancel_reasons() -> None:
+    created_at = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+    live_submitted_at = datetime(2026, 3, 24, 12, 4, tzinfo=UTC)
+    live_filled_at = datetime(2026, 3, 24, 12, 1, tzinfo=UTC)
+    orders = [
+        {
+            "status": "live_submitted",
+            "created_at": created_at,
+            "updated_at": live_submitted_at,
+            "reason": "queued",
+        },
+        {
+            "status": "live_filled",
+            "created_at": created_at,
+            "updated_at": live_filled_at,
+            "reason": "filled",
+        },
+        {
+            "status": "blocked",
+            "created_at": created_at,
+            "reason": "market volume below minimum",
+        },
+    ]
+    pending_orders = [
+        {"status": "cancelled", "reason": "hedge_timeout"},
+        {"status": "expired", "reason": "cycle_rollover"},
+    ]
+
+    summary = TradingRepository._order_lifecycle_summary(orders, pending_orders)
+
+    assert summary["tracked_orders"] == 3
+    assert summary["live_submitted_orders"] == 1
+    assert summary["live_filled_orders"] == 1
+    assert summary["blocked_orders"] == 1
+    assert summary["cancelled_orders"] == 2
+    assert summary["fill_rate"] == pytest.approx(1.0)
+    assert summary["cancel_rate"] == pytest.approx(0.6)
+    assert summary["avg_fill_latency_seconds"] == pytest.approx(60.0)
+    assert summary["avg_open_duration_seconds"] == pytest.approx(240.0)
+    assert summary["cancel_reason_breakdown"][0] == {"label": "cycle_rollover", "count": 1}
+
+
 def test_decode_record_merges_risk_metadata() -> None:
     repo = TradingRepository(object(), initial_bankroll=10.0)
     row = {

@@ -76,6 +76,7 @@ class RiskEngine:
                 getattr(self.context.settings, "momentum_min_volume_24h", min_volume) or min_volume
             )
             min_edge = min(min_edge, momentum_min_edge)
+            min_edge = self._adaptive_momentum_edge_floor(signal, min_edge)
             min_volume = self._adaptive_momentum_volume_floor(
                 signal,
                 min(min_volume, momentum_min_volume),
@@ -147,6 +148,21 @@ class RiskEngine:
 
         adaptive_floor = floor * crypto_multiplier * market_multiplier * time_multiplier * quality_multiplier
         return clamp(adaptive_floor, floor * 0.5, floor * 1.35)
+
+    def _adaptive_momentum_edge_floor(self, signal: SignalPayload, base_edge_floor: float) -> float:
+        floor = max(float(base_edge_floor or 0.0), 0.0)
+        if floor <= 0:
+            return 0.0
+
+        confidence = float(signal.confidence or 0.0)
+        slippage = float(signal.expected_slippage_bps or 0.0)
+        if signal.market_kind == "direct_coin" and confidence >= 0.70 and slippage <= 75.0:
+            return max(floor - 0.055, 0.03)
+        if confidence >= 0.75 and slippage <= 55.0:
+            return max(floor - 0.04, 0.035)
+        if confidence >= 0.65 and slippage <= 95.0:
+            return max(floor - 0.02, 0.045)
+        return floor
 
     async def portfolio_state(self) -> PortfolioSummary:
         return await self.context.repository.get_portfolio_summary()

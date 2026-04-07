@@ -325,6 +325,41 @@ async def test_validate_signal_uses_momentum_specific_edge_floor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_signal_relaxes_momentum_edge_floor_for_high_quality_setup() -> None:
+    risk = RiskEngine(make_context())
+    signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.032,
+        confidence=0.72,
+        price=0.40,
+        volume_24h=50000.0,
+    )
+    signal.strategy_id = "momentum_15m"
+    signal.expected_slippage_bps = 69.0
+
+    await risk.validate_signal(signal)
+
+
+@pytest.mark.asyncio
+async def test_validate_signal_keeps_momentum_edge_floor_for_weak_setup() -> None:
+    risk = RiskEngine(make_context())
+    signal = make_signal(
+        symbol="BTC",
+        tier="btc",
+        edge=0.032,
+        confidence=0.58,
+        price=0.40,
+        volume_24h=50000.0,
+    )
+    signal.strategy_id = "momentum_15m"
+    signal.expected_slippage_bps = 69.0
+
+    with pytest.raises(RiskBlockedError, match="edge below minimum"):
+        await risk.validate_signal(signal)
+
+
+@pytest.mark.asyncio
 async def test_validate_signal_uses_momentum_specific_volume_floor() -> None:
     risk = RiskEngine(make_context())
     signal = make_signal(symbol="ETH", tier="major", edge=0.20, confidence=0.70, price=0.40, volume_24h=600.0)

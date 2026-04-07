@@ -494,6 +494,7 @@ class MomentumTradingEngine:
         spread_bps = self._spread_bps(market)
         volume_24h = float(market.get("volume_24h") or 0.0)
         min_history_points = max(int(getattr(self.context.settings, "momentum_min_history_points", 6) or 6), 4)
+        history_points = len(history)
         min_history_points = self._adaptive_history_floor(
             market,
             spread_bps=spread_bps,
@@ -530,12 +531,15 @@ class MomentumTradingEngine:
         strong_continuation = expected_move >= 0.07 and continuation_strength >= 0.08
         moderate_continuation = expected_move >= 0.045 and continuation_strength >= 0.05
         spread_cap = min(float(self.risk.config.max_spread_bps), 220.0)
+        short_history = history_points <= min_history_points + 1
         if strong_continuation and expected_move >= 0.10 and continuation_strength >= 0.12:
             spread_cap = min(float(self.risk.config.max_spread_bps), 360.0)
         if strong_continuation and expected_move >= 0.085 and continuation_strength >= 0.09:
             spread_cap = min(float(self.risk.config.max_spread_bps), 280.0)
         elif strong_continuation:
             spread_cap = min(float(self.risk.config.max_spread_bps), 260.0)
+        elif moderate_continuation and short_history and volume_24h >= 2500.0 and spread_bps <= 290.0:
+            spread_cap = min(float(self.risk.config.max_spread_bps), 290.0)
         if spread_bps <= 0 or spread_bps > spread_cap:
             return MomentumAnalysisResult(None, f"spread too wide ({spread_bps:.1f} bps)")
         if bid_depth < 15.0 or ask_depth < 15.0 or depth_total < 45.0:

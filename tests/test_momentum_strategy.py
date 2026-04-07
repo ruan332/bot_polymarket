@@ -836,6 +836,67 @@ async def test_momentum_analysis_allows_short_history_for_high_quality_btc_setup
 
 
 @pytest.mark.asyncio
+async def test_momentum_analysis_allows_short_history_with_wider_spread_when_setup_is_strong() -> None:
+    class ShortHistoryRepository(FakeRepository):
+        async def get_market_snapshots(self, market_id: str, limit: int = 12):
+            return [
+                {"price_yes": 0.440},
+                {"price_yes": 0.455},
+                {"price_yes": 0.470},
+                {"price_yes": 0.495},
+            ]
+
+    repository = ShortHistoryRepository()
+    context = SimpleNamespace(
+        settings=SimpleNamespace(
+            momentum_enabled=True,
+            momentum_markets=["BTC"],
+            momentum_trading_enabled=True,
+            momentum_signal_confidence_threshold=0.55,
+            momentum_min_history_points=6,
+            momentum_cooldown_minutes=20,
+            momentum_wait_for_next_market_start=False,
+            live_trading=False,
+            news_validation_enabled=False,
+            momentum_min_edge=0.10,
+            momentum_min_volume_24h=1000.0,
+        ),
+        risk_config=SimpleNamespace(
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_spread_bps=250,
+            max_slippage_bps=150,
+            max_order_price=0.9,
+            min_market_volume_24h=1000.0,
+        ),
+        crypto_config=SimpleNamespace(major_assets=["ETH", "SOL"]),
+        repository=repository,
+        bus=FakeBus(),
+    )
+    connector = FakeConnector()
+    connector.yes_summary = {"best_bid": 0.47, "best_ask": 0.495, "spread_bps": 266.7, "bid_depth": 780.0, "ask_depth": 770.0}
+    connector.no_summary = {"best_bid": 0.50, "best_ask": 0.525, "spread_bps": 266.7, "bid_depth": 780.0, "ask_depth": 770.0}
+    engine = MomentumTradingEngine(context, connector)  # type: ignore[arg-type]
+
+    decision = await engine._analyze_market(
+        {
+            "id": "market-btc-15m",
+            "price_yes": 0.495,
+            "price_no": 0.505,
+            "volume_24h": 4200.0,
+            "market_kind": "direct_coin",
+            "crypto_tier": "btc",
+            "orderbook_summary_yes": connector.yes_summary,
+            "orderbook_summary_no": connector.no_summary,
+        }
+    )
+
+    assert decision.decision is not None
+    assert decision.decision["features_summary"]["selected_spread_bps"] == 266.7
+    assert decision.decision["confidence"] >= 0.5
+
+
+@pytest.mark.asyncio
 async def test_momentum_engine_counts_prerisk_rejections_in_scan_telemetry() -> None:
     repository = FakeRepository()
     bus = FakeBus()

@@ -221,6 +221,7 @@ class DiscoveryService:
         min_edge = tier_cfg.min_edge
         min_confidence = tier_cfg.min_confidence
         min_volume = tier_cfg.min_volume_24h
+        shortlist_spread_cap = self._shortlist_spread_cap()
         if market_kind != "direct_coin":
             min_edge += self.context.crypto_config.indirect_min_edge_buffer
             min_confidence += self.context.crypto_config.indirect_min_confidence_buffer
@@ -228,39 +229,42 @@ class DiscoveryService:
 
         if float(market.get("volume_24h") or 0.0) < min_volume:
             reason_parts.append("volume_below_threshold")
-        if spread_bps > float(self.context.risk_config.max_spread_bps):
+        if spread_bps > shortlist_spread_cap:
+            reason_parts.append("spread_extreme_before_shortlist")
+        elif spread_bps > float(self.context.risk_config.max_spread_bps):
             reason_parts.append("spread_too_wide")
 
-        decision = await self.strategy.analyze_market(market)
-        if decision is None:
-            reason_parts.append("strategy_engine_reject")
-        else:
-            strategy_id = decision.strategy_id
-            direction = decision.direction
-            edge = float(decision.edge)
-            confidence = float(decision.confidence)
-            features_summary = getattr(decision, "features_summary", {}) or {}
-            momentum_short = abs(float(features_summary.get("momentum_short") or 0.0))
-            momentum_medium = abs(float(features_summary.get("momentum_medium") or 0.0))
-            volatility_score = clamp((momentum_short + momentum_medium) / 0.12, 0.0, 1.0)
-            yes_book = market.get("orderbook_summary_yes") or {}
-            no_book = market.get("orderbook_summary_no") or {}
-            yes_depth = float(yes_book.get("bid_depth") or 0.0) + float(yes_book.get("ask_depth") or 0.0)
-            no_depth = float(no_book.get("bid_depth") or 0.0) + float(no_book.get("ask_depth") or 0.0)
-            depth_total = yes_depth + no_depth
-            liquidity_score = clamp(depth_total / max(tier_cfg.max_position_usd * 8, 1.0), 0.0, 2.0)
-            if edge < min_edge:
-                reason_parts.append("edge_below_threshold")
-            if confidence < min_confidence:
-                reason_parts.append("confidence_below_threshold")
-            if liquidity_score < 0.35:
-                reason_parts.append("liquidity_too_low")
+        if not reason_parts:
+            decision = await self.strategy.analyze_market(market)
+            if decision is None:
+                reason_parts.append("strategy_engine_reject")
+            else:
+                strategy_id = decision.strategy_id
+                direction = decision.direction
+                edge = float(decision.edge)
+                confidence = float(decision.confidence)
+                features_summary = getattr(decision, "features_summary", {}) or {}
+                momentum_short = abs(float(features_summary.get("momentum_short") or 0.0))
+                momentum_medium = abs(float(features_summary.get("momentum_medium") or 0.0))
+                volatility_score = clamp((momentum_short + momentum_medium) / 0.12, 0.0, 1.0)
+                yes_book = market.get("orderbook_summary_yes") or {}
+                no_book = market.get("orderbook_summary_no") or {}
+                yes_depth = float(yes_book.get("bid_depth") or 0.0) + float(yes_book.get("ask_depth") or 0.0)
+                no_depth = float(no_book.get("bid_depth") or 0.0) + float(no_book.get("ask_depth") or 0.0)
+                depth_total = yes_depth + no_depth
+                liquidity_score = clamp(depth_total / max(tier_cfg.max_position_usd * 8, 1.0), 0.0, 2.0)
+                if edge < min_edge:
+                    reason_parts.append("edge_below_threshold")
+                if confidence < min_confidence:
+                    reason_parts.append("confidence_below_threshold")
+                if liquidity_score < 0.35:
+                    reason_parts.append("liquidity_too_low")
 
         passed = not reason_parts
         normalized_edge = clamp(edge / max(min_edge, 0.01), 0.0, 1.5)
         normalized_confidence = clamp(confidence / max(min_confidence, 0.01), 0.0, 1.5)
         normalized_volume = clamp(float(market.get("volume_24h") or 0.0) / max(min_volume, 1.0), 0.0, 2.0)
-        normalized_spread = clamp(1 - (spread_bps / max(float(self.context.risk_config.max_spread_bps), 1.0)), 0.0, 1.0)
+        normalized_spread = clamp(1 - (spread_bps / max(shortlist_spread_cap, 1.0)), 0.0, 1.0)
         score = clamp(
             0.38 * normalized_edge
             + 0.14 * normalized_confidence
@@ -282,6 +286,7 @@ class DiscoveryService:
                 "edge": round(edge, 4),
                 "confidence": round(confidence, 4),
                 "spread_bps": round(spread_bps, 2),
+                "shortlist_spread_cap": round(shortlist_spread_cap, 2),
                 "liquidity_score": round(liquidity_score, 4),
                 "volatility_score": round(volatility_score, 4),
                 "time_to_expiry_hours": None if time_to_expiry_hours is None else round(time_to_expiry_hours, 2),
@@ -299,6 +304,7 @@ class DiscoveryService:
             "market_kind": market_kind,
             "volume_24h": float(market.get("volume_24h") or 0.0),
             "spread_bps": round(spread_bps, 2),
+            "shortlist_spread_cap": round(shortlist_spread_cap, 2),
             "edge": round(edge, 4),
             "confidence": round(confidence, 4),
             "liquidity_score": round(liquidity_score, 4),
@@ -618,6 +624,10 @@ class DiscoveryService:
         books = [market.get("orderbook_summary_yes") or {}, market.get("orderbook_summary_no") or {}]
         spreads = [float(book.get("spread_bps") or 0.0) for book in books]
         return fmean(spreads) if spreads else 0.0
+
+    @staticmethod
+    def _shortlist_spread_cap() -> float:
+        return 360.0
 
     @staticmethod
     def _time_to_expiry_hours(market: dict[str, Any]) -> float | None:

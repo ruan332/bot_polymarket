@@ -349,3 +349,117 @@ def test_discovery_service_prioritizes_more_executable_volatile_setups() -> None
         assert repository.latest_candidates[1]["score"] >= repository.latest_candidates[2]["score"]
 
     asyncio.run(run_case())
+
+
+def test_discovery_service_excludes_extreme_spreads_before_shortlist() -> None:
+    async def run_case() -> None:
+        markets = [
+            {
+                "id": "normal",
+                "question": "Will BTC breakout this week?",
+                "asset_symbol": "BTC",
+                "asset_name": "Bitcoin",
+                "crypto_tier": "btc",
+                "market_kind": "direct_coin",
+                "volume_24h": 20000,
+                "price_yes": 0.52,
+                "price_no": 0.48,
+                "orderbook_summary_yes": {"spread_bps": 45, "bid_depth": 260, "ask_depth": 250},
+                "orderbook_summary_no": {"spread_bps": 47, "bid_depth": 250, "ask_depth": 240},
+                "thesis_tags": ["btc", "breakout"],
+                "end_date": "2026-12-31T00:00:00Z",
+            },
+            {
+                "id": "extreme",
+                "question": "Will ETH spike hard today?",
+                "asset_symbol": "ETH",
+                "asset_name": "Ethereum",
+                "crypto_tier": "major",
+                "market_kind": "direct_coin",
+                "volume_24h": 26000,
+                "price_yes": 0.60,
+                "price_no": 0.40,
+                "orderbook_summary_yes": {"spread_bps": 560, "bid_depth": 220, "ask_depth": 210},
+                "orderbook_summary_no": {"spread_bps": 558, "bid_depth": 200, "ask_depth": 190},
+                "thesis_tags": ["eth", "spike"],
+                "end_date": "2026-12-31T00:00:00Z",
+            },
+        ]
+        decisions = {
+            "normal": _make_candidate_decision(
+                edge=0.29,
+                confidence=0.77,
+                features_summary={"momentum_short": 0.05, "momentum_medium": 0.06},
+            ),
+            "extreme": _make_candidate_decision(
+                edge=0.32,
+                confidence=0.81,
+                features_summary={"momentum_short": 0.08, "momentum_medium": 0.09},
+            ),
+        }
+        repository = DummyRepository()
+        context = SimpleNamespace(
+            repository=repository,
+            crypto_config=SimpleNamespace(
+                enabled=True,
+                indirect_min_edge_buffer=0.06,
+                indirect_min_confidence_buffer=0.05,
+                indirect_min_volume_multiplier=1.5,
+                tier=lambda tier_name: SimpleNamespace(min_edge=0.20, min_confidence=0.60, min_volume_24h=5000.0, max_position_usd=100.0),
+            ),
+            risk_config=SimpleNamespace(max_spread_bps=250),
+            agents_config=SimpleNamespace(
+                agents={
+                    "news_validator": SimpleNamespace(
+                        model="gpt-4o-mini",
+                        provider="openai",
+                        temperature=0.0,
+                        max_tokens=512,
+                        fallback_model="gpt-4o-mini",
+                        daily_cost_limit_usd=1.0,
+                    ),
+                    "claude": SimpleNamespace(
+                        model="claude-sonnet-4-20250514",
+                        provider="anthropic",
+                        temperature=0.0,
+                        max_tokens=512,
+                        fallback_model="claude-3-5-haiku-20241022",
+                        daily_cost_limit_usd=1.0,
+                        scan_limit=24,
+                    ),
+                }
+            ),
+        )
+        service = DiscoveryService(
+            context,  # type: ignore[arg-type]
+            connector=DummyConnector(markets, {"crypto_classified": 2, "selected_for_scan": 2}),
+            strategy=DummyStrategy(decisions),
+            research_provider=DummyProvider(
+                model="gpt-4o-mini",
+                provider="openai",
+                responses=[
+                    {"content": '{"recommendation":"promote","score":0.91,"summary":"strong fit","why":"high quality setup","risks":["liquidity"],"follow_up":"send to Claude"}'},
+                ],
+            ),
+            final_provider=DummyProvider(
+                model="claude-sonnet-4-20250514",
+                provider="anthropic",
+                responses=[
+                    {"content": '{"operable":true,"final_score":0.88,"strategy_fit":"trend_follow_bayes","summary":"operable","blocked_reasons":[],"operator_note":"include in operation"}'},
+                ],
+            ),
+            research_cost_tracker=DummyTracker(),
+            final_cost_tracker=DummyTracker(),
+        )
+
+        result = await service.run(limit=2)
+
+        assert result["run"]["universe_count"] == 2
+        assert result["run"]["deterministic_passed_count"] == 1
+        assert service.research_provider.calls == 1
+        assert service.final_provider.calls == 1
+        assert "spread_extreme_before_shortlist" in result["run"]["rejected_breakdown"]
+        assert repository.latest_candidates[0]["market_id"] == "normal"
+        assert repository.latest_candidates[1]["market_id"] == "extreme"
+
+    asyncio.run(run_case())

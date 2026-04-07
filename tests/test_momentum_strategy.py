@@ -896,6 +896,27 @@ async def test_momentum_analysis_allows_short_history_with_wider_spread_when_set
     assert decision.decision["confidence"] >= 0.5
 
 
+def test_momentum_spread_helper_averages_both_books() -> None:
+    connector = FakeConnector()
+    engine = MomentumTradingEngine(
+        SimpleNamespace(
+            settings=SimpleNamespace(),
+            risk_config=SimpleNamespace(),
+            crypto_config=SimpleNamespace(),
+            repository=SimpleNamespace(),
+            bus=FakeBus(),
+        ),
+        connector,  # type: ignore[arg-type]
+    )
+
+    market = {
+        "orderbook_summary_yes": {"spread_bps": 120.0},
+        "orderbook_summary_no": {"spread_bps": 80.0},
+    }
+
+    assert engine._spread_bps(market) == 100.0
+
+
 @pytest.mark.asyncio
 async def test_momentum_engine_counts_prerisk_rejections_in_scan_telemetry() -> None:
     repository = FakeRepository()

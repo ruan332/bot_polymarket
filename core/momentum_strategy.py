@@ -85,6 +85,14 @@ class MomentumTradingEngine:
         floor = base_floor * tier_multiplier * time_multiplier * market_multiplier
         return round(clamp(floor, base_floor * 0.5, base_floor * 1.35), 4)
 
+    @staticmethod
+    def _spread_bps(market: dict[str, Any]) -> float:
+        books = [market.get("orderbook_summary_yes") or {}, market.get("orderbook_summary_no") or {}]
+        spreads = [float(book.get("spread_bps") or 0.0) for book in books]
+        if not spreads:
+            return 0.0
+        return float(sum(spreads) / len(spreads))
+
     def _low_liquidity_backoff_active(self, market_id: str, now: datetime) -> bool:
         expires_at = self.low_liquidity_backoff.get(market_id)
         if expires_at is None:

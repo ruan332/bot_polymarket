@@ -642,6 +642,68 @@ async def test_momentum_analysis_rejects_high_spread_without_strong_continuation
 
 
 @pytest.mark.asyncio
+async def test_momentum_analysis_allows_ultra_strong_continuation_with_very_high_spread() -> None:
+    class UltraHighSpreadConnector(FakeConnector):
+        def __init__(self) -> None:
+            super().__init__()
+            self.yes_summary = {"best_bid": 0.88, "best_ask": 0.909, "spread_bps": 342.9, "bid_depth": 900.0, "ask_depth": 850.0}
+            self.no_summary = {"best_bid": 0.09, "best_ask": 0.096, "spread_bps": 342.9, "bid_depth": 900.0, "ask_depth": 850.0}
+
+    class UltraHighSpreadRepository(FakeRepository):
+        async def get_market_snapshots(self, market_id: str, limit: int = 12):
+            return [
+                {"price_yes": 0.70},
+                {"price_yes": 0.76},
+                {"price_yes": 0.82},
+                {"price_yes": 0.86},
+                {"price_yes": 0.90},
+                {"price_yes": 0.909},
+            ]
+
+    repository = UltraHighSpreadRepository()
+    context = SimpleNamespace(
+        settings=SimpleNamespace(
+            momentum_enabled=True,
+            momentum_markets=["BTC"],
+            momentum_trading_enabled=True,
+            momentum_signal_confidence_threshold=0.55,
+            momentum_min_history_points=6,
+            momentum_cooldown_minutes=20,
+            momentum_wait_for_next_market_start=False,
+            live_trading=False,
+            news_validation_enabled=False,
+            momentum_min_edge=0.10,
+            momentum_min_volume_24h=1000.0,
+        ),
+        risk_config=SimpleNamespace(
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_spread_bps=250,
+            max_slippage_bps=150,
+            max_order_price=0.9,
+            min_market_volume_24h=1000.0,
+        ),
+        crypto_config=SimpleNamespace(major_assets=["ETH", "SOL"]),
+        repository=repository,
+        bus=FakeBus(),
+    )
+    engine = MomentumTradingEngine(context, UltraHighSpreadConnector())  # type: ignore[arg-type]
+
+    decision = await engine._analyze_market(
+        {
+            "id": "market-btc-15m",
+            "price_yes": 0.909,
+            "price_no": 0.096,
+            "orderbook_summary_yes": engine.connector.yes_summary,
+            "orderbook_summary_no": engine.connector.no_summary,
+        }
+    )
+
+    assert decision.decision is not None
+    assert decision.decision["expected_slippage_bps"] == 96.01
+
+
+@pytest.mark.asyncio
 async def test_momentum_analysis_allows_moderate_continuation_near_probability_floor() -> None:
     class StrongFloorConnector(FakeConnector):
         def __init__(self) -> None:

@@ -508,6 +508,8 @@ class MomentumTradingEngine:
         strong_continuation = expected_move >= 0.07 and continuation_strength >= 0.08
         moderate_continuation = expected_move >= 0.045 and continuation_strength >= 0.05
         spread_cap = min(float(self.risk.config.max_spread_bps), 220.0)
+        if strong_continuation and expected_move >= 0.10 and continuation_strength >= 0.12:
+            spread_cap = min(float(self.risk.config.max_spread_bps), 360.0)
         if strong_continuation and expected_move >= 0.085 and continuation_strength >= 0.09:
             spread_cap = min(float(self.risk.config.max_spread_bps), 280.0)
         elif strong_continuation:

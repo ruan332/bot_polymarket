@@ -500,13 +500,6 @@ class MomentumTradingEngine:
         bid_depth = float(book.get("bid_depth") or 0.0)
         ask_depth = float(book.get("ask_depth") or 0.0)
         depth_total = float(book.get("bid_depth") or 0.0) + float(book.get("ask_depth") or 0.0)
-        if spread_bps <= 0 or spread_bps > min(float(self.risk.config.max_spread_bps), 220.0):
-            return MomentumAnalysisResult(None, f"spread too wide ({spread_bps:.1f} bps)")
-        if bid_depth < 15.0 or ask_depth < 15.0 or depth_total < 45.0:
-            return MomentumAnalysisResult(
-                None,
-                f"book too shallow (bid {bid_depth:.1f}, ask {ask_depth:.1f}, total {depth_total:.1f})",
-            )
         expected_move = min(abs(momentum_short) * 1.8 + abs(momentum_medium) * 1.15, 0.18)
         if expected_move < 0.02:
             return MomentumAnalysisResult(None, f"expected move too small ({expected_move:.3f})")
@@ -514,6 +507,18 @@ class MomentumTradingEngine:
         continuation_strength = abs(momentum_short) + abs(momentum_medium)
         strong_continuation = expected_move >= 0.07 and continuation_strength >= 0.08
         moderate_continuation = expected_move >= 0.045 and continuation_strength >= 0.05
+        spread_cap = min(float(self.risk.config.max_spread_bps), 220.0)
+        if strong_continuation and expected_move >= 0.085 and continuation_strength >= 0.09:
+            spread_cap = min(float(self.risk.config.max_spread_bps), 280.0)
+        elif strong_continuation:
+            spread_cap = min(float(self.risk.config.max_spread_bps), 260.0)
+        if spread_bps <= 0 or spread_bps > spread_cap:
+            return MomentumAnalysisResult(None, f"spread too wide ({spread_bps:.1f} bps)")
+        if bid_depth < 15.0 or ask_depth < 15.0 or depth_total < 45.0:
+            return MomentumAnalysisResult(
+                None,
+                f"book too shallow (bid {bid_depth:.1f}, ask {ask_depth:.1f}, total {depth_total:.1f})",
+            )
         saturation_floor = 0.06
         saturation_cap = 0.94
         if strong_continuation:

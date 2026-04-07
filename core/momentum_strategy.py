@@ -491,7 +491,15 @@ class MomentumTradingEngine:
         if 0.02 <= current_price <= 0.98:
             history.append(current_price)
         history = history[-12:]
+        spread_bps = self._spread_bps(market)
+        volume_24h = float(market.get("volume_24h") or 0.0)
         min_history_points = max(int(getattr(self.context.settings, "momentum_min_history_points", 6) or 6), 4)
+        min_history_points = self._adaptive_history_floor(
+            market,
+            spread_bps=spread_bps,
+            volume_24h=volume_24h,
+            base_floor=min_history_points,
+        )
         if len(history) < min_history_points:
             return MomentumAnalysisResult(None, f"insufficient history ({len(history)} < {min_history_points})")
 
@@ -510,7 +518,7 @@ class MomentumTradingEngine:
         direction: Literal["YES", "NO"] = "YES" if momentum_short > 0 else "NO"
         market_probability = float(market["price_yes"] if direction == "YES" else market["price_no"])
         book = market["orderbook_summary_yes"] if direction == "YES" else market["orderbook_summary_no"]
-        spread_bps = float(book.get("spread_bps") or 0.0)
+        spread_bps = float(book.get("spread_bps") or spread_bps or 0.0)
         bid_depth = float(book.get("bid_depth") or 0.0)
         ask_depth = float(book.get("ask_depth") or 0.0)
         depth_total = float(book.get("bid_depth") or 0.0) + float(book.get("ask_depth") or 0.0)
@@ -590,6 +598,26 @@ class MomentumTradingEngine:
             },
             None,
         )
+
+    @staticmethod
+    def _adaptive_history_floor(
+        market: dict[str, Any],
+        *,
+        spread_bps: float,
+        volume_24h: float,
+        base_floor: int,
+    ) -> int:
+        market_kind = str(market.get("market_kind") or "")
+        crypto_tier = str(market.get("crypto_tier") or "")
+        if market_kind != "direct_coin":
+            return base_floor
+        if crypto_tier not in {"btc", "major"}:
+            return base_floor
+        if volume_24h >= 2500.0 and spread_bps <= 220.0:
+            return max(base_floor - 1, 5)
+        if volume_24h >= 1200.0 and spread_bps <= 180.0:
+            return max(base_floor - 1, 5)
+        return base_floor
 
     @staticmethod
     def _quote_stale(quote: Quote | None) -> bool:

@@ -753,7 +753,10 @@ async def test_momentum_analysis_allows_moderate_continuation_near_probability_f
         repository=repository,
         bus=FakeBus(),
     )
-    engine = MomentumTradingEngine(context, StrongFloorConnector())  # type: ignore[arg-type]
+    connector = FakeConnector()
+    connector.yes_summary = {"best_bid": 0.49, "best_ask": 0.50, "spread_bps": 78.0, "bid_depth": 650.0, "ask_depth": 610.0}
+    connector.no_summary = {"best_bid": 0.50, "best_ask": 0.51, "spread_bps": 78.0, "bid_depth": 640.0, "ask_depth": 620.0}
+    engine = MomentumTradingEngine(context, connector)  # type: ignore[arg-type]
 
     decision = await engine._analyze_market(
         {
@@ -769,6 +772,67 @@ async def test_momentum_analysis_allows_moderate_continuation_near_probability_f
     assert decision.decision["market_probability"] == 0.055
     assert decision.decision["edge"] > 0.07
     assert decision.decision["direction"] == "YES"
+
+
+@pytest.mark.asyncio
+async def test_momentum_analysis_allows_short_history_for_high_quality_btc_setup() -> None:
+    class ShortHistoryRepository(FakeRepository):
+        async def get_market_snapshots(self, market_id: str, limit: int = 12):
+            return [
+                {"price_yes": 0.470},
+                {"price_yes": 0.480},
+                {"price_yes": 0.490},
+                {"price_yes": 0.495},
+            ]
+
+    repository = ShortHistoryRepository()
+    context = SimpleNamespace(
+        settings=SimpleNamespace(
+            momentum_enabled=True,
+            momentum_markets=["BTC"],
+            momentum_trading_enabled=True,
+            momentum_signal_confidence_threshold=0.55,
+            momentum_min_history_points=6,
+            momentum_cooldown_minutes=20,
+            momentum_wait_for_next_market_start=False,
+            live_trading=False,
+            news_validation_enabled=False,
+            momentum_min_edge=0.10,
+            momentum_min_volume_24h=1000.0,
+        ),
+        risk_config=SimpleNamespace(
+            min_edge=0.05,
+            min_confidence=0.5,
+            max_spread_bps=250,
+            max_slippage_bps=150,
+            max_order_price=0.9,
+            min_market_volume_24h=1000.0,
+        ),
+        crypto_config=SimpleNamespace(major_assets=["ETH", "SOL"]),
+        repository=repository,
+        bus=FakeBus(),
+    )
+    connector = FakeConnector()
+    connector.yes_summary = {"best_bid": 0.49, "best_ask": 0.50, "spread_bps": 78.0, "bid_depth": 650.0, "ask_depth": 610.0}
+    connector.no_summary = {"best_bid": 0.50, "best_ask": 0.51, "spread_bps": 78.0, "bid_depth": 640.0, "ask_depth": 620.0}
+    engine = MomentumTradingEngine(context, connector)  # type: ignore[arg-type]
+
+    decision = await engine._analyze_market(
+        {
+            "id": "market-btc-15m",
+            "price_yes": 0.500,
+            "price_no": 0.500,
+            "volume_24h": 4200.0,
+            "market_kind": "direct_coin",
+            "crypto_tier": "btc",
+            "orderbook_summary_yes": connector.yes_summary,
+            "orderbook_summary_no": connector.no_summary,
+        }
+    )
+
+    assert decision.decision is not None
+    assert decision.decision["features_summary"]["selected_spread_bps"] == 78.0
+    assert decision.decision["expected_holding_minutes"] == 45
 
 
 @pytest.mark.asyncio

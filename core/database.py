@@ -334,6 +334,8 @@ CREATE TABLE IF NOT EXISTS weather_copytrade_candidates (
     metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
     score DOUBLE PRECISION NOT NULL DEFAULT 0,
     rationale TEXT NOT NULL DEFAULT '',
+    passed BOOLEAN NOT NULL DEFAULT FALSE,
+    reject_reason TEXT NOT NULL DEFAULT '',
     selected BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -357,6 +359,29 @@ CREATE TABLE IF NOT EXISTS weather_copytrade_state (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS weather_copytrade_profiles (
+    category TEXT NOT NULL DEFAULT 'WEATHER',
+    run_id UUID,
+    proxy_wallet TEXT NOT NULL DEFAULT '',
+    user_name TEXT NOT NULL DEFAULT '',
+    profile JSONB NOT NULL DEFAULT '{}'::jsonb,
+    selection_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    approved BOOLEAN NOT NULL DEFAULT FALSE,
+    active BOOLEAN NOT NULL DEFAULT FALSE,
+    paused BOOLEAN NOT NULL DEFAULT TRUE,
+    approved_at TIMESTAMPTZ,
+    activated_at TIMESTAMPTZ,
+    last_trade_seen_at TIMESTAMPTZ,
+    last_trade_seen_hash TEXT NOT NULL DEFAULT '',
+    processed_trade_hashes JSONB NOT NULL DEFAULT '[]'::jsonb,
+    metrics_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    performance_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (category, proxy_wallet)
 );
 
 CREATE TABLE IF NOT EXISTS settlement_events (
@@ -416,8 +441,17 @@ ON weather_copytrade_runs (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_weather_copytrade_candidates_run_id
 ON weather_copytrade_candidates (run_id, score DESC, rank ASC, created_at DESC);
 
+ALTER TABLE IF EXISTS weather_copytrade_candidates
+ADD COLUMN IF NOT EXISTS passed BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE IF EXISTS weather_copytrade_candidates
+ADD COLUMN IF NOT EXISTS reject_reason TEXT NOT NULL DEFAULT '';
+
 CREATE INDEX IF NOT EXISTS idx_weather_copytrade_state_active
 ON weather_copytrade_state (active, paused, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_weather_copytrade_profiles_active
+ON weather_copytrade_profiles (category, active, paused, updated_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_settlement_events_created_at
 ON settlement_events (created_at DESC);
@@ -981,6 +1015,7 @@ class TradingRepository:
         asset: str | None = None,
         tier: str | None = None,
         strategy: str | None = None,
+        trade_group_id: str | None = None,
         cutoff_name: str | None = None,
     ) -> list[dict[str, Any]]:
         return await self._recent_payloads(
@@ -989,6 +1024,7 @@ class TradingRepository:
             asset=asset,
             tier=tier,
             strategy=strategy,
+            trade_group_id=trade_group_id,
             cutoff_name=cutoff_name,
         )
 
@@ -1509,6 +1545,8 @@ class TradingRepository:
                 metrics,
                 score,
                 rationale,
+                passed,
+                reject_reason,
                 selected,
                 created_at
             )
@@ -1522,6 +1560,8 @@ class TradingRepository:
                 payload.metrics::jsonb,
                 payload.score,
                 payload.rationale,
+                payload.passed,
+                payload.reject_reason,
                 payload.selected,
                 payload.created_at
             FROM jsonb_to_recordset($1::jsonb) AS payload(
@@ -1534,6 +1574,8 @@ class TradingRepository:
                 metrics TEXT,
                 score DOUBLE PRECISION,
                 rationale TEXT,
+                passed BOOLEAN,
+                reject_reason TEXT,
                 selected BOOLEAN,
                 created_at TIMESTAMPTZ
             )
@@ -1638,6 +1680,145 @@ class TradingRepository:
             return None
         return self._normalize_weather_copytrade_payload(dict(row))
 
+    async def upsert_weather_copytrade_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        row = await self.db.fetchrow(
+            """
+            INSERT INTO weather_copytrade_profiles (
+                category,
+                run_id,
+                proxy_wallet,
+                user_name,
+                profile,
+                selection_snapshot,
+                approved,
+                active,
+                paused,
+                approved_at,
+                activated_at,
+                last_trade_seen_at,
+                last_trade_seen_hash,
+                processed_trade_hashes,
+                metrics_snapshot,
+                performance_snapshot,
+                metadata,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                $1,
+                $2::uuid,
+                $3,
+                $4,
+                $5::jsonb,
+                $6::jsonb,
+                $7,
+                $8,
+                $9,
+                $10,
+                $11,
+                $12,
+                $13,
+                $14::jsonb,
+                $15::jsonb,
+                $16::jsonb,
+                $17::jsonb,
+                $18,
+                $19
+            )
+            ON CONFLICT (category, proxy_wallet) DO UPDATE
+            SET run_id = EXCLUDED.run_id,
+                user_name = EXCLUDED.user_name,
+                profile = EXCLUDED.profile,
+                selection_snapshot = EXCLUDED.selection_snapshot,
+                approved = EXCLUDED.approved,
+                active = EXCLUDED.active,
+                paused = EXCLUDED.paused,
+                approved_at = EXCLUDED.approved_at,
+                activated_at = EXCLUDED.activated_at,
+                last_trade_seen_at = EXCLUDED.last_trade_seen_at,
+                last_trade_seen_hash = EXCLUDED.last_trade_seen_hash,
+                processed_trade_hashes = EXCLUDED.processed_trade_hashes,
+                metrics_snapshot = EXCLUDED.metrics_snapshot,
+                performance_snapshot = EXCLUDED.performance_snapshot,
+                metadata = EXCLUDED.metadata,
+                updated_at = EXCLUDED.updated_at
+            RETURNING *
+            """,
+            str(payload.get("category") or "WEATHER"),
+            payload.get("run_id"),
+            str(payload.get("proxy_wallet") or ""),
+            str(payload.get("user_name") or ""),
+            _as_json(payload.get("profile", {})),
+            _as_json(payload.get("selection_snapshot", {})),
+            bool(payload.get("approved", False)),
+            bool(payload.get("active", False)),
+            bool(payload.get("paused", True)),
+            payload.get("approved_at"),
+            payload.get("activated_at"),
+            payload.get("last_trade_seen_at"),
+            str(payload.get("last_trade_seen_hash") or ""),
+            _as_json(payload.get("processed_trade_hashes", [])),
+            _as_json(payload.get("metrics_snapshot", {})),
+            _as_json(payload.get("performance_snapshot", {})),
+            _as_json(payload.get("metadata", {})),
+            payload.get("created_at", datetime.now(UTC)),
+            payload.get("updated_at", datetime.now(UTC)),
+        )
+        assert row is not None
+        return self._normalize_weather_copytrade_payload(dict(row))
+
+    async def get_weather_copytrade_profile(self, category: str, proxy_wallet: str) -> dict[str, Any] | None:
+        row = await self.db.fetchrow(
+            """
+            SELECT *
+            FROM weather_copytrade_profiles
+            WHERE category = $1 AND proxy_wallet = $2
+            """,
+            category,
+            proxy_wallet,
+        )
+        if row is None:
+            return None
+        return self._normalize_weather_copytrade_payload(dict(row))
+
+    async def list_weather_copytrade_profiles(
+        self,
+        *,
+        category: str = "WEATHER",
+        active_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        if active_only:
+            rows = await self.db.fetch(
+                """
+                SELECT *
+                FROM weather_copytrade_profiles
+                WHERE category = $1 AND active = TRUE
+                ORDER BY paused ASC, approved_at DESC NULLS LAST, updated_at DESC
+                """,
+                category,
+            )
+        else:
+            rows = await self.db.fetch(
+                """
+                SELECT *
+                FROM weather_copytrade_profiles
+                WHERE category = $1
+                ORDER BY active DESC, paused ASC, approved_at DESC NULLS LAST, updated_at DESC
+                """,
+                category,
+            )
+        return [self._normalize_weather_copytrade_payload(dict(row)) for row in rows]
+
+    async def delete_weather_copytrade_profile(self, *, category: str, proxy_wallet: str) -> None:
+        await self.db.execute(
+            """
+            DELETE FROM weather_copytrade_profiles
+            WHERE category = $1 AND proxy_wallet = $2
+            """,
+            category,
+            proxy_wallet,
+        )
+
     async def get_latest_weather_copytrade_summary(self, *, limit: int = 12) -> dict[str, Any] | None:
         run_row = await self.db.fetchrow(
             """
@@ -1651,18 +1832,21 @@ class TradingRepository:
         )
         if run_row is None:
             state = await self.get_weather_copytrade_state()
+            profiles = await self.list_weather_copytrade_profiles(category="WEATHER")
             return {
                 "run": None,
                 "candidates": [],
                 "state": state,
+                "profiles": profiles,
                 "report": (state or {}).get("report") if state else None,
                 "selection_summary": {},
                 "scan_stats": {},
                 "metadata": {},
+                "portfolio_constraints": {},
             }
         candidate_rows = await self.db.fetch(
             """
-            SELECT run_id, rank, proxy_wallet, user_name, verified_badge, profile, metrics, score, rationale, selected, created_at
+            SELECT run_id, rank, proxy_wallet, user_name, verified_badge, profile, metrics, score, rationale, passed, reject_reason, selected, created_at
             FROM weather_copytrade_candidates
             WHERE run_id = $1::uuid
             ORDER BY score DESC, rank ASC, created_at DESC
@@ -1672,6 +1856,7 @@ class TradingRepository:
             limit,
         )
         state = await self.get_weather_copytrade_state(str(run_row["category"] or "WEATHER"))
+        profiles = await self.list_weather_copytrade_profiles(category=str(run_row["category"] or "WEATHER"))
         run = self._normalize_weather_copytrade_payload(dict(run_row))
         candidates = [self._normalize_weather_copytrade_payload(dict(row)) for row in candidate_rows]
         report = (state or {}).get("report") or run.get("model_summary") or {}
@@ -1679,10 +1864,12 @@ class TradingRepository:
             "run": run,
             "candidates": candidates,
             "state": state,
+            "profiles": profiles,
             "report": report,
             "selection_summary": run.get("selection_summary") or {},
             "scan_stats": run.get("scan_stats") or {},
             "metadata": run.get("metadata") or {},
+            "portfolio_constraints": {},
         }
 
     async def get_recent_weather_copytrade_runs(self, *, limit: int = 12) -> list[dict[str, Any]]:
@@ -1782,6 +1969,7 @@ class TradingRepository:
         asset: str | None = None,
         tier: str | None = None,
         strategy: str | None = None,
+        trade_group_id: str | None = None,
         cutoff_name: str | None = None,
     ) -> dict[str, Any]:
         window_start = datetime.now(UTC) - timedelta(hours=max(hours, 1))
@@ -1829,23 +2017,36 @@ class TradingRepository:
         risk_payloads = await self._normalize_risk_payloads([self._decode_record(row) for row in risk_event_rows])
 
         signals_filtered = [
-            item for item in signals_payloads if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)
+            item
+            for item in signals_payloads
+            if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy, trade_group_id=trade_group_id)
         ]
         decisions_filtered = [
-            item for item in decisions_payloads if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)
+            item
+            for item in decisions_payloads
+            if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy, trade_group_id=trade_group_id)
         ]
         orders_filtered = [
-            item for item in orders_payloads if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)
+            item
+            for item in orders_payloads
+            if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy, trade_group_id=trade_group_id)
         ]
         pending_pair_orders = [
             item
             for item in await self.list_pending_pair_orders()
-            if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)
+            if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy, trade_group_id=trade_group_id)
         ]
         risk_filtered = [
             item
             for item in risk_payloads
-            if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy, allow_missing=True)
+            if self._matches_filters(
+                item,
+                asset=asset,
+                tier=tier,
+                strategy=strategy,
+                trade_group_id=trade_group_id,
+                allow_missing=True,
+            )
         ]
 
         signals = len(signals_filtered)
@@ -1854,7 +2055,11 @@ class TradingRepository:
         risk_events = len(risk_filtered)
         total_cost = sum(float(row["cost_usd"] or 0.0) for row in llm_cost_rows)
         open_positions = await self.get_open_positions()
-        open_positions = [item for item in open_positions if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy)]
+        open_positions = [
+            item
+            for item in open_positions
+            if self._matches_filters(item, asset=asset, tier=tier, strategy=strategy, trade_group_id=trade_group_id)
+        ]
         positive_positions = sum(1 for position in open_positions if float(position["unrealized_pnl"]) > 0)
 
         signal_metrics = [self._signal_metrics(item) for item in signals_filtered]
@@ -2430,6 +2635,7 @@ class TradingRepository:
         asset: str | None = None,
         tier: str | None = None,
         strategy: str | None = None,
+        trade_group_id: str | None = None,
         cutoff_name: str | None = None,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -2447,6 +2653,9 @@ class TradingRepository:
         if strategy:
             args.append(strategy)
             clauses.append(f"payload->>'strategy_id' = ${len(args)}")
+        if trade_group_id:
+            args.append(trade_group_id)
+            clauses.append(f"payload->>'trade_group_id' = ${len(args)}")
         args.append(limit)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         query = f"SELECT payload, created_at FROM {table} {where} ORDER BY created_at DESC LIMIT ${len(args)}"
@@ -2473,6 +2682,7 @@ class TradingRepository:
         asset: str | None = None,
         tier: str | None = None,
         strategy: str | None = None,
+        trade_group_id: str | None = None,
         allow_missing: bool = False,
     ) -> bool:
         if asset:
@@ -2495,6 +2705,13 @@ class TradingRepository:
                 if not allow_missing:
                     return False
             elif strategy_value != strategy:
+                return False
+        if trade_group_id:
+            trade_group_value = str(payload.get("trade_group_id") or "").strip()
+            if not trade_group_value:
+                if not allow_missing:
+                    return False
+            elif trade_group_value != trade_group_id:
                 return False
         return True
 

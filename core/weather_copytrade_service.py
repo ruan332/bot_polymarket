@@ -52,7 +52,12 @@ class WeatherCopytradeService:
 
     async def run_analysis(self, *, limit: int | None = None) -> dict[str, Any]:
         leaderboard_limit = int(limit or self.settings.leaderboard_limit)
-        existing_state = await self.context.repository.get_weather_copytrade_state(self.category)
+        profiles = await self.context.repository.list_weather_copytrade_profiles(category=self.category)
+        active_wallets = {
+            str(item.get("proxy_wallet") or "")
+            for item in profiles
+            if bool(item.get("approved")) and bool(item.get("active")) and not bool(item.get("paused"))
+        }
         leaderboard = await self.connector.get_trader_leaderboard(
             category=self.category,
             time_period="ALL",
@@ -80,36 +85,36 @@ class WeatherCopytradeService:
             )
         )
         shortlisted = enriched[: int(self.settings.shortlist_limit)]
-        selected = self._pick_candidate(shortlisted)
-        if selected is not None:
-            selected["selected"] = True
+        recommended = self._pick_candidate(shortlisted)
+        shortlisted_response = [self._decorate_candidate(item, active_wallets=active_wallets) for item in shortlisted]
 
-        report = await self._build_short_report(selected, shortlisted)
+        report = await self._build_short_report(recommended, shortlisted)
         run_payload = {
             "run_id": str(uuid4()),
             "category": self.category,
             "leaderboard_limit": leaderboard_limit,
             "universe_count": len(leaderboard),
             "shortlisted_count": len(shortlisted),
-            "selected_count": 1 if selected is not None else 0,
-            "selected_proxy_wallet": selected["proxy_wallet"] if selected else "",
-            "selected_user_name": selected["user_name"] if selected else "",
+            "selected_count": len(active_wallets),
+            "selected_proxy_wallet": recommended["proxy_wallet"] if recommended else "",
+            "selected_user_name": recommended["user_name"] if recommended else "",
             "candidate_count": len(enriched),
             "stage_counts": [
                 {"label": "universe", "count": len(leaderboard)},
                 {"label": "profiled", "count": len(enriched)},
                 {"label": "shortlisted", "count": len(shortlisted)},
-                {"label": "selected", "count": 1 if selected is not None else 0},
+                {"label": "copying", "count": len(active_wallets)},
             ],
             "rejected_breakdown": dict(sorted(rejected_breakdown.items(), key=lambda pair: (-pair[1], pair[0]))),
             "model_summary": report,
-            "selection_summary": selected["metrics"] if selected else {},
+            "selection_summary": recommended["metrics"] if recommended else {},
             "scan_stats": {
                 "category": self.category,
                 "leaderboard_limit": leaderboard_limit,
                 "universe_count": len(leaderboard),
                 "enriched_count": len(enriched),
                 "shortlisted_count": len(shortlisted),
+                "active_profiles_count": len(active_wallets),
             },
             "metadata": {
                 "scan_interval_minutes": int(self.settings.scan_interval_minutes),
@@ -135,35 +140,64 @@ class WeatherCopytradeService:
                     "rationale": item["rationale"],
                     "passed": bool(item.get("passed", False)),
                     "reject_reason": item.get("reject_reason", ""),
-                    "selected": bool(item.get("selected", False)),
+                    "selected": bool(item.get("proxy_wallet") in active_wallets),
                     "created_at": item["created_at"],
                 }
                 for item in shortlisted
             ]
         )
-        state = await self._merge_state_from_run(run_payload, selected, report, existing_state=existing_state)
-        return {"run": run_payload, "candidates": shortlisted, "selected": selected, "report": report, "state": state}
+        legacy_state = await self._sync_legacy_state(
+            profiles=profiles,
+            run_payload=run_payload,
+            report=report,
+            recommended=recommended,
+        )
+        portfolio_constraints = await self._portfolio_constraints()
+        return {
+            "run": run_payload,
+            "candidates": shortlisted_response,
+            "selected": recommended,
+            "profiles": await self.list_profiles(profiles=profiles),
+            "report": report,
+            "state": legacy_state,
+            "portfolio_constraints": portfolio_constraints,
+        }
 
-    async def approve_selection(self, *, run_id: str | None = None, proxy_wallet: str | None = None) -> dict[str, Any]:
+    async def approve_selection(
+        self,
+        *,
+        run_id: str | None = None,
+        proxy_wallet: str | None = None,
+        proxy_wallets: list[str] | None = None,
+    ) -> dict[str, Any]:
         summary = await self.context.repository.get_latest_weather_copytrade_summary(limit=int(self.settings.shortlist_limit))
         run = summary.get("run") or {}
         candidates = summary.get("candidates") or []
         if not run:
             raise ValueError("no weather copytrade run available")
-        if run_id and str(run.get("run_id")) != run_id:
-            raise ValueError("run_id does not match the latest weather analysis")
-        selected = self._pick_candidate(candidates, proxy_wallet=proxy_wallet)
-        if selected is None:
-            raise ValueError("no candidate available to approve")
         report = run.get("model_summary") or {}
-        state = await self.context.repository.upsert_weather_copytrade_state(
-            {
+        target_wallets = [item for item in (proxy_wallets or []) if str(item).strip()]
+        if proxy_wallet and proxy_wallet not in target_wallets:
+            target_wallets.append(proxy_wallet)
+        if not target_wallets:
+            selected = self._pick_candidate(candidates, proxy_wallet=proxy_wallet)
+            if selected is None:
+                raise ValueError("no candidate available to approve")
+            target_wallets = [str(selected["proxy_wallet"])]
+
+        approved_profiles: list[dict[str, Any]] = []
+        for wallet in target_wallets:
+            selected = self._pick_candidate(candidates, proxy_wallet=wallet)
+            if selected is None:
+                raise ValueError(f"candidate {wallet} not available in latest run")
+            existing = await self.context.repository.get_weather_copytrade_profile(self.category, wallet)
+            profile_payload = {
                 "category": self.category,
                 "run_id": run.get("run_id"),
-                "selected_proxy_wallet": selected["proxy_wallet"],
-                "selected_user_name": selected["user_name"],
-                "selected_profile": selected.get("profile") or {},
-                "selection": {
+                "proxy_wallet": selected["proxy_wallet"],
+                "user_name": selected["user_name"],
+                "profile": selected.get("profile") or {},
+                "selection_snapshot": {
                     "proxy_wallet": selected["proxy_wallet"],
                     "user_name": selected["user_name"],
                     "score": selected["score"],
@@ -171,112 +205,204 @@ class WeatherCopytradeService:
                     "rationale": selected.get("rationale") or "",
                     "verified_badge": bool(selected.get("verified_badge", False)),
                 },
-                "report": report,
                 "approved": True,
                 "active": True,
                 "paused": False,
-                "approved_at": datetime.now(UTC),
+                "approved_at": (existing or {}).get("approved_at", datetime.now(UTC)),
                 "activated_at": datetime.now(UTC),
-                "last_trade_seen_at": datetime.now(UTC),
-                "last_trade_seen_hash": "",
-                "processed_trade_hashes": [],
+                "last_trade_seen_at": (existing or {}).get("last_trade_seen_at"),
+                "last_trade_seen_hash": str((existing or {}).get("last_trade_seen_hash") or ""),
+                "processed_trade_hashes": self._json_list((existing or {}).get("processed_trade_hashes")),
+                "metrics_snapshot": selected.get("metrics") or {},
+                "performance_snapshot": await self._profile_performance_snapshot(selected["proxy_wallet"]),
                 "metadata": {
+                    **self._metadata_map((existing or {}).get("metadata")),
                     "approved_from_run_id": run.get("run_id"),
                     "approved_at": datetime.now(UTC).isoformat(),
                 },
-                "created_at": datetime.now(UTC),
+                "created_at": (existing or {}).get("created_at", datetime.now(UTC)),
                 "updated_at": datetime.now(UTC),
             }
+            approved_profiles.append(await self.context.repository.upsert_weather_copytrade_profile(profile_payload))
+        legacy_state = await self._sync_legacy_state(
+            profiles=await self.context.repository.list_weather_copytrade_profiles(category=self.category),
+            run_payload=run,
+            report=report,
         )
-        return {"run": run, "candidate": selected, "state": state, "report": report}
+        return {
+            "run": run,
+            "profiles": approved_profiles,
+            "state": legacy_state,
+            "report": report,
+            "approved_count": len(approved_profiles),
+            "requested_run_id": run_id,
+            "used_run_id": run.get("run_id"),
+            "stale_run_id": bool(run_id and str(run.get("run_id")) != run_id),
+        }
 
     async def pause(self, paused: bool = True) -> dict[str, Any]:
-        state = await self.context.repository.get_weather_copytrade_state(self.category)
-        state = await self.context.repository.upsert_weather_copytrade_state(
+        profiles = await self.context.repository.list_weather_copytrade_profiles(category=self.category)
+        updated_profiles: list[dict[str, Any]] = []
+        for profile in profiles:
+            updated_profiles.append(
+                await self.context.repository.upsert_weather_copytrade_profile(
+                    {
+                        **profile,
+                        "paused": paused,
+                        "active": False if paused else bool(profile.get("approved")),
+                        "updated_at": datetime.now(UTC),
+                        "created_at": profile.get("created_at", datetime.now(UTC)),
+                    }
+                )
+            )
+        state = await self._sync_legacy_state(
+            profiles=updated_profiles,
+            run_payload=(await self.context.repository.get_latest_weather_copytrade_summary(limit=int(self.settings.shortlist_limit)) or {}).get("run"),
+            report=((await self.context.repository.get_latest_weather_copytrade_summary(limit=int(self.settings.shortlist_limit)) or {}).get("report") or {}),
+        )
+        return {"state": state, "profiles": updated_profiles}
+
+    async def pause_profile(self, *, proxy_wallet: str, paused: bool = True) -> dict[str, Any]:
+        profile = await self.context.repository.get_weather_copytrade_profile(self.category, proxy_wallet)
+        if profile is None:
+            raise ValueError("profile not found")
+        updated = await self.context.repository.upsert_weather_copytrade_profile(
             {
-                **(state or {}),
-                "category": self.category,
+                **profile,
                 "paused": paused,
-                "active": False if paused else bool((state or {}).get("approved")),
+                "active": False if paused else bool(profile.get("approved")),
                 "updated_at": datetime.now(UTC),
-                "created_at": (state or {}).get("created_at", datetime.now(UTC)),
+                "created_at": profile.get("created_at", datetime.now(UTC)),
             }
         )
-        return {"state": state}
+        profiles = await self.context.repository.list_weather_copytrade_profiles(category=self.category)
+        summary = await self.context.repository.get_latest_weather_copytrade_summary(limit=int(self.settings.shortlist_limit)) or {}
+        state = await self._sync_legacy_state(profiles=profiles, run_payload=summary.get("run"), report=summary.get("report") or {})
+        return {"profile": updated, "state": state}
+
+    async def remove_profile(self, *, proxy_wallet: str) -> dict[str, Any]:
+        profile = await self.context.repository.get_weather_copytrade_profile(self.category, proxy_wallet)
+        if profile is None:
+            raise ValueError("profile not found")
+        await self.context.repository.delete_weather_copytrade_profile(category=self.category, proxy_wallet=proxy_wallet)
+        profiles = await self.context.repository.list_weather_copytrade_profiles(category=self.category)
+        summary = await self.context.repository.get_latest_weather_copytrade_summary(limit=int(self.settings.shortlist_limit)) or {}
+        state = await self._sync_legacy_state(profiles=profiles, run_payload=summary.get("run"), report=summary.get("report") or {})
+        return {"removed_proxy_wallet": proxy_wallet, "state": state, "profiles": profiles}
+
+    async def list_profiles(self, *, profiles: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        rows = profiles if profiles is not None else await self.context.repository.list_weather_copytrade_profiles(category=self.category)
+        enriched: list[dict[str, Any]] = []
+        for row in rows:
+            selection = self._metadata_map(row.get("selection_snapshot"))
+            performance = self._metadata_map(row.get("performance_snapshot"))
+            if not performance:
+                performance = await self._profile_performance_snapshot(str(row.get("proxy_wallet") or ""))
+            enriched.append(
+                {
+                    **row,
+                    "score": self._as_float(selection.get("score")),
+                    "metrics_snapshot": self._metadata_map(row.get("metrics_snapshot")),
+                    "performance_snapshot": performance,
+                }
+            )
+        return enriched
 
     async def summary(self) -> dict[str, Any]:
-        return await self.context.repository.get_latest_weather_copytrade_summary(limit=int(self.settings.shortlist_limit)) or {
+        payload = await self.context.repository.get_latest_weather_copytrade_summary(limit=int(self.settings.shortlist_limit)) or {
             "run": None,
             "candidates": [],
             "state": await self.context.repository.get_weather_copytrade_state(self.category),
+            "profiles": await self.context.repository.list_weather_copytrade_profiles(category=self.category),
         }
+        profiles = await self.list_profiles(profiles=payload.get("profiles") or [])
+        active_wallets = {str(item.get("proxy_wallet") or "") for item in profiles if bool(item.get("active")) and not bool(item.get("paused"))}
+        payload["profiles"] = profiles
+        payload["candidates"] = [self._decorate_candidate(item, active_wallets=active_wallets) for item in (payload.get("candidates") or [])]
+        payload["portfolio_constraints"] = await self._portfolio_constraints()
+        payload["state"] = await self._sync_legacy_state(
+            profiles=payload.get("profiles") or [],
+            run_payload=payload.get("run"),
+            report=payload.get("report") or {},
+            recommended=self._pick_candidate(payload.get("candidates") or []),
+        )
+        return payload
 
     async def sync_mirror_trades(self) -> dict[str, Any]:
-        state = await self.context.repository.get_weather_copytrade_state(self.category)
-        if not state or not bool(state.get("active")) or bool(state.get("paused")):
-            return {"processed": 0, "copied": 0, "skipped": 0, "reasons": {}, "state": state}
-        proxy_wallet = str(state.get("selected_proxy_wallet") or "")
-        if not proxy_wallet:
-            return {"processed": 0, "copied": 0, "skipped": 0, "reasons": {"no_selected_wallet": 1}, "state": state}
-
-        trades = await self.connector.get_user_trades(proxy_wallet, limit=100, offset=0, taker_only=False)
-        trades.sort(key=self._trade_timestamp)
-        processed_hashes = set(self._json_list(state.get("processed_trade_hashes")))
-        raw_last_seen = state.get("last_trade_seen_at")
-        last_seen_at = self._parse_datetime(raw_last_seen) if raw_last_seen not in (None, "") else (datetime.now(UTC) - timedelta(minutes=30))
-        latest_seen_at = self._parse_datetime(raw_last_seen) if raw_last_seen not in (None, "") else None
-        latest_seen_hash = str(state.get("last_trade_seen_hash") or "")
+        profiles = await self.context.repository.list_weather_copytrade_profiles(category=self.category)
+        active_profiles = [item for item in profiles if bool(item.get("active")) and not bool(item.get("paused"))]
+        if not active_profiles:
+            state = await self._sync_legacy_state(profiles=profiles)
+            return {"processed": 0, "copied": 0, "skipped": 0, "reasons": {}, "state": state, "profiles": profiles}
         processed = copied = skipped = 0
         reasons: Counter[str] = Counter()
+        synced_profiles: list[dict[str, Any]] = []
 
-        for trade in trades:
-            trade_hash = str(trade.get("transactionHash") or "")
-            if not trade_hash or trade_hash in processed_hashes:
-                skipped += 1
-                reasons["duplicate"] += 1
+        for profile in active_profiles:
+            proxy_wallet = str(profile.get("proxy_wallet") or "")
+            if not proxy_wallet:
+                reasons["no_selected_wallet"] += 1
                 continue
-            if self._trade_timestamp(trade) <= last_seen_at:
-                continue
-            processed += 1
-            if not self._is_weather_trade(trade):
-                skipped += 1
-                reasons["non_weather_market"] += 1
+            trades = await self.connector.get_user_trades(proxy_wallet, limit=100, offset=0, taker_only=False)
+            trades.sort(key=self._trade_timestamp)
+            processed_hashes = set(self._json_list(profile.get("processed_trade_hashes")))
+            raw_last_seen = profile.get("last_trade_seen_at")
+            last_seen_at = self._parse_datetime(raw_last_seen) if raw_last_seen not in (None, "") else (datetime.now(UTC) - timedelta(minutes=30))
+            latest_seen_at = self._parse_datetime(raw_last_seen) if raw_last_seen not in (None, "") else None
+            latest_seen_hash = str(profile.get("last_trade_seen_hash") or "")
+
+            for trade in trades:
+                trade_hash = str(trade.get("transactionHash") or "")
+                if not trade_hash or trade_hash in processed_hashes:
+                    skipped += 1
+                    reasons["duplicate"] += 1
+                    continue
+                if self._trade_timestamp(trade) <= last_seen_at:
+                    continue
+                processed += 1
+                if not self._is_weather_trade(trade):
+                    skipped += 1
+                    reasons["non_weather_market"] += 1
+                    processed_hashes.add(trade_hash)
+                    continue
+                result = await self._copy_trade(trade, profile)
                 processed_hashes.add(trade_hash)
-                continue
-            result = await self._copy_trade(trade, state)
-            processed_hashes.add(trade_hash)
-            latest_seen_at = max(latest_seen_at or self._trade_timestamp(trade), self._trade_timestamp(trade))
-            latest_seen_hash = trade_hash
-            if result["copied"]:
-                copied += 1
-            else:
-                skipped += 1
-                reasons[result["reason"]] += 1
+                latest_seen_at = max(latest_seen_at or self._trade_timestamp(trade), self._trade_timestamp(trade))
+                latest_seen_hash = trade_hash
+                if result["copied"]:
+                    copied += 1
+                else:
+                    skipped += 1
+                    reasons[result["reason"]] += 1
 
-        processed_history = self._json_list(state.get("processed_trade_hashes"))
-        for trade_hash in processed_hashes:
-            if trade_hash not in processed_history:
-                processed_history.append(trade_hash)
-        await self.context.repository.upsert_weather_copytrade_state(
-            {
-                **state,
-                "category": self.category,
-                "last_trade_seen_at": latest_seen_at,
-                "last_trade_seen_hash": latest_seen_hash,
-                "processed_trade_hashes": processed_history[-500:],
-                "metadata": {
-                    **self._metadata_map(state.get("metadata")),
-                    "last_sync_at": datetime.now(UTC).isoformat(),
-                },
-                "updated_at": datetime.now(UTC),
-            }
-        )
+            processed_history = self._json_list(profile.get("processed_trade_hashes"))
+            for trade_hash in processed_hashes:
+                if trade_hash not in processed_history:
+                    processed_history.append(trade_hash)
+            synced_profiles.append(
+                await self.context.repository.upsert_weather_copytrade_profile(
+                    {
+                        **profile,
+                        "last_trade_seen_at": latest_seen_at,
+                        "last_trade_seen_hash": latest_seen_hash,
+                        "processed_trade_hashes": processed_history[-500:],
+                        "performance_snapshot": await self._profile_performance_snapshot(proxy_wallet),
+                        "metadata": {
+                            **self._metadata_map(profile.get("metadata")),
+                            "last_sync_at": datetime.now(UTC).isoformat(),
+                        },
+                        "updated_at": datetime.now(UTC),
+                    }
+                )
+            )
+        state = await self._sync_legacy_state(profiles=await self.context.repository.list_weather_copytrade_profiles(category=self.category))
         return {
             "processed": processed,
             "copied": copied,
             "skipped": skipped,
             "reasons": dict(reasons),
-            "state": await self.context.repository.get_weather_copytrade_state(self.category),
+            "state": state,
+            "profiles": synced_profiles,
         }
 
     async def sync_live_order_statuses(self, *, limit: int = 100) -> dict[str, Any]:
@@ -351,6 +477,97 @@ class WeatherCopytradeService:
             "open": open_orders,
             "orders": order_events[:10],
         }
+
+    async def _sync_legacy_state(
+        self,
+        *,
+        profiles: list[dict[str, Any]] | None = None,
+        run_payload: dict[str, Any] | None = None,
+        report: dict[str, Any] | None = None,
+        recommended: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        rows = profiles if profiles is not None else await self.context.repository.list_weather_copytrade_profiles(category=self.category)
+        active_profiles = [item for item in rows if bool(item.get("active")) and not bool(item.get("paused"))]
+        lead = active_profiles[0] if active_profiles else (recommended or {})
+        state_payload = {
+            "category": self.category,
+            "run_id": (run_payload or {}).get("run_id"),
+            "selected_proxy_wallet": str(lead.get("proxy_wallet") or ""),
+            "selected_user_name": str(lead.get("user_name") or ""),
+            "selected_profile": lead.get("profile") or {},
+            "selection": lead.get("selection_snapshot") or lead,
+            "report": report or {},
+            "approved": bool(active_profiles),
+            "active": bool(active_profiles),
+            "paused": False if active_profiles else True,
+            "approved_at": active_profiles[0].get("approved_at") if active_profiles else None,
+            "activated_at": active_profiles[0].get("activated_at") if active_profiles else None,
+            "last_trade_seen_at": active_profiles[0].get("last_trade_seen_at") if active_profiles else None,
+            "last_trade_seen_hash": str(active_profiles[0].get("last_trade_seen_hash") or "") if active_profiles else "",
+            "processed_trade_hashes": self._json_list(active_profiles[0].get("processed_trade_hashes")) if active_profiles else [],
+            "metadata": {
+                "active_profiles_count": len(active_profiles),
+                "proxy_wallets": [str(item.get("proxy_wallet") or "") for item in active_profiles],
+            },
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
+        }
+        return await self.context.repository.upsert_weather_copytrade_state(state_payload)
+
+    async def _portfolio_constraints(self) -> dict[str, Any]:
+        portfolio = await self.context.repository.get_portfolio_summary()
+        base = max(min(float(portfolio.available_balance), float(portfolio.total_equity)), 0.0)
+        per_trade_limit = round(base * 0.02, 4)
+        open_positions = await self.context.repository.get_open_positions()
+        weather_open_positions = [
+            item for item in open_positions if str(item.get("strategy_id") or "") == "weather_copytrade"
+        ]
+        profiles = await self.context.repository.list_weather_copytrade_profiles(category=self.category)
+        active_profiles = [item for item in profiles if bool(item.get("active")) and not bool(item.get("paused"))]
+        return {
+            "bankroll_base_usd": round(base, 4),
+            "per_trade_limit_usd": per_trade_limit,
+            "risk_rule": "2%_of_current_bankroll",
+            "max_notional_usd": float(self.settings.max_notional_usd),
+            "min_notional_usd": float(self.settings.min_notional_usd),
+            "copy_trade_fraction": float(self.settings.copy_trade_fraction),
+            "active_profiles_count": len(active_profiles),
+            "open_positions_count": len(weather_open_positions),
+            "max_open_copied_positions": int(self.settings.max_open_copied_positions),
+        }
+
+    async def _profile_performance_snapshot(self, proxy_wallet: str) -> dict[str, Any]:
+        if not proxy_wallet:
+            return {}
+        report = await self.context.repository.get_performance_report(
+            hours=720,
+            strategy="weather_copytrade",
+            trade_group_id=proxy_wallet,
+        )
+        summary = report.get("summary") or {}
+        return {
+            "orders": int(summary.get("orders") or 0),
+            "signals": int(summary.get("signals") or 0),
+            "risk_events": int(summary.get("risk_events") or 0),
+            "approval_rate": float(summary.get("approval_rate") or 0.0),
+            "execution_rate": float(summary.get("execution_rate") or 0.0),
+            "win_rate": float(summary.get("win_rate") or 0.0),
+            "realized_pnl_window": float(summary.get("realized_pnl_window") or 0.0),
+            "max_drawdown": float(summary.get("max_drawdown") or 0.0),
+        }
+
+    def _decorate_candidate(self, candidate: dict[str, Any], *, active_wallets: set[str]) -> dict[str, Any]:
+        payload = dict(candidate)
+        wallet = str(payload.get("proxy_wallet") or "")
+        if wallet in active_wallets:
+            status = "already_copying"
+        elif bool(payload.get("passed")):
+            status = "eligible"
+        else:
+            status = "rejected"
+        payload["status"] = status
+        payload["selected"] = wallet in active_wallets
+        return payload
 
     async def _evaluate_trader(self, rank: int, trader: dict[str, Any]) -> dict[str, Any] | None:
         proxy_wallet = str(trader.get("proxyWallet") or trader.get("proxy_wallet") or "").strip()
@@ -433,7 +650,12 @@ class WeatherCopytradeService:
             payload = {}
         summary = sanitize_text(str(payload.get("summary") or self._deterministic_summary(selected)), int(self.settings.report_token_limit))
         why = sanitize_text(str(payload.get("why") or selected["rationale"]), int(self.settings.report_token_limit))
-        risks = [sanitize_text(str(item), 90) for item in payload.get("risks", []) if str(item).strip()]
+        raw_risks = payload.get("risks", [])
+        if isinstance(raw_risks, str):
+            raw_risks = [raw_risks]
+        elif not isinstance(raw_risks, list):
+            raw_risks = []
+        risks = [sanitize_text(str(item), 90) for item in raw_risks if str(item).strip()]
         if not risks:
             risks = self._deterministic_risks(selected)
         return {
@@ -499,7 +721,7 @@ class WeatherCopytradeService:
             }
         )
 
-    async def _copy_trade(self, trade: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    async def _copy_trade(self, trade: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
         side = str(trade.get("side") or "BUY").upper()
         trade_hash = str(trade.get("transactionHash") or "")
         condition_id = str(trade.get("conditionId") or "")
@@ -531,14 +753,34 @@ class WeatherCopytradeService:
         trade_size = self._as_float(trade.get("size"))
         if trade_price <= 0 or trade_size <= 0:
             return {"copied": False, "reason": "bad_trade_size"}
+        portfolio = await self.context.repository.get_portfolio_summary()
+        bankroll_base = max(min(float(portfolio.available_balance), float(portfolio.total_equity)), 0.0)
+        per_trade_limit = bankroll_base * 0.02
+        if bankroll_base <= 0 or per_trade_limit <= 0:
+            return {"copied": False, "reason": "insufficient_bankroll"}
+        open_positions = await self.context.repository.get_open_positions()
+        weather_open_positions = [
+            item for item in open_positions if str(item.get("strategy_id") or "") == "weather_copytrade"
+        ]
+        if side == "BUY" and len(weather_open_positions) >= int(self.settings.max_open_copied_positions):
+            return {"copied": False, "reason": "max_open_positions_reached"}
         notional = trade_price * trade_size
+        max_notional = min(float(self.settings.max_notional_usd), per_trade_limit, float(portfolio.available_balance))
+        if max_notional < float(self.settings.min_notional_usd):
+            return {"copied": False, "reason": "insufficient_available_balance"}
         copy_notional = clamp(
             max(notional * float(self.settings.copy_trade_fraction), float(self.settings.min_notional_usd)),
             float(self.settings.min_notional_usd),
-            float(self.settings.max_notional_usd),
+            max_notional,
         )
+        if copy_notional <= 0 or copy_notional > float(portfolio.available_balance):
+            return {"copied": False, "reason": "insufficient_available_balance"}
         reference_price = best_ask if side == "BUY" else best_bid
-        copy_size = max(1, int(math.ceil(copy_notional / max(reference_price, 1e-6))))
+        max_affordable_size = int(math.floor(max_notional / max(reference_price, 1e-6)))
+        if max_affordable_size < 1:
+            return {"copied": False, "reason": "insufficient_available_balance"}
+        target_size = int(math.floor(copy_notional / max(reference_price, 1e-6)))
+        copy_size = min(max_affordable_size, max(1, target_size))
         price_limit = best_ask + 0.01 if side == "BUY" else max(best_bid - 0.01, 0.01)
         order_status = await self.connector.place_order(
             market_id=str(market.get("id") or condition_id),
@@ -559,10 +801,10 @@ class WeatherCopytradeService:
             "asset_symbol": self._guess_asset_symbol(trade, market),
             "crypto_tier": "small_cap",
             "action": action,
-            "position_key": f"weather:{state.get('selected_proxy_wallet') or ''}:{condition_id}:{direction}",
+            "position_key": f"weather:{profile.get('proxy_wallet') or ''}:{condition_id}:{direction}",
             "strategy_id": "weather_copytrade",
             "regime": "weather_copytrade",
-            "trade_group_id": str(state.get("selected_proxy_wallet") or ""),
+            "trade_group_id": str(profile.get("proxy_wallet") or ""),
             "cycle_slug": str(trade.get("slug") or ""),
             "leg_role": "primary",
             "direction": direction,
@@ -579,6 +821,11 @@ class WeatherCopytradeService:
             "status": str(order_status.get("status") or "simulated"),
             "reason": f"mirror_{side.lower()}_{trade_hash[:10]}",
             "news_validation": None,
+            "metadata": {
+                "copied_profile_wallet": str(profile.get("proxy_wallet") or ""),
+                "bankroll_base_usd": round(bankroll_base, 4),
+                "per_trade_limit_usd": round(per_trade_limit, 4),
+            },
         }
         await self.context.repository.record_paper_order(
             payload["order_id"],

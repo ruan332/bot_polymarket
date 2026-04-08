@@ -310,6 +310,30 @@ async def test_get_latest_weather_copytrade_summary_normalizes_nested_json_paylo
                         "created_at": datetime(2026, 3, 24, tzinfo=UTC),
                     }
                 ]
+            if "FROM weather_copytrade_profiles" in query:
+                return [
+                    {
+                        "category": "WEATHER",
+                        "run_id": run_id,
+                        "proxy_wallet": "0xabc",
+                        "user_name": "ColdMath",
+                        "profile": '{"display_username_public":true,"name":"ColdMath"}',
+                        "selection_snapshot": '{"proxy_wallet":"0xabc","score":98.5}',
+                        "approved": True,
+                        "active": True,
+                        "paused": False,
+                        "approved_at": datetime(2026, 3, 24, tzinfo=UTC),
+                        "activated_at": datetime(2026, 3, 24, tzinfo=UTC),
+                        "last_trade_seen_at": datetime(2026, 3, 24, tzinfo=UTC),
+                        "last_trade_seen_hash": "trade-1",
+                        "processed_trade_hashes": '["trade-1"]',
+                        "metrics_snapshot": '{"pnl_30d":42.5,"profit_factor":2.5}',
+                        "performance_snapshot": '{"orders":4,"realized_pnl_window":5.2}',
+                        "metadata": '{"last_sync_at":"2026-03-24T00:00:00+00:00"}',
+                        "created_at": datetime(2026, 3, 24, tzinfo=UTC),
+                        "updated_at": datetime(2026, 3, 24, tzinfo=UTC),
+                    }
+                ]
             raise AssertionError(f"unexpected fetch query: {query}")
 
     repo = TradingRepository(DummyDb(), initial_bankroll=10.0)
@@ -322,6 +346,8 @@ async def test_get_latest_weather_copytrade_summary_normalizes_nested_json_paylo
     assert summary["metadata"]["copy_trade_fraction"] == 0.08
     assert summary["candidates"][0]["metrics"]["profit_factor"] == 2.5
     assert summary["state"]["report"]["selection_reason"] == "strong fit"
+    assert summary["profiles"][0]["proxy_wallet"] == "0xabc"
+    assert summary["profiles"][0]["performance_snapshot"]["orders"] == 4
 
 
 @pytest.mark.asyncio

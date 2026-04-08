@@ -182,9 +182,33 @@ type WeatherCopytradeCandidate = {
   score: number;
   rationale: string;
   selected?: boolean;
+  status?: "already_copying" | "eligible" | "rejected";
   created_at?: string;
   passed?: boolean;
   reject_reason?: string;
+};
+
+type WeatherCopytradeProfile = {
+  category: string;
+  run_id?: string;
+  proxy_wallet: string;
+  user_name: string;
+  profile: Record<string, unknown>;
+  selection_snapshot: Record<string, unknown>;
+  approved: boolean;
+  active: boolean;
+  paused: boolean;
+  approved_at?: string | null;
+  activated_at?: string | null;
+  last_trade_seen_at?: string | null;
+  last_trade_seen_hash?: string;
+  processed_trade_hashes?: string[];
+  metrics_snapshot: Record<string, unknown>;
+  performance_snapshot: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+  score?: number;
 };
 
 type WeatherCopytradeRun = {
@@ -230,11 +254,13 @@ type WeatherCopytradeState = {
 type WeatherCopytradeSummary = {
   run: WeatherCopytradeRun | null;
   candidates: WeatherCopytradeCandidate[];
+  profiles: WeatherCopytradeProfile[];
   state: WeatherCopytradeState | null;
   report?: WeatherCopytradeReport | null;
   selection_summary?: Record<string, unknown>;
   scan_stats?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  portfolio_constraints?: Record<string, unknown>;
 };
 
 type MetricsOverview = {
@@ -433,9 +459,40 @@ function normalizeWeatherCopytradeCandidate(value: unknown): WeatherCopytradeCan
     score: optionalNumber(raw.score) ?? 0,
     rationale: String(raw.rationale ?? ""),
     selected: typeof raw.selected === "boolean" ? raw.selected : undefined,
+    status:
+      raw.status === "already_copying" || raw.status === "eligible" || raw.status === "rejected"
+        ? raw.status
+        : undefined,
     created_at: typeof raw.created_at === "string" ? raw.created_at : undefined,
     passed: typeof raw.passed === "boolean" ? raw.passed : undefined,
     reject_reason: typeof raw.reject_reason === "string" ? raw.reject_reason : undefined,
+  };
+}
+
+function normalizeWeatherCopytradeProfile(value: unknown): WeatherCopytradeProfile | null {
+  const raw = normalizeRecord(value);
+  if (!raw) return null;
+  return {
+    category: String(raw.category ?? "WEATHER"),
+    run_id: typeof raw.run_id === "string" ? raw.run_id : undefined,
+    proxy_wallet: String(raw.proxy_wallet ?? ""),
+    user_name: String(raw.user_name ?? ""),
+    profile: normalizeObjectRecord(raw.profile),
+    selection_snapshot: normalizeObjectRecord(raw.selection_snapshot),
+    approved: Boolean(raw.approved),
+    active: Boolean(raw.active),
+    paused: Boolean(raw.paused),
+    approved_at: typeof raw.approved_at === "string" ? raw.approved_at : null,
+    activated_at: typeof raw.activated_at === "string" ? raw.activated_at : null,
+    last_trade_seen_at: typeof raw.last_trade_seen_at === "string" ? raw.last_trade_seen_at : null,
+    last_trade_seen_hash: typeof raw.last_trade_seen_hash === "string" ? raw.last_trade_seen_hash : undefined,
+    processed_trade_hashes: Array.isArray(raw.processed_trade_hashes) ? raw.processed_trade_hashes.map((item) => String(item)) : [],
+    metrics_snapshot: normalizeObjectRecord(raw.metrics_snapshot),
+    performance_snapshot: normalizeObjectRecord(raw.performance_snapshot),
+    metadata: normalizeObjectRecord(raw.metadata),
+    created_at: typeof raw.created_at === "string" ? raw.created_at : undefined,
+    updated_at: typeof raw.updated_at === "string" ? raw.updated_at : undefined,
+    score: optionalNumber(raw.score) ?? undefined,
   };
 }
 
@@ -503,11 +560,15 @@ function normalizeWeatherCopytradeSummary(value: unknown): WeatherCopytradeSumma
     candidates: Array.isArray(raw.candidates)
       ? raw.candidates.map((item) => normalizeWeatherCopytradeCandidate(item)).filter((item): item is WeatherCopytradeCandidate => item !== null)
       : [],
+    profiles: Array.isArray(raw.profiles)
+      ? raw.profiles.map((item) => normalizeWeatherCopytradeProfile(item)).filter((item): item is WeatherCopytradeProfile => item !== null)
+      : [],
     state: normalizeWeatherCopytradeState(raw.state),
     report: normalizeWeatherCopytradeReport(reportSource) ?? null,
     selection_summary: normalizeObjectRecord(raw.selection_summary ?? runRecord?.selection_summary),
     scan_stats: normalizeObjectRecord(raw.scan_stats ?? runRecord?.scan_stats),
     metadata: normalizeObjectRecord(raw.metadata ?? runRecord?.metadata),
+    portfolio_constraints: normalizeObjectRecord(raw.portfolio_constraints),
   };
 }
 
@@ -910,17 +971,23 @@ export function DashboardClient() {
   const weatherSummary = state.weatherCopytradeSummary;
   const weatherRun = weatherSummary?.run ?? null;
   const weatherCandidates = [...(weatherSummary?.candidates ?? [])].sort((a, b) => a.rank - b.rank || b.score - a.score);
+  const weatherProfiles = [...(weatherSummary?.profiles ?? [])].sort(
+    (a, b) => Number(b.active) - Number(a.active) || Number(a.paused) - Number(b.paused) || (b.score ?? 0) - (a.score ?? 0),
+  );
   const weatherState = weatherSummary?.state ?? null;
-  const weatherSelected =
-    weatherCandidates.find((candidate) => candidate.proxy_wallet === weatherState?.selected_proxy_wallet) ??
-    weatherCandidates.find((candidate) => candidate.selected) ??
-    (weatherCandidates.length > 0 ? weatherCandidates[0] : null);
   const weatherReport = weatherSummary?.report ?? weatherState?.report ?? weatherRun?.model_summary ?? null;
   const weatherMetrics = state.weatherCopytradeMetrics ?? null;
+  const weatherConstraints = normalizeRecord(weatherSummary?.portfolio_constraints) ?? {};
   const weatherCopyTradeFraction = optionalNumber(
-    normalizeRecord(weatherRun?.metadata)?.copy_trade_fraction ?? normalizeRecord(weatherState?.metadata)?.copy_trade_fraction,
+    weatherConstraints.copy_trade_fraction ??
+      normalizeRecord(weatherRun?.metadata)?.copy_trade_fraction ??
+      normalizeRecord(weatherState?.metadata)?.copy_trade_fraction,
   );
-  const weatherBusyLabel = weatherActionBusy ? "WORKING" : weatherState?.active ? "ACTIVE" : weatherState?.paused ? "PAUSED" : "IDLE";
+  const weatherPerTradeLimit = optionalNumber(weatherConstraints.per_trade_limit_usd);
+  const weatherActiveProfilesCount = Math.trunc(optionalNumber(weatherConstraints.active_profiles_count) ?? weatherProfiles.filter((profile) => profile.active && !profile.paused).length);
+  const weatherOpenPositionsCount = Math.trunc(optionalNumber(weatherConstraints.open_positions_count) ?? 0);
+  const weatherSelected = weatherProfiles[0] ?? null;
+  const weatherBusyLabel = weatherActionBusy ? "WORKING" : weatherActiveProfilesCount > 0 ? "ACTIVE" : weatherState?.paused ? "PAUSED" : "IDLE";
 
   async function refreshWeatherCopytrade() {
     setWeatherActionNote(null);
@@ -928,7 +995,7 @@ export function DashboardClient() {
   }
 
   async function handleWeatherAction(
-    action: "run" | "approve" | "pause" | "resume",
+    action: "run" | "approve" | "pause" | "resume" | "pause-profile" | "resume-profile" | "remove-profile",
     payload: Record<string, unknown> = {},
   ) {
     setWeatherActionBusy(true);
@@ -946,6 +1013,15 @@ export function DashboardClient() {
       } else if (action === "resume") {
         await postJson("/weather-copytrade/pause", { paused: false });
         setWeatherActionNote("Copytrade reativado.");
+      } else if (action === "pause-profile") {
+        await postJson("/weather-copytrade/profile/pause", { paused: true, ...payload });
+        setWeatherActionNote("Perfil pausado.");
+      } else if (action === "resume-profile") {
+        await postJson("/weather-copytrade/profile/pause", { paused: false, ...payload });
+        setWeatherActionNote("Perfil reativado.");
+      } else if (action === "remove-profile") {
+        await postJson("/weather-copytrade/profile/remove", payload);
+        setWeatherActionNote("Perfil removido da carteira de copytrade.");
       }
       await refreshWeatherCopytrade();
     } catch (error) {
@@ -1070,6 +1146,109 @@ export function DashboardClient() {
                   <div>no cancellation data yet</div>
                 )}
               </div>
+            </div>
+          </div>
+          <div className="mt-4 grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
+            <div className="border border-poly-border bg-poly-black p-4 font-mono text-[10px] text-poly-dim">
+              <div className="uppercase tracking-[0.2em]">Risco da carteira</div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Limite/trade</div>
+                  <div className="mt-1 text-poly-green">{weatherPerTradeLimit != null ? asCurrencySigned(weatherPerTradeLimit) : "-"}</div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Regra ativa</div>
+                  <div className="mt-1 text-poly-cyan">2% da banca</div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Perfis ativos</div>
+                  <div className="mt-1 text-poly-green">{weatherActiveProfilesCount}</div>
+                </div>
+                <div className="border border-poly-border px-3 py-2">
+                  <div className="uppercase">Posicoes abertas</div>
+                  <div className="mt-1 text-poly-cyan">{weatherOpenPositionsCount}</div>
+                </div>
+              </div>
+            </div>
+            <div className="border border-poly-border bg-poly-black p-4">
+              <div className="flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.2em] text-poly-dim">
+                <span>Perfis que estou copiando</span>
+                <span className="text-poly-cyan">{weatherProfiles.length}</span>
+              </div>
+              {weatherProfiles.length > 0 ? (
+                <div className="mt-3 overflow-x-auto">
+                  <table className="min-w-full border-collapse font-mono text-[10px] text-poly-dim">
+                    <thead>
+                      <tr className="border-b border-poly-border text-left uppercase tracking-[0.14em] text-poly-muted">
+                        <th className="px-2 py-2">Usuario</th>
+                        <th className="px-2 py-2">Wallet</th>
+                        <th className="px-2 py-2">Score</th>
+                        <th className="px-2 py-2">PnL 30d</th>
+                        <th className="px-2 py-2">Win rate</th>
+                        <th className="px-2 py-2">PF</th>
+                        <th className="px-2 py-2">DD</th>
+                        <th className="px-2 py-2">Status</th>
+                        <th className="px-2 py-2">Ordens</th>
+                        <th className="px-2 py-2">PnL copy</th>
+                        <th className="px-2 py-2">Ultimo sync</th>
+                        <th className="px-2 py-2">Acoes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {weatherProfiles.map((profile) => {
+                        const metrics = normalizeRecord(profile.metrics_snapshot) ?? {};
+                        const performance = normalizeRecord(profile.performance_snapshot) ?? {};
+                        const metadata = normalizeRecord(profile.metadata) ?? {};
+                        const lastSync = typeof metadata.last_sync_at === "string" ? metadata.last_sync_at : profile.updated_at;
+                        const isPaused = Boolean(profile.paused);
+                        return (
+                          <tr key={profile.proxy_wallet} className="border-b border-poly-border/60 align-top">
+                            <td className="px-2 py-2 text-poly-text">{profile.user_name}</td>
+                            <td className="max-w-[180px] break-all px-2 py-2 text-poly-muted">{profile.proxy_wallet}</td>
+                            <td className="px-2 py-2 text-poly-cyan">{profile.score != null ? profile.score.toFixed(2) : "-"}</td>
+                            <td className="px-2 py-2">{optionalNumber(metrics.pnl_30d ?? metrics.pnl30d) != null ? asCurrencySigned(numberOr(metrics.pnl_30d ?? metrics.pnl30d)) : "-"}</td>
+                            <td className="px-2 py-2">{optionalNumber(metrics.win_rate ?? metrics.winRate) != null ? asPercent(numberOr(metrics.win_rate ?? metrics.winRate)) : "-"}</td>
+                            <td className="px-2 py-2">{optionalNumber(metrics.profit_factor ?? metrics.profitFactor) != null ? numberOr(metrics.profit_factor ?? metrics.profitFactor).toFixed(2) : "-"}</td>
+                            <td className="px-2 py-2">{optionalNumber(metrics.max_drawdown ?? metrics.maxDrawdown) != null ? asPercent(numberOr(metrics.max_drawdown ?? metrics.maxDrawdown)) : "-"}</td>
+                            <td className="px-2 py-2">
+                              <span className={isPaused ? "text-poly-amber" : "text-poly-green"}>{isPaused ? "paused" : "active"}</span>
+                            </td>
+                            <td className="px-2 py-2">{optionalNumber(performance.orders ?? performance.order_count) != null ? numberOr(performance.orders ?? performance.order_count) : "-"}</td>
+                            <td className={`px-2 py-2 ${numberOr(performance.realized_pnl ?? performance.realized_pnl_window) >= 0 ? "text-poly-green" : "text-poly-red"}`}>
+                              {optionalNumber(performance.realized_pnl ?? performance.realized_pnl_window) != null ? asCurrencySigned(numberOr(performance.realized_pnl ?? performance.realized_pnl_window)) : "-"}
+                            </td>
+                            <td className="px-2 py-2">{lastSync ? new Date(lastSync).toLocaleString() : "-"}</td>
+                            <td className="px-2 py-2">
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  disabled={weatherActionBusy}
+                                  onClick={() => void handleWeatherAction(isPaused ? "resume-profile" : "pause-profile", { proxy_wallet: profile.proxy_wallet, paused: !isPaused })}
+                                  className="border border-poly-amber px-2 py-1 text-[9px] uppercase text-poly-amber transition hover:bg-poly-amber hover:text-poly-black disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  {isPaused ? "Retomar" : "Pausar"}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={weatherActionBusy}
+                                  onClick={() => void handleWeatherAction("remove-profile", { proxy_wallet: profile.proxy_wallet })}
+                                  className="border border-poly-red px-2 py-1 text-[9px] uppercase text-poly-red transition hover:bg-poly-red hover:text-poly-black disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  Remover
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="mt-3 border border-dashed border-poly-border px-3 py-4 text-center font-mono text-[10px] text-poly-dim">
+                  nenhum perfil em copytrade ainda
+                </div>
+              )}
             </div>
           </div>
         </section>
@@ -1208,24 +1387,11 @@ export function DashboardClient() {
               </button>
               <button
                 type="button"
-                disabled={weatherActionBusy || !weatherSelected}
-                onClick={() =>
-                  void handleWeatherAction("approve", {
-                    run_id: weatherRun?.run_id,
-                    proxy_wallet: weatherSelected?.proxy_wallet,
-                  })
-                }
-                className="border border-poly-green px-3 py-1 text-poly-green transition hover:bg-poly-green hover:text-poly-black disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Aprovar e ativar
-              </button>
-              <button
-                type="button"
-                disabled={weatherActionBusy || !weatherState}
+                disabled={weatherActionBusy || weatherActiveProfilesCount === 0}
                 onClick={() => void handleWeatherAction(weatherState?.paused ? "resume" : "pause")}
                 className="border border-poly-amber px-3 py-1 text-poly-amber transition hover:bg-poly-amber hover:text-poly-black disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {weatherState?.paused ? "Retomar" : "Pausar"}
+                {weatherState?.paused ? "Retomar tudo" : "Pausar tudo"}
               </button>
             </div>
           </div>
@@ -1246,8 +1412,8 @@ export function DashboardClient() {
                   <div className="mt-1 text-poly-cyan">{weatherRun ? weatherRun.shortlisted_count : "-"}</div>
                 </div>
                 <div className="border border-poly-border px-3 py-2">
-                  <div className="uppercase">Selecionado</div>
-                  <div className="mt-1 text-poly-green">{weatherRun?.selected_user_name ?? weatherState?.selected_user_name ?? "-"}</div>
+                  <div className="uppercase">Perfis ativos</div>
+                  <div className="mt-1 text-poly-green">{weatherActiveProfilesCount}</div>
                 </div>
                 <div className="border border-poly-border px-3 py-2">
                   <div className="uppercase">Model</div>
@@ -1274,13 +1440,16 @@ export function DashboardClient() {
               </div>
               <div className="mt-3 flex flex-wrap gap-2 font-mono text-[9px] uppercase text-poly-dim">
                 <span className="border border-poly-border px-2 py-1">
-                  Approved: <span className={weatherState?.approved ? "text-poly-green" : "text-poly-red"}>{String(Boolean(weatherState?.approved))}</span>
+                  Approved: <span className={weatherActiveProfilesCount > 0 ? "text-poly-green" : "text-poly-red"}>{String(weatherActiveProfilesCount > 0)}</span>
                 </span>
                 <span className="border border-poly-border px-2 py-1">
-                  Active: <span className={weatherState?.active ? "text-poly-green" : "text-poly-red"}>{String(Boolean(weatherState?.active))}</span>
+                  Active: <span className={weatherActiveProfilesCount > 0 ? "text-poly-green" : "text-poly-red"}>{String(weatherActiveProfilesCount > 0)}</span>
                 </span>
                 <span className="border border-poly-border px-2 py-1">
                   Paused: <span className={weatherState?.paused ? "text-poly-amber" : "text-poly-green"}>{String(Boolean(weatherState?.paused))}</span>
+                </span>
+                <span className="border border-poly-border px-2 py-1">
+                  Open Positions: <span className="text-poly-cyan">{weatherOpenPositionsCount}</span>
                 </span>
               </div>
               {weatherActionNote ? (
@@ -1298,16 +1467,17 @@ export function DashboardClient() {
               <div className="mt-3 space-y-2">
                 {weatherCandidates.length > 0 ? (
                   weatherCandidates.slice(0, 6).map((candidate) => {
-                    const isSelected = candidate.proxy_wallet === weatherState?.selected_proxy_wallet || candidate.selected;
                     const metrics = normalizeRecord(candidate.metrics) ?? {};
                     const pnl30d = optionalNumber(metrics.pnl_30d ?? metrics.pnl30d);
                     const maxDrawdown = optionalNumber(metrics.max_drawdown ?? metrics.maxDrawdown);
                     const profitFactor = optionalNumber(metrics.profit_factor ?? metrics.profitFactor);
                     const trades30d = optionalNumber(metrics.trades_30d ?? metrics.trades30d);
+                    const status = candidate.status ?? (candidate.selected ? "already_copying" : candidate.passed === false ? "rejected" : "eligible");
+                    const isCopying = status === "already_copying";
                     return (
                       <div
                         key={`${candidate.proxy_wallet}-${candidate.rank}`}
-                        className={`border px-3 py-2 ${isSelected ? "border-poly-green bg-poly-green/5" : "border-poly-border bg-poly-surface-dim/20"}`}
+                        className={`border px-3 py-3 ${isCopying ? "border-poly-green bg-poly-green/5" : status === "rejected" ? "border-poly-red/40 bg-poly-red/5" : "border-poly-border bg-poly-surface-dim/20"}`}
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
@@ -1317,8 +1487,8 @@ export function DashboardClient() {
                             <div className="mt-1 break-all font-mono text-[9px] text-poly-muted">{candidate.proxy_wallet}</div>
                           </div>
                           <div className="text-right font-mono text-[10px]">
-                            <div className={isSelected ? "text-poly-green" : "text-poly-cyan"}>{candidate.score.toFixed(2)}</div>
-                            <div className="text-[9px] uppercase text-poly-dim">{isSelected ? "selected" : candidate.passed === false ? "rejected" : "candidate"}</div>
+                            <div className={isCopying ? "text-poly-green" : "text-poly-cyan"}>{candidate.score.toFixed(2)}</div>
+                            <div className="text-[9px] uppercase text-poly-dim">{isCopying ? "copiando" : status === "rejected" ? "rejected" : "eligible"}</div>
                           </div>
                         </div>
                         <div className="mt-2 grid gap-1 font-mono text-[9px] text-poly-dim">
@@ -1329,6 +1499,24 @@ export function DashboardClient() {
                             <span>pf {profitFactor != null ? profitFactor.toFixed(2) : "-"}</span>
                             <span>trades {trades30d != null ? trades30d : "-"}</span>
                           </div>
+                        </div>
+                        <div className="mt-3 flex items-center justify-between gap-2">
+                          <div className="font-mono text-[9px] uppercase text-poly-dim">
+                            {status === "rejected" ? "fora dos filtros" : isCopying ? "fluxo ativo" : "pronto para copiar"}
+                          </div>
+                          <button
+                            type="button"
+                            disabled={weatherActionBusy || status === "rejected" || isCopying || !weatherRun?.run_id}
+                            onClick={() =>
+                              void handleWeatherAction("approve", {
+                                run_id: weatherRun?.run_id,
+                                proxy_wallets: [candidate.proxy_wallet],
+                              })
+                            }
+                            className="border border-poly-green px-3 py-1 font-mono text-[9px] uppercase text-poly-green transition hover:bg-poly-green hover:text-poly-black disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {isCopying ? "Copiando" : "Copiar"}
+                          </button>
                         </div>
                       </div>
                     );

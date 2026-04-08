@@ -11,7 +11,13 @@ from core.cost_tracker import CostTracker
 from core.discovery_service import DiscoveryService
 from core.market_connector import MarketConnector
 from core.schemas import ModelSwapRequest
-from core.schemas import WeatherCopytradeApproveRequest, WeatherCopytradePauseRequest, WeatherCopytradeRunRequest
+from core.schemas import (
+    WeatherCopytradeApproveRequest,
+    WeatherCopytradePauseRequest,
+    WeatherCopytradeProfilePauseRequest,
+    WeatherCopytradeProfileRemoveRequest,
+    WeatherCopytradeRunRequest,
+)
 from core.settlement import SettlementService
 from core.weather_copytrade_service import WeatherCopytradeService
 
@@ -395,7 +401,11 @@ async def weather_copytrade_approve(req: WeatherCopytradeApproveRequest) -> dict
     context = get_context()
     service = WeatherCopytradeService(context)
     try:
-        return await service.approve_selection(run_id=req.run_id, proxy_wallet=req.proxy_wallet)
+        return await service.approve_selection(
+            run_id=req.run_id,
+            proxy_wallet=req.proxy_wallet,
+            proxy_wallets=req.proxy_wallets,
+        )
     finally:
         await service.close()
 
@@ -406,6 +416,36 @@ async def weather_copytrade_pause(req: WeatherCopytradePauseRequest) -> dict[str
     service = WeatherCopytradeService(context)
     try:
         return await service.pause(paused=req.paused)
+    finally:
+        await service.close()
+
+
+@app.get("/weather-copytrade/profiles")
+async def weather_copytrade_profiles() -> list[dict[str, object]]:
+    context = get_context()
+    service = WeatherCopytradeService(context)
+    try:
+        return await service.list_profiles()
+    finally:
+        await service.close()
+
+
+@app.post("/weather-copytrade/profile/pause")
+async def weather_copytrade_profile_pause(req: WeatherCopytradeProfilePauseRequest) -> dict[str, object]:
+    context = get_context()
+    service = WeatherCopytradeService(context)
+    try:
+        return await service.pause_profile(proxy_wallet=req.proxy_wallet, paused=req.paused)
+    finally:
+        await service.close()
+
+
+@app.post("/weather-copytrade/profile/remove")
+async def weather_copytrade_profile_remove(req: WeatherCopytradeProfileRemoveRequest) -> dict[str, object]:
+    context = get_context()
+    service = WeatherCopytradeService(context)
+    try:
+        return await service.remove_profile(proxy_wallet=req.proxy_wallet)
     finally:
         await service.close()
 

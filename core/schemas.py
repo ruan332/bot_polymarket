@@ -405,7 +405,17 @@ class WeatherCopytradeRunRequest(BaseModel):
 class WeatherCopytradeApproveRequest(BaseModel):
     run_id: str | None = None
     proxy_wallet: str | None = None
+    proxy_wallets: list[str] = Field(default_factory=list)
 
 
 class WeatherCopytradePauseRequest(BaseModel):
     paused: bool = True
+
+
+class WeatherCopytradeProfilePauseRequest(BaseModel):
+    proxy_wallet: str
+    paused: bool = True
+
+
+class WeatherCopytradeProfileRemoveRequest(BaseModel):
+    proxy_wallet: str
